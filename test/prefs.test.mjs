@@ -62,5 +62,133 @@ check('schema-3 defineDomain 挡下非法 domain 名 / 表名 / 接受 null 的 
     /不能接受 null/);
 });
 
+/* ②段：prefs domain 声明 */
+const { prefsDomain, PREF_KEYS, PREF_ROW_KEY, COLLECT_CADENCE, SOURCE_KEYS } =
+  await import('../lib/prefs/spec.js');
+
+check('prefs-1 domain 名合法且两张表', () => {
+  assert.equal(prefsDomain.name, 'sysops_prefs');
+  assert.equal(prefsDomain.version, 1);
+  assert.deepEqual(PREF_KEYS.slice().sort(), ['clean_rules', 'prefs']);
+  assert.deepEqual(Object.keys(prefsDomain.tables).sort(), ['clean_rules', 'prefs']);
+});
+
+check('prefs-2 prefs 记录：采样档位白名单、源开关三态、脏字段丢弃', () => {
+  const t = prefsDomain.tables.prefs.valueSchema;
+  const good = t.parse({ collect: { cadence: '1s', keepMinutes: 30 }, sources: { l0: true, l1a: false } });
+  assert.deepEqual(good.collect, { cadence: '1s', keepMinutes: 30 });
+  assert.equal(good.sources.l1b, undefined, '未声明的源不该被凭空补值');
+  assert.throws(() => t.parse({ collect: { cadence: '2s' } }), /cadence/);
+  assert.throws(() => t.parse({ sources: { l9: true } }), /l9/);
+  assert.throws(() => t.parse({ collect: { keepMinutes: 0 } }), /keepMinutes/);
+});
+
+check('prefs-3 prefs 记录：告警阈值、搜索通路、限定目录、null 与空数组的区别', () => {
+  const t = prefsDomain.tables.prefs.valueSchema;
+  const r = t.parse({ search: { walkDirs: [], port: 3417, esPath: 'D:\\tools\\es.exe' }, alerts: { cpu: { value: 85, consecutive: 3, cooldownSec: 600 } } });
+  assert.deepEqual(r.search.walkDirs, [], '用户主动清空必须存得下来（不等于从未写入）');
+  assert.equal(r.search.port, 3417, 'Task 16/17 与设置页都读这一键，进不了库就是假配置');
+  assert.equal(r.search.esPath, 'D:\\tools\\es.exe');
+  assert.throws(() => t.parse({ search: { port: 0 } }), /port/);
+  assert.throws(() => t.parse({ search: { port: 70000 } }), /port/);
+  assert.throws(() => t.parse({ search: { port: '3417' } }), /port/);
+  assert.throws(() => t.parse({ alerts: { cpu: { value: '85', consecutive: 3, cooldownSec: 60 } } }), /value/);
+  assert.throws(() => t.parse({ alerts: { cpu: { value: 85, consecutive: 0, cooldownSec: 60 } } }), /consecutive/);
+  assert.throws(() => t.parse({ alerts: { cpu: { value: 85, consecutive: 1, cooldownSec: 5 } } }), /cooldownSec/);
+});
+
+check('prefs-4 clean_rules：本机新增规则的形状，glob 必填、拒绝形状进库', () => {
+  const t = prefsDomain.tables.clean_rules.valueSchema;
+  const r = t.parse({ items: [{ id: 'u-1', n: '浏览器缓存', glob: 'C:\\Users\\gongj\\AppData\\Local\\Temp\\*', ageDays: 7 }], updatedAt: 1 });
+  assert.equal(r.items[0].glob, 'C:\\Users\\gongj\\AppData\\Local\\Temp\\*');
+  assert.equal(r.items[0].ageDays, 7);
+  assert.throws(() => t.parse({ items: [{ id: 'u-1', n: '缺 glob', ageDays: 1 }] }), /glob/);
+  assert.throws(() => t.parse({ items: [{ id: 'u-1', n: 'x', glob: 'C:\\a\\b\\*', ageDays: -3 }] }), /ageDays/);
+});
+
+/* ③段：store 行为（内存桩） */
+const { createPrefStore, PREFS_ERROR } = await import('../lib/prefs/store.js');
+
+function createMemoryFacility() {
+  const opened = new Map();
+  const disk = new Map(); // 关域再开，数据要还在 —— 桩每次重建空表会把这条测成假的
+  return {
+    async open(spec) {
+      if (opened.has(spec.name)) throw new Error('already-open');
+      let tables = disk.get(spec.name);
+      if (!tables) {
+        tables = new Map(Object.keys(spec.tables).map((n) => [n, new Map()]));
+        disk.set(spec.name, tables);
+      }
+      const domain = {
+        close() { opened.delete(spec.name); },
+        table(name) {
+          const store = tables.get(name);
+          if (!store) throw new Error(`未知表 ${name}`);
+          return {
+            get: (key) => store.get(key),
+            keys: () => [...store.keys()][Symbol.iterator](),
+            entries: () => [...store.entries()][Symbol.iterator](),
+            put: async (key, value) => { store.set(key, spec.tables[name].valueSchema.parse(value)); },
+            delete: async (key) => { store.delete(key); },
+          };
+        },
+      };
+      opened.set(spec.name, domain);
+      return domain;
+    },
+  };
+}
+
+const fresh = (over = {}) => {
+  // 判键在不在，不判值：`fresh({ facility: undefined })` 要的就是"宿主没有 storageDomain"，
+  // 用 `over.facility === undefined` 判会把它当成"没传"而塞进内存桩，prefs-9 就什么也没测到。
+  const facility = 'facility' in over ? over.facility : createMemoryFacility();
+  return createPrefStore({ getFacility: () => facility, now: () => 777, logger: { warn() {} }, ...over });
+};
+
+await checkAsync('prefs-5 readAll：从未写入返回 null，而不是 []', async () => {
+  const s = fresh();
+  const all = await s.readAll();
+  assert.deepEqual(all, { prefs: null, clean_rules: null });
+});
+
+await checkAsync('prefs-6 write 覆盖同 key（偏好的本职就是要被改）', async () => {
+  const s = fresh();
+  await s.write('prefs', { collect: { cadence: '1s' } });
+  await s.write('prefs', { collect: { cadence: '5s' } });
+  const back = await s.read('prefs');
+  assert.equal(back.collect.cadence, '5s');
+  assert.equal(back.updatedAt, 777, 'updatedAt 由仓储统一加盖');
+});
+
+await checkAsync('prefs-7 空数组能存下来，与 null 不是一回事', async () => {
+  const s = fresh();
+  await s.write('prefs', { search: { walkDirs: [] } });
+  const back = await s.read('prefs');
+  assert.deepEqual(back.search.walkDirs, []);
+});
+
+await checkAsync('prefs-8 未知 key 拒绝；writeMany 跳过未知键但不拖垮整批', async () => {
+  const s = fresh();
+  await assert.rejects(() => s.write('nope', {}), (e) => e.code === PREFS_ERROR.UNKNOWN_KEY);
+  const { written, skipped } = await s.writeMany({ prefs: { collect: { cadence: '1s' } }, nofix: {}, clean_rules: null });
+  assert.deepEqual(Object.keys(written), ['prefs']);
+  assert.deepEqual(skipped.sort(), ['clean_rules', 'nofix']);
+});
+
+await checkAsync('prefs-9 无 storageDomain 是降级不是异常：available=false 且读抛 UNAVAILABLE', async () => {
+  const s = fresh({ facility: undefined });
+  assert.equal(s.available, false);
+  await assert.rejects(() => s.readAll(), (e) => e.code === PREFS_ERROR.UNAVAILABLE);
+});
+
+await checkAsync('prefs-10 close() 必须可 await，且 close 后写报 CLOSED', async () => {
+  const s = fresh();
+  await s.write('prefs', { collect: { cadence: '1s' } });
+  await s.close();
+  await assert.rejects(() => s.write('prefs', { collect: { cadence: '5s' } }), (e) => e.code === PREFS_ERROR.CLOSED);
+});
+
 console.log(`\n  ${passed}/${passed + failed} 通过`);
 process.exit(failed ? 1 : 0);
