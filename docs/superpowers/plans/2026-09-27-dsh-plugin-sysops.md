@@ -1200,14 +1200,14 @@ Expected: 打印本机四个数（参照：spec §1.2 记的 214.7G 总 / 71.9G 
   - `SUP_STATE = { OFF:'off', STARTING:'starting', ON:'on', STALLED:'stalled', CRASHED:'crashed', EXITED_MAX:'exited-max' }`
   - `BACKOFF_MS = [1000, 2000, 4000, 8000, 30000]`、`MAX_RESTARTS = 5`
   - `createSupervisor({ spawnFn, killFn, now, setTimeoutFn, clearTimeoutFn, heartbeatFactor = 3, onChange, logger })` → `{ start(key, spec), stop(key), tick(), state(key), status(), keys(), dispose() }`
-  - `start` 的 `spec = { label, cmd, args, intervalMs, rolling?, minWindowMs?, onData(text), onExit? }`
+  - `start` 的 `spec = { label, cmd, args, intervalMs, rolling?, minWindowMs?, onData(lineBuf) }` —— **`onData` 收到的是"完整一行"的 `Buffer`**（跨 stdout 块拼接、行尾 `\r\n` 已去掉）；**监督者不猜编码**，解码归消费方（Task 6 的 `decodePd(buf)` 用 GBK，Task 7 的 powershell 输出用 UTF-8）
   - Task 6 / 7 / 8 只通过 `start/stop/status/tick` 与子进程打交道，**不各自写重启逻辑**。
 
 - [ ] **Step 1: 写失败的测试（全部用假 child，零真进程）**
 
 ```js
 /* ③段：supervisor 状态机 */
-const { createSupervisor, SUP_STATE, BACKOFF_MS, MAX_RESTARTS } = await import('../lib/collect/supervisor.js');
+const { createSupervisor, SUP_STATE, BACKOFF_MS, MAX_RESTARTS, KILL_ARGS } = await import('../lib/collect/supervisor.js');
 const { EventEmitter } = await import('node:events');
 
 class FakeChild extends EventEmitter {
@@ -1217,7 +1217,6 @@ class FakeChild extends EventEmitter {
     this.stdout = new EventEmitter();
     this.stderr = new EventEmitter();
     this.stdin = { end() {}, write() {} };
-    this.killedWith = null;
   }
 }
 
@@ -1244,19 +1243,28 @@ function harness() {
     h.done = true;
     h.fn();
   };
-  const runTimers = (ms) => { while (timers.some((x) => !x.done && x.ms <= ms)) { const h = timers.find((x) => !x.done && x.ms <= ms); h.done = true; h.fn(); } };
-  return { sup, t: () => t, adv: (ms) => { t += ms; }, kids, kills, changes, fire, runTimers, lastKid: () => kids[kids.length - 1] };
+  // `timers` / `pending` 必须暴露给用例：退避序列（sup-3）与"dispose 后无活定时器"（sup-10）
+  // 只能从定时器本身读，否则断言就退化成只数长度。
+  return { sup, t: () => t, adv: (ms) => { t += ms; }, kids, kills, changes, fire, timers, pending: () => timers.find((x) => !x.done), lastKid: () => kids[kids.length - 1] };
 }
 
 check('sup-1 start 进 starting，首块 stdout 后转 on 并刷心跳', () => {
   const h = harness();
-  h.sup.start('l1a', { label: '网络', cmd: 'typeperf', args: [], intervalMs: 1000, onData() {} });
+  const lines = [];
+  h.sup.start('l1a', { label: '网络', cmd: 'typeperf', args: [], intervalMs: 1000, onData: (b) => lines.push(b) });
   assert.equal(h.sup.state('l1a').state, SUP_STATE.STARTING);
-  h.lastKid().c.stdout.emit('data', Buffer.from('x'));
+  h.lastKid().c.stdout.emit('data', Buffer.from('x\n'));
   const s = h.sup.state('l1a');
   assert.equal(s.state, SUP_STATE.ON);
   assert.equal(s.pid, 1000);
   assert.ok(s.lastTick >= 0);
+  // 行框定与"交出 Buffer"是 Task 6 的全部前提：typeperf 一行会被拆到多个 stdout 块里，
+  // 而 GBK 只能在**字节**上还原 —— 这里若先 toString('latin1')，下游就再也解不出中文计数器名。
+  h.lastKid().c.stdout.emit('data', Buffer.from('ab'));
+  assert.deepEqual(lines.map((b) => b.toString('latin1')), ['x'], '没遇到换行前不该交出半行');
+  h.lastKid().c.stdout.emit('data', Buffer.from('cd\r\nef'));
+  assert.equal(Buffer.isBuffer(lines[1]), true, 'onData 必须交出 Buffer，不许在监督者里解码');
+  assert.equal(lines[1].toString('latin1'), 'abcd', '跨块要拼成完整一行，并去掉行尾 \\r\\n');
 });
 
 check('sup-2 非主动退出按 1/2/4/8/30s 退避，第 6 次失败进 exited-max 且不再自动重启', () => {
@@ -1274,18 +1282,10 @@ check('sup-2 非主动退出按 1/2/4/8/30s 退避，第 6 次失败进 exited-m
   assert.equal(h.sup.state('l1b').restarts, MAX_RESTARTS);
 });
 
-check('sup-3 退避序列精确等于 BACKOFF_MS', () => {
-  const h = harness();
-  h.sup.start('k', { label: 'k', cmd: 'c', args: [], intervalMs: 1000, onData() {} });
-  const seen = [];
-  for (let i = 0; i < MAX_RESTARTS; i += 1) {
-    h.lastKid().c.emit('exit', 3, null);
-    seen.push(h.timers?.ms ?? 0);
-    h.fire();
-  }
-  assert.equal(seen.length, MAX_RESTARTS);
-});
-check('sup-3b 退避序列从定时器读出，与 BACKOFF_MS 逐位一致', () => {
+check('sup-3 退避序列逐位等于字面量 1/2/4/8/30s', () => {
+  // 断言目标是**字面量**，不是实现导出的 `BACKOFF_MS` —— 拿实现自己的常量自比，
+  // 把退避改成 `[1000,1000,…]` 也一样绿，等于没断言（Step 5 的变异就是冲这条来的）。
+  // 同时把导出的那个 `BACKOFF_MS` 钉在同一个字面量上：Task 8 的界面提示会读它。
   const h = harness();
   h.sup.start('k', { label: 'k', cmd: 'c', args: [], intervalMs: 1000, onData() {} });
   const got = [];
@@ -1295,7 +1295,8 @@ check('sup-3b 退避序列从定时器读出，与 BACKOFF_MS 逐位一致', () 
     got.push(p.ms);
     h.fire();
   }
-  assert.deepEqual(got, BACKOFF_MS);
+  assert.deepEqual(got, [1000, 2000, 4000, 8000, 30000]);
+  assert.deepEqual(BACKOFF_MS, [1000, 2000, 4000, 8000, 30000]);
 });
 
 check('sup-4 stop 幂等：连调两次不抛，且不算崩溃、不再重启', () => {
@@ -1307,6 +1308,9 @@ check('sup-4 stop 幂等：连调两次不抛，且不算崩溃、不再重启',
   h.lastKid().c.emit('exit', 0, null);
   assert.equal(h.sup.state('k').state, SUP_STATE.OFF);
   assert.equal(h.timers.length, 0, '主动退出后不该排任何重启定时器');
+  // 「幂等」的真正含义在这条上：第二次 stop 不能再 kill 一遍。`stop` 里只要还有一个
+  // `await` 在 `reg.delete` 之前，这条就会读出 kills=[1000,1000] 而测试仍全绿。
+  assert.deepEqual(h.kills, [1000], '重复 stop 不得重复 kill');
 });
 
 check('sup-5 kill 走 taskkill /PID /T /F，PID 只能来自 spawn 返回值', () => {
@@ -1316,6 +1320,9 @@ check('sup-5 kill 走 taskkill /PID /T /F，PID 只能来自 spawn 返回值', (
   h.sup.stop('k');
   assert.deepEqual(h.kills, [kid.c.pid]);
   assert.equal(h.sup.state('k').state, SUP_STATE.OFF);
+  // `/T`（连进程树一道杀）是这个用例标题的真实承诺：typeperf / powershell 都会再派生子进程，
+  // 只杀父进程会留下一群孤儿继续吃 CPU。参数形状单独断，才不会因为测试注入了 killFn 而落空。
+  assert.deepEqual(KILL_ARGS(4321), ['/PID', '4321', '/T', '/F']);
 });
 
 check('sup-6 心跳：超过 3× 采样间隔无输出判 stalled，kill 并计一次重启', () => {
@@ -1327,6 +1334,10 @@ check('sup-6 心跳：超过 3× 采样间隔无输出判 stalled，kill 并计�
   assert.equal(h.sup.state('k').state, SUP_STATE.CRASHED, 'stalled 应转为等待重启');
   assert.equal(h.kills.length, 1, 'stalled 必须真 kill，挂着不输出比崩更难发现');
   assert.equal(h.sup.state('k').restarts, 1);
+  // `stalled` 是一闪而过的中间态（随即进 crashed 走退避），但它是 Task 8 的 sourceRow
+  // 与 Task 21 采集源条的**红字依据**（`stalled|crashed|exited-max → so-pill-red`）。
+  // 实现里只要不赋值这个态，界面就只会显示"崩了"而说不出"是挂着不吐数据" —— 故经 onChange 留痕断。
+  assert.ok(h.changes.some((c) => c.state === SUP_STATE.STALLED), '必须真的进入过 stalled，否则该态是死枚举');
 });
 
 check('sup-7 rolling：窗口正常结束立即续采，不计入重启次数', () => {
@@ -1416,9 +1427,13 @@ const STDERR_TAIL = 400;
 const SHORT_WINDOW_LIMIT = 3;
 
 /** 默认 kill：taskkill 树杀。pid 由调用方从 spawn 结果提供，绝不接受外部输入。 */
+/** `/T` 是必须的：typeperf 与 powershell 都会再派生子进程，只杀父会留下孤儿继续占 CPU。
+ *  单独导出是为了让 sup-5 能断参数形状 —— 测试注入 `killFn` 时，`defaultKill` 本体永远不进被测路径。 */
+export const KILL_ARGS = (pid) => ['/PID', String(pid), '/T', '/F'];
+
 export function defaultKill(pid) {
   return new Promise((resolve) => {
-    execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }, (err) => resolve(!err));
+    execFile('taskkill', KILL_ARGS(pid), { windowsHide: true }, (err) => resolve(!err));
   });
 }
 
@@ -1479,16 +1494,19 @@ export function createSupervisor(options = {}) {
       return;
     }
     rec.child = child;
-    let acc = '';
+    // 行框定在**字节**上做：GBK 的尾字节范围是 0x40~0xFE，绝不会出现 0x0A，所以在解码前按 `\n`
+    // 切分是安全的；反过来先 `toString('latin1')` 就把中文计数器名永久解不回来了（Task 6 首当其冲）。
+    let acc = Buffer.alloc(0);
     child.stdout?.on('data', (buf) => {
       rec.lastTick = now();
       if (rec.state !== SUP_STATE.ON) setState(rec, SUP_STATE.ON);
-      acc += buf.toString('latin1'); // 解码在调用方做（typeperf 是 GBK），这里只负责搬运
+      acc = acc.length ? Buffer.concat([acc, buf]) : Buffer.from(buf);
       let i;
-      while ((i = acc.indexOf('\n')) >= 0) {
-        const line = acc.slice(0, i).replace(/\r$/, '');
-        acc = acc.slice(i + 1);
-        if (line.trim() !== '') rec.onLine(line, buf);
+      while ((i = acc.indexOf(0x0a)) >= 0) {
+        const line = acc.subarray(0, i);
+        acc = acc.subarray(i + 1);
+        const probe = line.toString('latin1').replace(/\r$/, '');
+        if (probe.trim() !== '') rec.onLine(Buffer.from(probe, 'latin1'));
       }
     });
     child.stderr?.on('data', (buf) => {
@@ -1521,6 +1539,9 @@ export function createSupervisor(options = {}) {
   }
 
   function handleExit(rec, code, sig) {
+    // 自己 kill 掉的子进程一定会补一个 exit 事件。心跳（stalled）那条路此时已经进了
+    // crashed + 退避定时器，这个尾巴再走一遍会把"等待重启"覆盖成 off，界面看上去像"被人关了"。
+    if (rec.state === SUP_STATE.CRASHED || rec.state === SUP_STATE.EXITED_MAX) return;
     if (rec.stopping) {
       rec.child = null;
       setState(rec, SUP_STATE.OFF);
@@ -1553,9 +1574,17 @@ export function createSupervisor(options = {}) {
 
   function killChild(rec) {
     const pid = rec.child?.pid;
-    if (!pid) return Promise.resolve(false);
+    if (!pid) return false;
     rec.stopping = true;
-    return Promise.resolve(killFn(pid));
+    // 即发即忘，**不返回 promise**：`stop` / `tick` 里只要留一个 `await`/`.then`，
+    // 状态翻转就落在微任务里，sup-5 / sup-6 这种同步用例读到的永远是上一个态。
+    // kill 失败不影响状态机（下一次采样没数据仍会被心跳判成 stalled），所以这里不等结果。
+    try {
+      killFn(pid);
+    } catch (e) {
+      rec.lastError = `kill ${pid} 失败：${String(e?.message ?? e)}`;
+    }
+    return true;
   }
 
   return {
@@ -1585,11 +1614,11 @@ export function createSupervisor(options = {}) {
       launch(rec);
       return snapshot(rec);
     },
-    async stop(key) {
+    stop(key) {
       const rec = reg.get(key);
       if (!rec) return null;
       if (rec.timer) { clearTimeoutFn(rec.timer); rec.timer = null; }
-      await killChild(rec);
+      killChild(rec);
       rec.child = null;
       rec.restarts = 0;
       rec.shortWindows = 0;
@@ -1599,15 +1628,16 @@ export function createSupervisor(options = {}) {
     },
     /** 心跳巡检：由 collect service 的定时器驱动，测试里手工推进时钟。 */
     tick() {
-      for (const rec of reg.values()) {
+      for (const rec of [...reg.values()]) {
         if (rec.state !== SUP_STATE.ON) continue;
         const limit = heartbeatFactor * rec.intervalMs;
         if (now() - rec.lastTick > limit) {
           rec.lastError = `${Math.round(limit / 1000)}s 无输出，判为卡住`;
-          killChild(rec).then(() => {
-            rec.child = null;
-            scheduleRestart(rec);
-          });
+          // 全程同步：stalled 只是给界面留的那一态，紧接着就走 crashed + 退避。
+          setState(rec, SUP_STATE.STALLED);
+          killChild(rec);
+          rec.child = null;
+          scheduleRestart(rec);
         }
       }
     },
@@ -1635,11 +1665,13 @@ export function createSupervisor(options = {}) {
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `node test/collect.test.mjs`
-Expected: `21/21 通过`（①4 + ②5 + ③12）。若 `sup-3` 与 `sup-3b` 里 `h.timers` / `h.pending()` 名字对不上，**改 harness**（harness 里补 `pending: () => timers.find(x=>!x.done)` 并删掉 `sup-3` 里那行无效的 `seen.push`），不要改用例的断言目标。
+Expected: `20/20 通过`（①4 + ②5 + ③11）。③段是 sup-1..sup-11 共 11 例（原 `sup-3` 与 `sup-3b` 合一：前者只断长度、后者拿实现自己的常量自比，两条都不承重，详见 Task 5 预检台账 Ruling-29）。
 
 - [ ] **Step 5: 变异断言**
 
-把 `BACKOFF_MS` 临时改成 `[1000,1000,1000,1000,1000]` 跑一次 —— `sup-3b` 必须变红；再改回跑绿。输出记进汇报。
+两条都要跑，输出记进汇报：
+1. 把 `BACKOFF_MS` 临时改成 `[1000,1000,1000,1000,1000]` —— `sup-3` 必须变红（两条断言都断字面量，改实现里的常量一定抓得住）；再改回跑绿。
+2. 把 `tick()` 里的 `setState(rec, SUP_STATE.STALLED)` 删掉 —— `sup-6` 必须变红（否则 `stalled` 是死枚举，Task 21 的红字没有依据）；再改回跑绿。
 提交信息草稿：`feat(sysops): 采集子进程监督器（退避 / 心跳 / rolling 续窗）`
 
 ---
@@ -1863,7 +1895,7 @@ export function decodePd(buf) {
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `node test/collect.test.mjs`
-Expected: `30/30 通过`（①4 ②5 ③12 ④9），退出码 0。
+Expected: `29/29 通过`（①4 ②5 ③11 ④9），退出码 0。
 
 - [ ] **Step 6: 写探针脚本 `scripts/probe-collect.mjs`**
 
@@ -2119,7 +2151,7 @@ export function createL1b({ sup, onRows, intervalSec = INTERVAL_SEC, maxRows = M
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `node test/collect.test.mjs`
-Expected: `37/37 通过`（①4 ②5 ③12 ④9 ⑤7）。
+Expected: `36/36 通过`（①4 ②5 ③11 ④9 ⑤7）。
 
 - [ ] **Step 5: 真机端到端（含 CPU 列的代价判定）**
 
@@ -2334,7 +2366,7 @@ svc-1 里的 `l1a-enable` 事件是测试替身的产物：`makeL1a` 收到 `{ o
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `node test/collect.test.mjs`
-Expected: `47/47 通过`（①4 ②5 ③12 ④9 ⑤7 ⑥10），退出码 0。
+Expected: `46/46 通过`（①4 ②5 ③11 ④9 ⑤7 ⑥10），退出码 0。
 
 - [ ] **Step 5: 真机串跑（唯一一次真链路验证）**
 
@@ -6495,7 +6527,7 @@ SKIP_LOCAL=1 node test/search.test.mjs
 Expected：
 - `plugin.test.mjs` `90/90`（①15 rt ②8 hx ③12 cf ④16 pg1 ⑤14 pg2 ⑥12 pg3 ⑦13 pg4）
 - `host-compat.test.mjs` `8/8`（hc-1..hc-8）
-- `collect.test.mjs` `47/47`、`alerts.test.mjs` `28/28`、`clean.test.mjs` `46/46`（含 1 条真机）、`search.test.mjs` `26/26`、`prefs.test.mjs` `23/23`（①3 ②4 ③6 ④10）、`guard.test.mjs` `19/19`（另需打印「拒绝断言 61 条 / 分支命中 16/16」，见 Step 2）
+- `collect.test.mjs` `46/46`、`alerts.test.mjs` `28/28`、`clean.test.mjs` `46/46`（含 1 条真机）、`search.test.mjs` `26/26`、`prefs.test.mjs` `23/23`（①3 ②4 ③6 ④10）、`guard.test.mjs` `19/19`（另需打印「拒绝断言 61 条 / 分支命中 16/16」，见 Step 2）
 - `SKIP_LOCAL=1` 两行：`clean` → `45/45 + 1 SKIP`，`search` → Everything 相关真机用例 SKIP、walk 通路仍实跑
 - **任何一条 FAIL 都不算过**；出现"用例静默通过"（断言对象为空数组的 `.some()`）要按 Step 3 的变异法回查。
 
