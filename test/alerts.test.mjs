@@ -445,7 +445,10 @@ await checkAsync('alert-13 hits() 可用分支原样透传 list 的顺序与 lim
   assert.equal(r.rows.length, 2, 'limit 必须原样交给 store（假 store 吞掉 limit 就返回 3 条）');
   assert.equal(r.rows[0], w.appended[2], '行对象与顺序原样透传：倒序是 store 的契约，service 不重排不拷贝');
   assert.equal(r.rows[1], w.appended[1]);
-  // 同上，available=true 但 list() 抛错（域 open 失败）也必须落成 {rows,error,code} 而不是 rejection。
+});
+
+await checkAsync('alert-14 hits() 在 available=true 但 list() 抛错时降级，不甩 rejection', async () => {
+  // 造的是"宿主给了 storageDomain（available 仍 true），但记录域 open() 失败"这条真实降级路（store.js:66-81）。
   const bad = alertWorld({ listFails: true });
   assert.deepEqual(await bad.svc.hits({ limit: 5 }),
     { rows: [], error: '告警记录域 open 失败', code: 'RECORDS_UNAVAILABLE' },
