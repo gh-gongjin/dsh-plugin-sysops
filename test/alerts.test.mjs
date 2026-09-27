@@ -139,7 +139,7 @@ const { createMemoryFacility } = await import('./_helpers.mjs');
 const N = { info() {}, warn() {} };
 // 判键不判值：`mkStore({ facility: undefined })` 要的就是"宿主没给 storageDomain"，
 // 而默认形参会把 undefined 吃掉换成新桩 —— 沙箱现采：那种写法下 hit-3 第一条断言必红（available 反而是 true）。
-// 与 test/prefs.test.mjs:153 的 `fresh(over)` 同一手法。
+// 与 test/prefs.test.mjs ③段的 `fresh(over)` 同一手法（判名不判行号，搬桩挪段落都不会失效）。
 const mkStore = (over = {}) => {
   const facility = 'facility' in over ? over.facility : createMemoryFacility();
   return { facility, st: createAlertHitStore({ getFacility: () => facility, logger: N }) };
