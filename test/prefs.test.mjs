@@ -109,7 +109,9 @@ check('prefs-3 prefs 记录：告警阈值、搜索通路、限定目录、null 
 
 check('prefs-4 clean_rules：本机新增规则的形状，glob 必填、拒绝形状进库', () => {
   const t = prefsDomain.tables.clean_rules.valueSchema;
-  const r = t.parse({ items: [{ id: 'u-1', n: '浏览器缓存', glob: 'C:\\Users\\gongj\\AppData\\Local\\Temp\\*', ageDays: 7 }], updatedAt: 1 });
+  // 夹具补 `kind`：Task 11 把 kind 变成 items[] 必填字段（schema 演进），这是夹具随动，
+  // 三条拒绝路径与断言原样保留。
+  const r = t.parse({ items: [{ id: 'u-1', n: '浏览器缓存', glob: 'C:\\Users\\gongj\\AppData\\Local\\Temp\\*', ageDays: 7, kind: '缓存' }], updatedAt: 1 });
   assert.equal(r.items[0].glob, 'C:\\Users\\gongj\\AppData\\Local\\Temp\\*');
   assert.equal(r.items[0].ageDays, 7);
   assert.throws(() => t.parse({ items: [{ id: 'u-1', n: '缺 glob', ageDays: 1 }] }), /glob/);
@@ -178,6 +180,142 @@ await checkAsync('prefs-10 close() 必须可 await，且 close 后写报 CLOSED'
   await s.write('prefs', { collect: { cadence: '1s' } });
   await s.close();
   await assert.rejects(() => s.write('prefs', { collect: { cadence: '5s' } }), (e) => e.code === PREFS_ERROR.CLOSED);
+});
+
+/* ④段：内置规则库 + 本机规则仓储 */
+const guardMod = await import('../lib/clean/guard.js');
+const prefsMod = await import('../lib/prefs/spec.js');
+const CR = await import('../lib/clean/rules.js');
+const { createRuleStore, RULE_ERROR } = await import('../lib/prefs/rules-store.js');
+
+check('rules-1 内置库只收本机实测存在的路径（凭印象列路径 = 清单永远 0 命中）', () => {
+  assert.equal(CR.BUILTIN_RULES.length, 12); // WER 实测不存在，见 Step 3 下方的现采说明
+  for (const r of CR.BUILTIN_RULES) {
+    assert.ok(/^[a-z0-9._-]+$/.test(r.id), `规则 id 非法：${r.id}`);
+    assert.ok(CR.RULE_KINDS.includes(r.kind), `${r.id} 的 kind 不在表内：${r.kind}`);
+    assert.ok(r.readonly === true, '内置规则不可被用户改');
+    assert.ok(r.ageDays >= 0);
+  }
+  // 明确排除：实测不存在的 7 条不能混进来
+  const banned = ['Crashpad', 'NuGet', '.npm', '.pnpm-store', 'WeChat Runtime'];
+  for (const b of banned) {
+    assert.ok(!CR.BUILTIN_RULES.some((r) => r.dir.includes(b) || r.glob.includes(b)), `实测不存在的路径进了内置库：${b}`);
+  }
+  // DEFAULT_OFF 里的 id 必须真实存在：拼错一个字母 = 那条默认关永远关不上，且不会有任何报错
+  for (const id of CR.DEFAULT_OFF) {
+    assert.ok(CR.BUILTIN_RULES.some((r) => r.id === id), `DEFAULT_OFF 引用了不存在的内置规则 id：${id}`);
+  }
+});
+
+check('rules-2 每条内置规则的字面量与 glob 都能过 guard（自产规则先过红线）', () => {
+  const { check } = guardMod;
+  for (const r of CR.BUILTIN_RULES) {
+    const a = check(r.dir, { mode: 'path' });
+    assert.equal(a.allow, true, `${r.id} 的 dir 被 guard 拒了：${a.code} ${a.why}`);
+    const b = check(r.glob, { mode: 'glob' });
+    assert.equal(b.allow, true, `${r.id} 的 glob 被 guard 拒了：${b.code} ${b.why}`);
+  }
+});
+
+check('rules-3 enabledBuiltin 按 offIds 过滤，内置开关不改动常量表', () => {
+  const before = CR.BUILTIN_RULES.length;
+  const on = CR.enabledBuiltin([CR.BUILTIN_RULES[0].id]);
+  assert.equal(on.length, before - 1);
+  assert.equal(CR.BUILTIN_RULES.length, before);
+});
+
+check('rules-4 clean_rules 记录形状：off 是内置规则 id 数组，脏形状进不了库', () => {
+  const t = prefsMod.cleanRulesRecord;
+  const r = t.parse({ items: [], off: ['temp-user', 'npm-cache'], updatedAt: 1 });
+  assert.deepEqual(r.off, ['temp-user', 'npm-cache']);
+  assert.throws(() => t.parse({ items: [], off: 'temp-user' }), /off/);
+  assert.throws(() => t.parse({ items: [], off: [1] }), /off/);
+  // kind 必须在 schema 里声明：arrayOf 会丢未声明字段，丢了以后 validate() 会在每次读规则时抛错
+  const one = t.parse({ items: [{ id: 'u-1', n: 'x', glob: 'C:\\x\\*', ageDays: 1, kind: '缓存' }], off: [], updatedAt: 1 });
+  assert.equal(one.items[0].kind, '缓存', 'kind 没存住 = 被 arrayOf 静默丢字段');
+  assert.throws(() => t.parse({ items: [{ id: 'u-1', n: 'x', glob: 'C:\\x\\*', ageDays: 1 }], off: [], updatedAt: 1 }), /kind/);
+});
+
+const userRule = (over = {}) => ({
+  id: 'u-1', n: 'pnpm 未引用包', glob: 'C:\\Users\\gongj\\AppData\\Local\\pnpm\\store\\*',
+  ageDays: 30, kind: '缓存', ...over,
+});
+
+const ruleWorld = (over = {}) => {
+  // **判键在不在，不判值**：`ruleWorld({ facility: undefined })` 要的就是"宿主没有 storageDomain"，
+  // 写成 `over.facility === undefined ? 内存桩 : over.facility` 会把它当成"没传"而塞进内存桩，
+  // rules-10 就什么也没测到（③段 prefs-9 踩过同一处，注释在 `test/prefs.test.mjs:122-127`）。
+  const facility = 'facility' in over ? over.facility : createMemoryFacility();
+  const prefStore = createPrefStore({ getFacility: () => facility, now: () => 1000, logger: { warn() {} } });
+  return { prefStore, store: createRuleStore({ prefStore, logger: { warn() {} } }) };
+};
+
+await checkAsync('rules-5 新增本机规则：合法 glob 入库，返回归一化全量', async () => {
+  const w = ruleWorld();
+  const out = await w.store.add(userRule());
+  assert.equal(out.items.length, 1);
+  // updatedAt 是**行级**戳（record 只有行级），由 prefStore.write 盖；断成 items[0].updatedAt 会永远 undefined
+  assert.equal(out.updatedAt, 1000);
+  assert.equal(out.items[0].kind, '缓存', '走完整写-读一轮回来看 kind 存没存住');
+});
+
+await checkAsync('rules-6 命中红线的规则在**写入阶段**就被拒（不是执行阶段才失败）', async () => {
+  const w = ruleWorld();
+  for (const bad of [
+    'C:\\Windows\\Temp\\*',
+    'C:\\$Recycle.Bin\\S-1-5-21\\*',
+    'C:\\Program Files\\SomeApp\\*',
+    'C:\\Users\\gongj\\AppData\\Local\\Temp\\..\\..\\..\\*',
+    'C:\\Users\\gongj\\AppData\\Local\\**',
+  ]) {
+    await assert.rejects(
+      () => w.store.add(userRule({ glob: bad })),
+      (e) => e.code === RULE_ERROR.GUARD_DENY && e.why.length > 0,
+      `应拒绝写入：${bad}`,
+    );
+  }
+  const all = await w.store.list();
+  assert.equal(all.items.length, 0, '被拒的规则不得留半条');
+});
+
+await checkAsync('rules-7 展开名不采信：规则里的 glob 必须已展开成绝对路径', async () => {
+  const w = ruleWorld();
+  await assert.rejects(() => w.store.add(userRule({ glob: '%LOCALAPPDATA%\\pnpm\\*' })), (e) => e.code === RULE_ERROR.GUARD_DENY);
+});
+
+await checkAsync('rules-8 activeRules = 开启的内置 + 用户规则，按 guard 过滤后才交给扫描器', async () => {
+  const w = ruleWorld();
+  await w.store.add(userRule());
+  const rows = await w.store.activeRules();
+  // 从未写入过 ⇒ off 取 DEFAULT_OFF，所以「开着的内置」是 12 - DEFAULT_OFF.length，不是 12
+  assert.equal(rows.filter((r) => r.readonly).length, CR.BUILTIN_RULES.length - CR.DEFAULT_OFF.length);
+  assert.equal(rows.filter((r) => !r.readonly).length, 1);
+  assert.ok(rows.every((r) => r.glob && r.ageDays >= 0));
+});
+
+await checkAsync('rules-9 toggle 内置规则写入 off；remove 删用户规则，未知 id 报 UNKNOWN_ID', async () => {
+  const w = ruleWorld();
+  await w.store.add(userRule());
+  const first = CR.BUILTIN_RULES[0].id;
+  // 本例假设"首条内置规则默认是开的"；哪天它进了 DEFAULT_OFF，关-开两步就变成空操作而仍然全绿
+  assert.ok(!CR.DEFAULT_OFF.includes(first), `首条内置规则 ${first} 已默认关闭，本例失效`);
+  await w.store.toggle(first, false);
+  let all = await w.store.list();
+  // 从未写入时 off 以 DEFAULT_OFF 打底，所以断"包含"而不是断"等于那一条"
+  assert.deepEqual([...all.off].sort(), [...CR.DEFAULT_OFF, first].sort());
+  await w.store.toggle(first, true);
+  assert.deepEqual([...(await w.store.list()).off].sort(), [...CR.DEFAULT_OFF].sort());
+  await w.store.remove('u-1');
+  assert.equal((await w.store.list()).items.length, 0);
+  await assert.rejects(() => w.store.remove('u-404'), (e) => e.code === RULE_ERROR.UNKNOWN_ID);
+});
+
+await checkAsync('rules-10 存储不可用时 error 有值、activeRules 只剩内置（清理页仍可用，但看不到本机规则）', async () => {
+  const w = ruleWorld({ facility: undefined });
+  const rows = await w.store.activeRules();
+  // 同样减去默认关那两条：无库时读到的 off 就是 DEFAULT_OFF，不是空数组
+  assert.equal(rows.length, CR.BUILTIN_RULES.length - CR.DEFAULT_OFF.length);
+  assert.equal(w.store.error, RULE_ERROR.STORE_UNAVAILABLE);
 });
 
 console.log(`\n  ${passed}/${passed + failed} 通过`);
