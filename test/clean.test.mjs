@@ -399,5 +399,156 @@ await checkAsync('cln-真机-1 真遍历 %TEMP%：Task 11 的规则原样送进�
   assert.equal(r.skipped.some((s) => /GUARD/.test(s.code)), false, 'Task 11 过了红线的规则，不该被扫描器的第二道闸拦住（两道闸的口径必须一致）');
 });
 
+/* ②段：清单快照与执行留痕 */
+const { recordsDomain, PLAN_KEEP, LOG_KEEP } = await import('../lib/records/spec.js');
+const { createPlanStore } = await import('../lib/clean/plan-store.js');
+const { createLogStore, RECORDS_ERROR } = await import('../lib/clean/log-store.js');
+const { createMemoryFacility } = await import('./_helpers.mjs');
+
+// ①段只有 checkAsync；简报的 rec-1/rec-2 是同步断言，这里做一层薄包装复用同一套计数与失败打印。
+const check = (name, fn) => checkAsync(name, async () => fn());
+
+// 形状必须是 Task 12 扫描器的**真产物**：risk 是嵌套的 {level, why}。
+// 扁平的 riskLevel/riskWhy 是 plan-store 投影**之后**的样子（Ruling-71 T13-A）——
+// 夹具若直接写扁平，「save 不拍平 ⇒ 每条快照写入抛 RECORDS_INVALID」这个缺陷永远测不到。
+const itemFixture = (over = {}) => ({
+  id: 'temp-user-aG9tZQ', ruleId: 'temp-user', ruleName: '用户临时目录', kind: '缓存',
+  path: 'C:\\Users\\gongj\\AppData\\Local\\Temp\\old.log', size: 1000, count: 1,
+  atime: 1, mtime: 1, risk: { level: 'mid', why: '应用可能锁文件' }, ...over,
+});
+
+function recWorld(over = {}) {
+  // 判键不判值（同 `test/alerts.test.mjs` 的 mkStore）：`recWorld({ facility: undefined })`
+  // 要的就是"宿主没给 storageDomain"，写成三元判断会把"没设施"当成"默认给一个"。
+  const facility = 'facility' in over ? over.facility : createMemoryFacility();
+  let n = 0;
+  // 时钟必须会走（Ruling-71 T13-B）：冻结在 5000 时「按 at 数值升序」与「按 planId 字典序」
+  // 删掉的是同一条，rec-5 证不出裁剪究竟看了哪个字段。
+  const planStore = createPlanStore({ getFacility: () => facility, logger: { warn() {} }, now: (() => { let at = 4000; return () => (at += 1000); })(), newId: () => `p-${++n}` });
+  const logStore = createLogStore({ getFacility: () => facility, logger: { warn() {} }, now: () => 6000 });
+  return { facility, planStore, logStore, n: () => n };
+}
+
+const scanFixture = (items = [itemFixture()]) => ({
+  items, totals: { n: items.length, bytes: items.reduce((a, b) => a + b.size, 0) },
+  walked: 100, hit: items.length, skipped: [], stopped: false, truncated: false, at: 5000,
+});
+
+// rec-2 直接喂 schema，喂的必须是**投影之后**的扁平形状（`clean_plan.items[]` 声明的是
+// riskLevel/riskWhy，Ruling-71 T13-A）；嵌套 risk 是 save 的输入，由 rec-3 覆盖。
+const flatItemFixture = (over = {}) => {
+  const { risk, ...rest } = itemFixture(over);
+  return { ...rest, riskLevel: risk.level, riskWhy: risk.why };
+};
+
+check('rec-1 records 域三张表，domain 名不变（已有落盘数据）', () => {
+  assert.equal(recordsDomain.name, 'sysops_records');
+  assert.deepEqual(Object.keys(recordsDomain.tables).sort(), ['alert_hit', 'clean_log', 'clean_plan']);
+});
+
+check('rec-2 clean_plan schema：riskWhy 可缺，path 必须是字符串', () => {
+  const t = recordsDomain.tables.clean_plan.valueSchema;
+  assert.doesNotThrow(() => t.parse({ planId: 'p-1', at: 1, beforeFree: 1, modeDefault: 'delete-file', rulesUsed: [], items: [{ ...flatItemFixture(), riskWhy: undefined }], totals: { n: 1, bytes: 1 } }));
+  assert.throws(() => t.parse({ planId: 'p-1', at: 1, beforeFree: 1, modeDefault: 'delete-file', rulesUsed: [], items: [{ ...flatItemFixture(), path: 123 }], totals: { n: 1, bytes: 1 } }), /path/);
+});
+
+await checkAsync('rec-3 save 冻结快照：读回的路径与条数与扫描结果逐字一致', async () => {
+  const w = recWorld();
+  const plan = await w.planStore.save(scanFixture(), { beforeFree: 70 * 2 ** 30, modeDefault: 'delete-file' });
+  assert.equal(plan.items.length, 1);
+  const back = await w.planStore.get(plan.planId);
+  assert.equal(back.items[0].path, 'C:\\Users\\gongj\\AppData\\Local\\Temp\\old.log');
+  assert.equal(back.beforeFree, 70 * 2 ** 30);
+  assert.equal(back.rulesUsed.length, 1, 'rulesUsed 由 items 反推，界面「命中规则」列要用');
+  // 投影必须真的发生：写进去的是嵌套 risk，读回来必须是扁平名（Task 15/22 只认扁平名）
+  assert.equal(back.items[0].riskLevel, 'mid', 'save 没把嵌套 risk 拍平 ⇒ 读回来根本没有这个字段');
+  assert.equal(back.items[0].riskWhy, '应用可能锁文件');
+  assert.equal('risk' in back.items[0], false, 'record() 静默丢弃未声明字段，读回来不该再有 risk');
+});
+
+await checkAsync('rec-4 快照 append-only：同 planId 再写必须抛（清单不可被改写）', async () => {
+  const w = recWorld();
+  const plan = await w.planStore.save(scanFixture(), { beforeFree: 1, modeDefault: 'delete-file' });
+  await assert.rejects(
+    () => w.planStore.save({ ...scanFixture(), items: [] }, { beforeFree: 1, modeDefault: 'delete-file', planId: plan.planId }),
+    (e) => e.code === RECORDS_ERROR.DUPLICATE,
+  );
+});
+
+await checkAsync('rec-5 快照只留最近 20 段，第 21 段挤掉最旧', async () => {
+  const w = recWorld();
+  const ids = [];
+  for (let i = 0; i < 21; i++) ids.push((await w.planStore.save(scanFixture(), { beforeFree: i, modeDefault: 'delete-file' })).planId);
+  const list = await w.planStore.list({ limit: 50 });
+  assert.equal(list.length, PLAN_KEEP);
+  // list() 是**时间倒序**（与 hits() 同契约，alert-13 已把「倒序是 store 的契约」钉死）：
+  // 原稿在这里断 list[0] === ids[1]，把自家契约写反了 —— 见 Ruling-71 T13-E。
+  assert.equal(list[0].planId, ids[20], '倒序：第一条必须是最新的 p-21');
+  assert.equal(list[PLAN_KEEP - 1].planId, ids[1], '倒序：末条是剩余 20 条里最旧的 p-2');
+  assert.equal(await w.planStore.get(ids[0]), null, '最旧的 p-1 必须已被挤掉（这才是「裁最旧」的直接证据）');
+});
+
+await checkAsync('rec-6 log.start 立刻落一条 running 记录（中断后能查出「未确认完成」）', async () => {
+  const w = recWorld();
+  const log = await w.logStore.start({ planId: 'p-1', itemIds: ['a'], mode: 'delete-file' });
+  assert.equal(log.finishedAt, undefined);
+  assert.equal((await w.logStore.unfinished()).length, 1);
+});
+
+await checkAsync('rec-7 finish 补齐三档计数并写 afterFree；重复 finish 只保留第一次的完成时间', async () => {
+  const w = recWorld();
+  const log = await w.logStore.start({ planId: 'p-1', itemIds: ['a', 'b'], mode: 'delete-file' });
+  const done = await w.logStore.finish(log.logId, { ok: 1, skipped: 1, failed: 0, rejected: 0, bytesFreed: 512, afterFree: 71 * 2 ** 30 });
+  assert.equal(done.ok, 1);
+  assert.equal(done.finishedAt, 6000);
+  assert.equal((await w.logStore.unfinished()).length, 0);
+  const again = await w.logStore.finish(log.logId, { ok: 9, skipped: 0, failed: 0, rejected: 0, bytesFreed: 1, afterFree: 1 });
+  assert.equal(again.ok, 1, '留痕不能被第二次 finish 改写（append-only 语义）');
+});
+
+await checkAsync('rec-8 log 缺失 logId 报 NOT_FOUND；无 facility 报 UNAVAILABLE', async () => {
+  const w = recWorld();
+  await assert.rejects(() => w.logStore.finish('nope', { ok: 0, skipped: 0, failed: 0, rejected: 0, bytesFreed: 0, afterFree: 0 }), (e) => e.code === RECORDS_ERROR.NOT_FOUND);
+  const v = recWorld({ facility: undefined });
+  assert.equal(v.planStore.available, false);
+  await assert.rejects(() => v.logStore.start({ planId: 'p', itemIds: [], mode: 'delete-file' }), (e) => e.code === RECORDS_ERROR.UNAVAILABLE);
+});
+
+await checkAsync('rec-9 close() 可 await；close 后写报 CLOSED；跨 open 快照仍在', async () => {
+  const w = recWorld();
+  const plan = await w.planStore.save(scanFixture(), { beforeFree: 1, modeDefault: 'delete-file' });
+  await w.planStore.close();
+  await assert.rejects(() => w.planStore.save(scanFixture(), { beforeFree: 1, modeDefault: 'delete-file' }), (e) => e.code === RECORDS_ERROR.CLOSED);
+  const w2 = recWorld({ facility: w.facility });
+  assert.equal((await w2.planStore.get(plan.planId)).planId, plan.planId);
+});
+
+await checkAsync('rec-10 同一设施上多个仓储共用一个域：各自读写都可用，关一个不带走别人', async () => {
+  // Ruling-71 T13-D：sysops_records 里有三张表 = 三个 open 者（alert_hit 的 Task 9 仓储 + 本任务的两个），
+  // 而宿主契约写明「domain 名是排他的，重复 open 报 already-open」。没有登记表，Task 19 装配现场必炸。
+  const w = recWorld();
+  const plan = await w.planStore.save(scanFixture(), { beforeFree: 1, modeDefault: 'delete-file' });
+  const log = await w.logStore.start({ planId: plan.planId, itemIds: ['a'], mode: 'delete-file' });
+  assert.equal(plan.planId, 'p-1', 'planStore 先 open 并持有域');
+  assert.equal(typeof log.logId, 'string', 'logStore 复用的是登记表里那个 handle —— 它若自己 open 会在这里抛 UNAVAILABLE');
+  assert.equal((await w.logStore.unfinished()).length, 1);
+  assert.equal((await w.planStore.get(plan.planId)).planId, plan.planId, '两个仓储各自读写，互不干扰');
+  // 引用计数：还剩 logStore 持有，域必须活着 ⇒ planStore 自己进终态，但不许把域一起关掉
+  await w.planStore.close();
+  await assert.rejects(() => w.planStore.save(scanFixture(), { beforeFree: 1, modeDefault: 'delete-file' }),
+    (e) => e.code === RECORDS_ERROR.CLOSED, 'close 是该仓储的终态，与域是否关闭无关');
+  const done = await w.logStore.finish(log.logId, { ok: 1, skipped: 0, failed: 0, rejected: 0, bytesFreed: 1, afterFree: 2 });
+  assert.equal(done.ok, 1, 'planStore 关了不许把域关掉，否则这里报 UNAVAILABLE');
+  // 最后一个持有者关掉后名字释放：新实例复用同一设施能重新 open，且读到旧行
+  await w.logStore.close();
+  // 关闭侧也要有证据：这里换一层"只计数不改语义"的设施 —— 登记表里若没有真的 handle.close()
+  // （refs 降到 0 却没关域），下面这次 open 会撞 already-open（Ruling-71 T13-D 的关闭侧）。
+  let opens = 0;
+  const counting = { open: (d) => { opens += 1; return w.facility.open(d); } };
+  const w3 = recWorld({ facility: counting });
+  assert.equal((await w3.planStore.get(plan.planId)).planId, plan.planId, '关干净后重开，数据必须还在（介质权威）');
+  assert.equal(opens, 1, '最后一个持有者放手时必须真的关域 —— 否则域名字永远被占着');
+});
+
 console.log(`\n  ${passed}/${passed + failed} 通过`);
 process.exit(failed ? 1 : 0);
