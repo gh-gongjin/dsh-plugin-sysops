@@ -2960,15 +2960,30 @@ Expected（**这是候选实现在本机连跑 5 组的实测区间，不是猜�
 - Create: `lib/alerts/rules.js`
 - Create: `lib/alerts/spec.js`
 - Create: `lib/alerts/store.js`
-- Modify: `test/alerts.test.mjs`（本任务建文件，写 ①②段）
+- Create: `test/_helpers.mjs`（把 `test/prefs.test.mjs:121-150` 的 `createMemoryFacility` **原样搬过来**并 `export`；那是全仓库唯一的内存桩，两处共用只能有一处真相）
+- Modify: `test/prefs.test.mjs`（删掉本地定义，改成 `import { createMemoryFacility } from './_helpers.mjs';`。**用例条数与断言一字不动**：搬完 `prefs 13/13` 必须照旧绿，`grep -c "^check(\|^await checkAsync(" test/prefs.test.mjs` 的数字不许变）
+- Modify: `test/alerts.test.mjs`（本任务建文件，Step 1 写 ①②段，Step 5 追加 ③段）
 
 **Interfaces:**
 - Consumes: `kv-schema.js`、Task 3 的 `SOURCE_KEYS`
 - Produces:
-  - `DEFAULT_RULES`（5 条，与已确认原型逐字一致，见下）、`ruleState(rule, srcStates, now) → { dim, on, st }`
-  - `evaluate(rule, points, now, lastHitAt) → { ruleId, t, metric, value, note } | null`（纯函数，无 IO）
+  - `DEFAULT_RULES`（5 条，与已确认原型逐字一致，见下）、`ruleState(rule, srcStates) → { dim, on, st }`
+    —— **两个参数**：原稿第三个 `now` 从头到尾没人读，是死重量，别照抄（Ruling-53）
+  - `evaluate(rule, points, now, lastHitAt) → { ruleId, name, metric, t, value, note } | null`（纯函数，无 IO）
+    —— **`name` 是落库必填**（`alert_hit.name` 是 `requiredString`），返回形状里不许只带 `ruleId`
+  - `evaluateProc(rule, rows, now, lastHitAt = null) → 同上形状 | null`（吃 Task 7 的 `rows` 而不是时序点）
+    —— **必须排除 `pid === 0` 那一行**：它是 `_Total`/`Idle` 覆盖出来的聚合值，Task 7 真机实测 90–102%，
+    不排除则 r5 天天命中 `System Idle Process`（Ruling-54，落点见 Step 3）
   - `alertsDomain`（name `sysops_records`，version 1，tables `clean_plan` / `clean_log` / `alert_hit`；本任务只声明 `alert_hit` 所需字段，Task 13 补另两张表时对 `spec.js` 做**追加**式修改）
-  - `createAlertHitStore({ getFacility, logger, now })` → `{ available, list({limit}), append(hit) → row, close() }`（200 条环形裁剪）
+  - `RECORDS_ERROR = { UNAVAILABLE: 'RECORDS_UNAVAILABLE', INVALID: 'RECORDS_INVALID', CLOSED: 'RECORDS_CLOSED' }`
+    （与 `PREFS_ERROR` 同形：Task 18 按 `e.code` 分支，裸 Error 接不住）
+  - `createAlertHitStore({ getFacility, logger })` →（**没有 `now`**：行的 `t` 由 `evaluate`/`evaluateProc` 一侧给，
+    store 拿着也只是死重量）
+    `{ available, list({limit} = {}) → rows, append(hit) → row, close() }`
+    —— 200 条上限**按 `Number(v.t)` 数值排序裁剪，不许按 key 字典序**：`hitKey` 的时间前缀在假时钟下
+    `h-9-r1 > h-1000-r1`，按字典序会把最新那条裁掉（Ruling-55，hit-2 就是钉这个的）；
+    `close()` 是**终态**（`available` 转 false、再写抛 `RECORDS_CLOSED`，与 `lib/prefs/store.js:74-101` 同形，
+    本任务不加 `open()` —— 复活靠换新实例，hit-5 钉"记录在宿主域里不在实例内存里"）
   - `ALERT_METRICS = ['cpu','mem','diskFreePct','netDown','procCpu']`
 
 - [ ] **Step 1: 写失败的测试**
@@ -2994,14 +3009,14 @@ check('rule-1 内置 5 条规则，与原型文案逐字一致', () => {
 });
 
 check('rule-2 依赖源关闭 → dim，且 st 说清是依赖问题不是用户关的', () => {
-  const r = R.ruleState(R.DEFAULT_RULES[3], { ...SRC, l1a: 'off' }, 0);
+  const r = R.ruleState(R.DEFAULT_RULES[3], { ...SRC, l1a: 'off' });
   assert.equal(r.dim, true);
   assert.equal(r.on, false);
   assert.equal(r.st, '依赖的采集已关闭');
 });
 
 check('rule-3 用户关 → 不 dim，st 为「已暂停」', () => {
-  const r = R.ruleState({ ...R.DEFAULT_RULES[4], userOff: true }, SRC, 0);
+  const r = R.ruleState({ ...R.DEFAULT_RULES[4], userOff: true }, SRC);
   assert.equal(r.dim, false);
   assert.equal(r.st, '已暂停');
 });
@@ -3011,10 +3026,16 @@ const pts = (t0, step, vals) => vals.map((v, i) => ({ t: t0 + i * step, v }));
 const cpuRule = R.DEFAULT_RULES[0]; // ≥85 连续 3 次，冷却 600s
 
 check('rule-4 连续 N 次才报，差一次不报', () => {
-  assert.equal(R.evaluate(cpuRule, pts(0, 1000, [90, 91, 88]), 3000, null), null);
+  // 原稿这里写的是 [90, 91, 88] 却期望 null —— 三个点全 ≥85，`tail.every(breach)` 为真，
+  // 按 Step 3 的实现必然报。沙箱取证（p9probe）：原稿 9/10，红就在 rule-4。
+  // "差一次"要的是**尾部窗口里有一次不达标**，不是"数值看着不一样"。
+  assert.equal(R.evaluate(cpuRule, pts(0, 1000, [90, 91, 30]), 3000, null), null, '第 3 次掉到阈值下 ⇒ 连续不成立');
+  assert.equal(R.evaluate(cpuRule, pts(0, 1000, [90, 90, 90, 30, 30]), 5000, null), null,
+    '约定 1：连续 N 次看的是尾部 N 个点，不是历史上累计出现过 N 次');
   const hit = R.evaluate(cpuRule, pts(0, 1000, [90, 91, 92]), 3000, null);
   assert.equal(hit.ruleId, 'r1');
   assert.equal(hit.value, 92);
+  assert.equal(hit.name, 'CPU ≥ 85% 连续 3 次', 'name 是 alert_hit 的必填列，漏了它落库才炸');
   assert.equal(hit.t, 2000, '触发时刻是最后一个样本的时间，不是 now');
 });
 
@@ -3051,6 +3072,14 @@ check('rule-9 procCpu 是「单进程」判定：吃 rows 而不是时序点', (
   assert.equal(hit.value, 70);
   assert.equal(R.evaluateProc(r, [{ pid: 2, name: 'b', cpuPct: 10 }], 8000), null);
   assert.equal(R.evaluateProc(r, [{ pid: 3, name: 'c', cpuPct: null }], 8000), null, 'CPU 列降级后不得凭 null 判定');
+  // Task 7 的下游契约："pid 0 是聚合值行"这个排除动作归消费侧，落点就是这里。
+  assert.equal(R.evaluateProc(r, [{ pid: 0, name: 'System Idle Process', cpuPct: 95 }], 8000), null,
+    'pid 0 的 cpuPct 是 _Total/Idle 覆盖出的聚合值（真机 90–102%），不许报成"某进程吃满 60%"');
+  const after = R.evaluateProc(r, [{ pid: 0, name: 'Idle', cpuPct: 95 }, { pid: 7, name: 'x', cpuPct: 80 }], 8000);
+  assert.equal(after.note, 'x', '排除 pid 0 之后要继续扫下一行，不能整轮作废');
+  assert.equal(after.value, 80);
+  assert.equal(R.evaluateProc(r, [{ pid: null, name: 'y', cpuPct: 90 }], 8000).value, 90,
+    'pid 为 null 是"读不到 pid 的真进程"（Task 7 契约 number|null），不许当聚合行误伤');
 });
 
 check('rule-10 ALERT_METRICS 与 prefs.alerts 的五个键一致（Task 3 与这里只能有一处真相）', () => {
@@ -3133,7 +3162,9 @@ export function evaluate(rule, points, now, lastHitAt) {
 export function evaluateProc(rule, rows, now, lastHitAt = null) {
   if (!Array.isArray(rows) || rows.length === 0) return null;
   if (Number.isFinite(lastHitAt) && now - lastHitAt < rule.cooldownMs) return null;
-  const hit = rows.find((r) => Number.isFinite(r.cpuPct) && breach(rule, r.cpuPct));
+  // 只按 pid 排除，不按名字：pid 0 那行的 Name 取决于 _Total 与 Idle 谁后写进哈希表。
+  // pid 为 null 的行照判 —— 那是读不到 pid 的真进程，不是聚合值。
+  const hit = rows.find((r) => r.pid !== 0 && Number.isFinite(r.cpuPct) && breach(rule, r.cpuPct));
   if (!hit) return null;
   return { ruleId: rule.id, name: rule.n, metric: rule.metric, t: now, value: hit.cpuPct, note: hit.name };
 }
@@ -3147,7 +3178,8 @@ export function evaluateProc(rule, rows, now, lastHitAt = null) {
  * 与 `sysops_prefs` 分 domain 的理由同参照实现：这些不是"用户设的、要被覆盖的"，
  * 而是**事实**，写进去就不能改（除裁剪最旧）。
  */
-import { defineDomain, domainTable, record, requiredString, requiredNumber, requiredInt, optionalNumber, optionalString, optionalInt } from '../kv-schema.js';
+// 只 import 用得着的：requiredInt / optionalNumber / optionalInt 是 Task 13 那两张表的事，现在引了就是死引用
+import { defineDomain, domainTable, record, requiredString, requiredNumber, optionalString } from '../kv-schema.js';
 
 export const RECORD_DOMAIN = 'sysops_records';
 export const RECORD_VER = 1;
@@ -3173,16 +3205,27 @@ export const alertsDomain = defineDomain({
   },
 });
 
-/** 行 key：`h-<触发毫秒>-<规则id>`，同一规则同一毫秒不可能重复，够用且可排序。 */
+/**
+ * 行 key：`h-<触发毫秒>-<规则id>`，同一规则同一毫秒不会重复。
+ * **但别拿它排序**：字典序只在毫秒位数相同（真机 13 位）时等于时间序，假时钟下 `h-9-r1 > h-1000-r1`。
+ * 裁剪与 list 一律按 `Number(v.t)` 数值排（Ruling-55，hit-2 钉这条）。
+ */
 export const hitKey = (hit) => `h-${hit.t}-${hit.ruleId}`;
 ```
 
-`lib/alerts/store.js` —— `createAlertHitStore`：写队列串行 + `ensureDomain` 缓存（**照抄 `lib/prefs/store.js` 的这两段骨架**，不要重新发明），外加裁剪：
+`lib/alerts/store.js` —— `createAlertHitStore`：**骨架照抄 `lib/prefs/store.js:74-101`**（`assertUsable` 判 closed 与无设施、`ensureDomain` 缓存 open 的 promise 且失败时清缓存允许下次重试），不要重新发明；记录侧特有的部分逐条如下：
 
-```js
-/** 裁剪：put 之后按 key 字典序（时间前缀=字典序）保留最近 ALERT_HIT_MAX 条，最旧的 delete。 */
-```
-`list({limit = 50})` 按 `t` 倒序返回；`append(hit)` 生成 `hitId` 后 put，返回落库行；`available` getter 与 `PREFS_ERROR` 同形（复用同一套 code 字符串常量名 `RECORDS_*`）。
+- 导出 `RECORDS_ERROR = { UNAVAILABLE: 'RECORDS_UNAVAILABLE', INVALID: 'RECORDS_INVALID', CLOSED: 'RECORDS_CLOSED' }`，
+  错误对象与 `PrefStoreError` 同形（`e.code` + 中文 `e.message`）—— Task 18 只按 `code` 分支，裸 Error 接不住。
+- `append(hit)`（async）：`assertUsable` → **put 之前**用 `alertsDomain.tables.alert_hit.valueSchema.parse` 校验，
+  失败包成 `RECORDS_INVALID` 且 message 点名 `alert_hit.<字段>` → `hitId = hitKey(hit)` →
+  `put(hitId, { ...hit, hitId })` → 裁剪 → **返回落库行**（含 `hitId`，界面拿它当 key）。
+- 裁剪：`entries()` 全读，按 `Number(v.t)` **数值升序**，超出 `ALERT_HIT_MAX` 的最旧部分逐条 `delete(key)`。
+  原稿写的"按 key 字典序（时间前缀=字典序）"是错的，见上面 `hitKey` 那段注释。
+- `list({ limit = 50 } = {})`（async）：按 `Number(v.t)` 倒序，`t` 相同再按 `hitId` 倒序，`slice(0, limit)`。
+- `get available()` 与 `async close()` 跟 prefs 的两半**逐字同形**：`available` 探测的是"有设施且没 close 过"，
+  `close()` 是终态（置 closed、清 `opening`/`handle` 缓存、`await` 底层 close）。**本任务不加 `open()`**：
+  复活靠换新实例，hit-5 就是钉"记录在宿主域里、不在 store 实例的内存里"。
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -3191,15 +3234,112 @@ Expected: `10/10 通过`，退出码 0。
 
 - [ ] **Step 5: store 的内存桩用例（加进同一文件的 ③段）**
 
-再写 5 例（用 Task 3 的 `createMemoryFacility`，本任务把它提到 `test/_helpers.mjs` 供两处共用）：
-- `hit-1 append 后 list 倒序返回`
-- `hit-2 写满 201 条时最旧一条被裁掉，list 长度恒 ≤200`
-- `hit-3 无 facility 时 available=false 且 append 抛 `RECORDS_UNAVAILABLE``
-- `hit-4 脏记录（缺 ruleId）被 schema 挡在门外，抛错信息点名 `alert_hit.ruleId``
-- `hit-5 close() 后可重新 open（跨 open 数据仍在）`
+`test/_helpers.mjs` 导出 `createMemoryFacility()`（从 `test/prefs.test.mjs:121-150` 原样搬，`test/prefs.test.mjs` 改成 import；
+`prefs 13/13` 与它的 `check(` 计数 7+6=13 一字不动）。③段整段代码如下 —— 五例全是异步，**必须 `await checkAsync`**
+（Ruling-43：`check()` 挂 async 会在第一个 await 前就记 PASS，await 之后的断言永不承重）：
 
-实现这 5 例时把断言写全（不允许"类似上文"式省略）；`test/_helpers.mjs` 导出 `createMemoryFacility()`。
+```js
+/* ③段：alert_hit 仓储（内存桩，零真 IO） */
+const { createAlertHitStore, RECORDS_ERROR } = await import('../lib/alerts/store.js');
+const { ALERT_HIT_MAX, hitKey } = await import('../lib/alerts/spec.js');
+const { createMemoryFacility } = await import('./_helpers.mjs');
+
+const N = { info() {}, warn() {} };
+// 判键不判值：`mkStore({ facility: undefined })` 要的就是"宿主没给 storageDomain"，
+// 而默认形参会把 undefined 吃掉换成新桩 —— 沙箱现采：那种写法下 hit-3 第一条断言必红（available 反而是 true）。
+// 与 test/prefs.test.mjs:153 的 `fresh(over)` 同一手法。
+const mkStore = (over = {}) => {
+  const facility = 'facility' in over ? over.facility : createMemoryFacility();
+  return { facility, st: createAlertHitStore({ getFacility: () => facility, logger: N }) };
+};
+const hitRow = (t, ruleId = 'r1') => ({
+  ruleId,
+  name: 'CPU ≥ 85% 连续 3 次',
+  metric: 'cpu',
+  t,
+  value: 90,
+  note: '冷却 10 分钟 · 落点：监控页时间线',
+});
+
+await checkAsync('hit-1 append 后 list 倒序返回，且落库行带 hitId', async () => {
+  const { st } = mkStore();
+  assert.equal(st.available, true, '有设施就该报可用');
+  await st.append(hitRow(1000));
+  await st.append(hitRow(3000));
+  await st.append(hitRow(2000));
+  const rows = await st.list({ limit: 10 });
+  assert.deepEqual(rows.map((r) => r.t), [3000, 2000, 1000], '倒序 = 新的在前');
+  assert.equal(rows[0].hitId, hitKey(hitRow(3000)), 'hitId 由 hitKey 生成，界面拿它当 key');
+  assert.equal(rows[0].name, 'CPU ≥ 85% 连续 3 次', 'name 是必填列，evaluate 那边漏了这里就会炸');
+});
+
+await checkAsync('hit-2 写满 201 条时最旧一条被裁掉，list 长度恒 ≤200', async () => {
+  const { st } = mkStore();
+  // t 故意跨位数（9 → 209）：按 key 字典序裁剪会把 t=209 之外判错方向，
+  // `h-9-r1` 字典序大于 `h-10-r1` —— 这条用例就是逼实现按 Number(t) 排。
+  for (let i = 0; i < ALERT_HIT_MAX + 1; i += 1) await st.append(hitRow(9 + i));
+  const rows = await st.list({ limit: 500 });
+  assert.equal(rows.length, ALERT_HIT_MAX, `上限 ${ALERT_HIT_MAX} 条，多一条都得裁`);
+  assert.equal(rows[0].t, 209, '最新的那条必须留着');
+  assert.equal(rows[rows.length - 1].t, 10, 't=9 是最旧的，必须被裁掉');
+  assert.ok(!rows.some((r) => r.t === 9), '被裁的行不许还在');
+});
+
+await checkAsync('hit-3 无 facility 是降级不是异常：available=false 且读写抛 RECORDS_UNAVAILABLE', async () => {
+  const { st } = mkStore({ facility: undefined });
+  assert.equal(st.available, false);
+  await assert.rejects(() => st.append(hitRow(1000)), { code: RECORDS_ERROR.UNAVAILABLE });
+  await assert.rejects(() => st.list(), { code: RECORDS_ERROR.UNAVAILABLE });
+  // 给了设施但 open 失败：available 仍 true（它探测的是"宿主给没给设施"），但读抛带 code 的错误且保留原始 message
+  const w = mkStore({ facility: { open: () => Promise.reject(new Error('already open')) } });
+  assert.equal(w.st.available, true);
+  await assert.rejects(() => w.st.list(), { code: RECORDS_ERROR.UNAVAILABLE, message: /already open/ });
+  // open 失败不许被缓存成坏 promise：下次调用要重开一次（与 prefs 的 `opening = null` 同形）
+  let tries = 0;
+  const flaky = { open: () => { tries += 1; return Promise.reject(new Error('第 ' + tries + ' 次 open 失败')); } };
+  const f = mkStore({ facility: flaky }).st;
+  await assert.rejects(() => f.list(), { code: RECORDS_ERROR.UNAVAILABLE });
+  await assert.rejects(() => f.list(), { code: RECORDS_ERROR.UNAVAILABLE });
+  assert.equal(tries, 2, '两次读各敲一次 open —— 缓存住失败会让仓储永久瘫着');
+});
+
+await checkAsync('hit-4 脏记录（缺 ruleId）被 schema 挡在门外，抛错信息点名 alert_hit.ruleId', async () => {
+  const { st } = mkStore();
+  const dirty = hitRow(1000);
+  delete dirty.ruleId;
+  await assert.rejects(
+    () => st.append(dirty),
+    (e) => e.code === RECORDS_ERROR.INVALID && /alert_hit\.ruleId/.test(e.message),
+    '脏行必须落成带 code 的 INVALID，裸 Error 会让 Task 18 落进 default 分支',
+  );
+  assert.equal((await st.list({ limit: 10 })).length, 0, '被挡在门外的行不许留半条');
+});
+
+await checkAsync('hit-5 close() 是终态；换实例复用同一域仍读得到关前的行', async () => {
+  const w = mkStore();
+  await w.st.append(hitRow(1000));
+  await w.st.close();
+  assert.equal(w.st.available, false, '与 prefs 同形：close 过的实例不再报可用');
+  await assert.rejects(() => w.st.append(hitRow(2000)), { code: RECORDS_ERROR.CLOSED });
+  const again = createAlertHitStore({ getFacility: () => w.facility, logger: N });
+  assert.equal(again.available, true);
+  assert.deepEqual((await again.list({ limit: 10 })).map((r) => r.t), [1000],
+    '记录在宿主域里，不在 store 实例的内存里 —— 换实例不许把历史丢掉');
+});
+
+console.log(`\n  ${passed}/${passed + failed} 通过`);
+process.exit(failed ? 1 : 0);
+```
+
+Run: `node test/alerts.test.mjs` → Expected: `15/15 通过`，退出码 0（①3 + ②7 + ③5）。
+Run: `node test/prefs.test.mjs` → Expected: `13/13 通过`（搬走桩之后不许变）。
+
+**变异自证（写进报告，不许只说"覆盖到了"）**：① 把裁剪的排序键从 `Number(v.t)` 换成 `key` ⇒ hit-2 必须红；
+② 把 `assertUsable` 里 `closed` 那段摘掉 ⇒ hit-5 红；③ 把 `ensureDomain` 的失败清缓存（`opening = null`）摘掉 ⇒
+hit-3 最后一段红；④ 把 `append` 里的 `parse` 挪到 `put` 之后（或直接删掉）⇒ hit-4 红。四条各自 `git checkout --` 还原并 `git status --short` 证净。
+
 提交信息草稿：`feat(sysops): 告警阈值判定与触发历史（200 条环形裁剪）`
+
 ## Task 10: `lib/alerts/service.js` —— 评估编排 + 未读计数
 
 **Files:**
