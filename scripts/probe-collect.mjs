@@ -8,7 +8,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import { spawnSync, spawn } from 'node:child_process';
 import path from 'node:path';
-import { COUNTER_ARGS, decodePd } from '../lib/collect/l1a-typeperf.js';
+import { COUNTER_ARGS, WINDOW_SAMPLES, decodePd } from '../lib/collect/l1a-typeperf.js';
 
 const ms = (fn, rounds = 1) => {
   const t = process.hrtime.bigint();
@@ -28,7 +28,7 @@ console.log('\n== L1a ==');
 const cold = spawnSync('typeperf', [...COUNTER_ARGS, '-sc', '1'], { encoding: 'buffer', windowsHide: true });
 row('typeperf -sc 1 冷启动(ms)', ms(() => spawnSync('typeperf', [...COUNTER_ARGS, '-sc', '1'], { windowsHide: true }), 1).toFixed(0));
 const warm = ms(() => spawnSync('typeperf', [...COUNTER_ARGS, '-sc', '3'], { windowsHide: true }), 1);
-row(`typeperf -sc 3 整窗(ms)`, warm.toFixed(0), `减掉 3×1s 采样 ⇒ 暖身 ≈ ${(warm - 3000).toFixed(0)}ms / 窗（与"首行到达"那行互相印证），30 样本窗摊薄后 <1%`);
+row(`typeperf -sc 3 整窗(ms)`, warm.toFixed(0), `减掉 3×1s 采样 ⇒ 暖身 ≈ ${(warm - 3000).toFixed(0)}ms / 窗（与"首行到达"那行互相印证），摊到 ${WINDOW_SAMPLES} 样本窗占比 ${(((warm - 3000) / (WINDOW_SAMPLES * 1000)) * 100).toFixed(1)}%`);
 // 真机实测：typeperf 的 stdout 以 `0d 0a`（空行）起头，表头在第二个非空行 —— 直接取 [0] 会打印空白，
 // 那一行就等于什么都没测。取首个非空行并把它是不是表头如实标出来。
 const firstLine0 = decodePd(cold.stdout).split(/\r?\n/).find((l) => l.trim() !== '') ?? '';

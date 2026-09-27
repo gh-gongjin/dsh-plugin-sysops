@@ -412,5 +412,40 @@ check('tp-9 COUNTER_ARGS / 窗口参数是常量，界面文案要用它们而�
   assert.equal(L1A.INTERVAL_SEC, 1);
 });
 
+check('tp-10 l1a 门面：onData 收 Buffer、解码一次、下游抛错不外抛、disable 清表头', () => {
+  // createL1a 是 l1a 唯一有副作用的部分，没有用例就等于"与代码不符的陈述"。
+  const started = [];
+  const stops = [];
+  const sup = {
+    start: (key, spec) => started.push({ key, spec }),
+    stop: (k) => stops.push(k),
+    state: () => ({ state: 'on' }),
+  };
+  const pts = [];
+  const a = L1A.createL1a({
+    sup,
+    onPoint: (p) => {
+      if (p.metric === 'netUp' && p.v === 131074.5) throw new Error('boom-downstream');
+      pts.push(p);
+    },
+  });
+  a.enable();
+  assert.equal(started[0].key, 'l1a');
+  assert.equal(started[0].spec.rolling, true);
+  assert.deepEqual(started[0].spec.args.slice(-4), ['-sc', '30', '-si', '1']);
+  const feed = (s) => started[0].spec.onData(Buffer.from(s, 'latin1'));
+  feed(FIX[0]);
+  feed(FIX[3]);            // netDown 已入列，netUp 那一点抛错 —— 必须被吞下，不外抛
+  assert.deepEqual(pts.map((p) => p.metric), ['netDown']);
+  assert.equal(pts[0].v, 1048577.5);
+  feed(FIX[1]);            // 抛错之后的下一行仍要出数，不能整条流哑掉
+  assert.deepEqual(pts.map((p) => p.metric), ['netDown', 'netDown', 'netUp']);
+  assert.equal(a.state().state, 'on');
+  a.disable();
+  assert.deepEqual(stops, ['l1a']);
+  feed(FIX[1]);            // disable 后表头必须已清空：不许拿旧 index 去解新列布局
+  assert.equal(pts.length, 3);
+});
+
 console.log(`\n  ${passed}/${passed + failed} 通过`);
 process.exit(failed ? 1 : 0);
