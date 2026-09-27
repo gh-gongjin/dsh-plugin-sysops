@@ -3346,6 +3346,7 @@ hit-3 最后一段红；④ 把 `append` 里的 `parse` 挪到 `put` 之后（�
 - Create: `lib/alerts/service.js`
 - Modify: `lib/alerts/rules.js`（追加导出 `mergeRules`，不改已有函数体）
 - Modify: `test/alerts.test.mjs`（追加 ④段 `merge-*` 4 例、⑤段 `alert-*` 10 例；把末尾统计/exit 两行挪到最后）
+  > **执行后回填（2026-09-27 Task 10 修复轮）**：⑤段实际落地 **14 例**（`alert-1..alert-14`）。修复轮按评审 I-1..I-4 新增 `alert-11`（监听器抛错隔离）、`alert-12`（proc 冷却）、`alert-13`（`hits()` 透传顺序与 limit），控制器又按「一个用例只测一个行为」把降级分支从 `alert-13` 拆成独立的 `alert-14`。门禁随之从 `29/29` 变 **`33/33`**，下游任务的旁路读数一律以 33 为准。
 
 **Interfaces:**
 - Consumes: `DEFAULT_RULES` / `ruleState(rule, srcStates) → {dim,on,st}`（两参，Task 9 已收敛）/ `evaluate` / `evaluateProc`（Task 9）、`createAlertHitStore`（Task 9）、`collect.snapshot()` / `collect.onEvent(cb) → unsub`（Task 8）、`prefs.alerts`（Task 3 的 `threshold` 形状）
@@ -3666,8 +3667,8 @@ export function createAlertService({ collect, hitStore, getRulePrefs, logger, no
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `node test/alerts.test.mjs`
-Expected: `29/29 通过`（①②③段 15 条 = `rule-1..10` + `hit-1..5`，加 ④段 4 条 `merge-*`、⑤段 10 条 `alert-*`），退出码 0。
-`SKIP_LOCAL=1 node test/alerts.test.mjs` 同样 `29/29`（本文件无真机用例）。
+Expected: `33/33 通过`（①②③段 15 条 = `rule-1..10` + `hit-1..5`，加 ④段 4 条 `merge-*`、⑤段 **14** 条 `alert-*`（原稿 10，修复轮 +3、控制器拆例 +1，见 Ruling-70 上方回填）），退出码 0。
+`SKIP_LOCAL=1 node test/alerts.test.mjs` 同样 `33/33`（本文件无真机用例）。
 
 **必须自证的四条变异**（改一行、跑一次、`git checkout` 还原；报告里要贴每条的红点用例名）：
 1. 闸门 `!ruleState(rule, states).on` 换成 `.dim` → 红在 `alert-5`（用户关掉的规则仍在报）。
@@ -3999,7 +4000,7 @@ export function createRuleStore({ prefStore, logger }) {
 
 Run: `node test/prefs.test.mjs`
 Expected: `23/23 通过`（①3 ②4 ③6 ④10），退出码 0。
-旁路不许漂（同一轮现跑，不许引用上一轮）：`node test/alerts.test.mjs` → **29/29**；`node test/guard.test.mjs` → **19/19**；`SKIP_LOCAL=1 node test/collect.test.mjs` → **48/48**。
+旁路不许漂（同一轮现跑，不许引用上一轮）：`node test/alerts.test.mjs` → **33/33**；`node test/guard.test.mjs` → **19/19**；`SKIP_LOCAL=1 node test/collect.test.mjs` → **48/48**。
 
 - [ ] **Step 5: 真机复核内置规则确实命中条目（不是只存在目录）**
 
@@ -4041,14 +4042,25 @@ node tmp/t11probe.mjs > tmp/t11-probe.txt 2>&1
 - Create: `test/clean.test.mjs`（本任务建文件，写 ①段）
 
 **Interfaces:**
-- Consumes: `check`（Task 2）、`BUILTIN_RULES` 的 `rel` 形状（Task 11）、注入的 `fsMod` / `osMod`
+- Consumes: `check`（Task 2，**同步**函数）、Task 11 已经展开好的 `dir` / `glob`（内置库带绝对 `dir`+`glob`；**本机规则只有 `glob`，没有 `dir`** —— `cleanRulesRecord.items[]` 的形状是 id/n/glob/kind/ageDays/note，`activeRules()` 的断言只钉 `r.glob && r.ageDays>=0`）、注入的 `fsMod`
 - Produces:
-  - `expandRule(rule, { home }) → {…rule, dir, pattern}`（`rel` → 绝对路径；无 `rel` 时 `dir` 取 `glob` 的字面量前缀）
+  - `expandRule(rule, { home }) → {…rule, dir, pattern}`（`dir` 的取值优先级写死：**`rule.dir` > `path.dirname(rule.glob)` > `path.join(home, rel)`**；`pattern` 优先 `rule.pattern`，否则取 `glob` 最后一个 `\` 之后的段，段里没有 `*`/`?` 时取 `'*'`）
   - `globToRegExp(pattern) → RegExp`（只支持单层 `*` / `?`，`**` 直接抛 —— guard 已拒，这里是第二道）
   - `riskOf(rule) → { level: 'low'|'mid', why }`
-  - `createScanner({ fsMod, osMod, logger, now, onProgress, progressIntervalMs = 250, maxEntries = 200000, maxDepth = 12 })` → `{ scan(rules, opts?) → Promise<ScanResult>, stop() }`
+  - `createScanner({ fsMod, logger, now, onProgress, progressIntervalMs = 250, maxEntries = 200000, maxDepth = 12 })` → `{ scan(rules, opts?) → Promise<ScanResult>, stop() }`（**没有 `osMod`** —— 见 Ruling-69 的 C8）
   - `ScanResult = { items: [item], totals: { n, bytes }, walked, hit, skipped: [{dir, code, why}], stopped: boolean, truncated: boolean, at }`
   - `item = { id, ruleId, ruleName, kind, path, size, count, atime, mtime, risk: {level, why} }`（**清单快照的唯一数据源**，Task 13 冻结它，Task 15 只按 `item.id` 找回路径）
+
+> **Ruling-69（控制器预检裁定，2026-09-27 现采 `node tmp/t12probe.mjs` → `tmp/t12-probe.txt`）** —— 这一段的原稿与 Task 11（Ruling-66 的 D1）正面撞车，下面每一处改动都标了理由，执行者**按改后的写，别按直觉改回去**：
+>
+> - **C1 展开责任归属**：原稿 `expandRule` 无条件用 `path.join(home, rel)` 重算 `dir`，而 Task 11 导出的内置 rule **已经带绝对 `dir`**（重算会把 `os.homedir()` 的机器名再焊一遍，且 `rel` 在 cln-6 那种夹具里被故意置 `undefined`）；本机规则反过来**只有 `glob` 没有 `dir`**。所以取值顺序必须是 `dir` > `dirname(glob)` > `join(home, rel)`。现采：`path.dirname('C:\Users\gongj\AppData\Local\pnpm\store\*')` → `C:\Users\gongj\AppData\Local\pnpm\store`，送 `check(…, {mode:'path'})` = `allow=true`。
+> - **C2 guard 调用形态**：Task 2 的导出是**同步** `check(raw, opts)`，原稿的 `await guardCheck(...)` 那个名字不存在、`await` 是噪音。改成 `check(rule.dir, { mode: 'path' })`。现采：`C:\Windows\Temp`（正反斜杠都一样）→ `code=GUARD_SYSTEM_DIR` / `branch=b-system-dir`，所以 cln-6 的 `/GUARD/` 断言成立。**glob 的 `mode:'glob'` 复检不在本任务** —— Task 11 的 `validate()` 与 `activeRules()` 已经过那道，扫描器只补 `dir`，不要写出第二套红线口径。
+> - **C5 `atime` 口径由 cln-2 钉死**：条目 `atime` = 条目内文件 `atimeMs` 的**最大值**（=最近一次被动过），判定 `atime <= now - ageDays*DAY`。这不是"二选一"：**按 min 取值会让 cln-2 直接红**（`mixed` 的 `min=ago(40)` 能过 3 天线，而 cln-2 要求 `mixed` 不命中）。所以"整条都够老"= 条目内**最新**那个文件也够老。原稿 cln-3 断的 `ago(30)` 是 min，笔误，已改成 `ago(20)`。
+> - **C7 假时钟必须能推进**：冻结 `now: () => NOW` 下第一次 `NOW-0>=1000` 成立、之后 `lastEmit=NOW` 让 `NOW-NOW=0>=1000` 永假 ⇒ 恒 1 帧。原断言 `>0 && <60` 只挡得住"每条目都推"，挡不住"推一帧就不推了"。改成 `world()` 收 `opts.now` + 用例里每条 `every` 推进 1ms，下界提到 `>= 2`：不节流=3000 帧（红），只推一次=1 帧（红），双向都堵。
+> - **C8 删 `osMod`**：C1 之后 scanner 内部没有任何地方读 `os.homedir()`（内置带绝对 `dir`，本机规则走 `dirname(glob)`）。留着就是"看起来可注入、其实是死参"。`expandRule` 的 `{ home }` 参数**保留**（`rel` 兜底路径的唯一 home 来源，cln-1 就在测这条兜底）。
+> - **C10 `expandRule` 用 `node:path` 而不是注入的 `fsMod.join`**：它是模块级函数，拿不到 `createScanner` 的注入参数；cln-1 期望的带反斜杠 `dir` 正是 win32 `path.join` 的结果。
+> - **C11 形状错误不另立分支**：`dir` 既缺 `dir` 又缺 `glob` 又缺 `rel` 时送 `check(undefined,…)` → 现采 `code=GUARD_BAD_INPUT`（空串同），已经被 `skipped` 的 `/GUARD/` 通道接住。为它加 `code:'RULE_SHAPE'` 是第三条闸口，不写。
+
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -4120,8 +4132,7 @@ function world(entries, opts = {}) {
   const log = [];
   const sc = SC.createScanner({
     fsMod: fakeFs(entries, opts),
-    osMod: { homedir: () => 'C:/Users/gongj' },
-    now: () => NOW,
+    now: opts.now ?? (() => NOW),
     logger: { warn: (m) => log.push(m) },
     onProgress: (p) => progress.push(p),
     ...opts.scanner,
@@ -4129,10 +4140,18 @@ function world(entries, opts = {}) {
   return { sc, progress, log };
 }
 
-await checkAsync('cln-1 展开规则：rel → 绝对 dir，pattern 取 glob 末段', () => {
-  const r = SC.expandRule({ id: 'x', n: 'X', kind: '缓存', ageDays: 7, rel: 'AppData/Local/npm-cache', glob: 'C:\\Users\\gongj\\AppData\\Local\\npm-cache\\*' }, { home: 'C:\\Users\\gongj' });
-  assert.equal(r.dir, 'C:\\Users\\gongj\\AppData\\Local\\npm-cache');
-  assert.equal(r.pattern, '*');
+await checkAsync('cln-1 展开规则的三级取值：dir 原样 > glob 字面量前缀 > rel+home 兜底', () => {
+  // 优先级链的每一级都要钉：内置库走第一级（Task 11 已展开好），本机规则只有 glob 走第二级，
+  // 第三级是给"仓库外手写的规则形状"兜底（cln-真机-1 不走它，所以链必须在这里断全）。
+  const builtin = SC.expandRule({ id: 'b', n: 'B', kind: '缓存', ageDays: 3, dir: 'C:/Users/gongj/AppData/Local/Temp', glob: 'C:\\Users\\gongj\\AppData\\Local\\Temp\\*', rel: '这条不该被用' }, {});
+  assert.equal(builtin.dir, 'C:/Users/gongj/AppData/Local/Temp', '已展开好的 dir 不许被 rel 重算覆盖');
+  assert.equal(builtin.pattern, '*');
+  const user = SC.expandRule({ id: 'x', n: 'X', kind: '缓存', ageDays: 7, glob: 'C:\\Users\\gongj\\AppData\\Local\\npm-cache\\*' }, { home: 'C:\\Users\\gongj' });
+  assert.equal(user.dir, 'C:\\Users\\gongj\\AppData\\Local\\npm-cache', '本机规则只有 glob：dir 由 glob 的字面量前缀推');
+  assert.equal(user.pattern, '*');
+  const rel = SC.expandRule({ id: 'y', n: 'Y', kind: '缓存', ageDays: 7, rel: 'AppData/Local/pip/Cache' }, { home: 'C:\\Users\\gongj' });
+  assert.equal(rel.dir, 'C:\\Users\\gongj\\AppData\\Local\\pip\\Cache');
+  assert.equal(rel.pattern, '*', '没有通配段时 pattern 兜成 *');
 });
 
 await checkAsync('cln-2 只有整条都够老才算候选（半新半旧不整删）', async () => {
@@ -4151,7 +4170,7 @@ await checkAsync('cln-3 条目大小 = 递归求和，count = 文件数', async 
   const olddir = res.items.find((i) => i.path.replace(/\\/g, '/').endsWith('/olddir'));
   assert.equal(olddir.size, 5120);
   assert.equal(olddir.count, 2);
-  assert.equal(olddir.atime, ago(30), 'atime 取条目内最大值=最近一次动过（保守口径）');
+  assert.equal(olddir.atime, ago(20), 'atime 取条目内最大值=最近一次动过（保守口径；原稿这里的 ago(30) 是 min，与 cln-2 的 mixed 断言互斥 —— 见 Ruling-69 C5）');
 });
 
 await checkAsync('cln-4 totals 与 items 一致；walked 统计所有 stat 过的条目', async () => {
@@ -4190,9 +4209,14 @@ await checkAsync('cln-7 stop() 中途收手：stopped=true，已发现的部分�
 await checkAsync('cln-8 onProgress 按时间片节流（1s 推 60 帧会把 SSE 挤爆）', async () => {
   const entries = [{ path: 'C:/Users/gongj/AppData/Local/Temp', dir: true }];
   for (let i = 0; i < 3000; i++) entries.push({ path: `C:/Users/gongj/AppData/Local/Temp/f${i}`, size: 1, atimeMs: ago(9), mtimeMs: ago(9) });
-  const w = world(entries, { scanner: { progressIntervalMs: 1000 } });
-  await w.sc.scan([rule()]);
-  assert.ok(w.progress.length > 0 && w.progress.length < 60, `进度帧数=${w.progress.length}，应远小于条目数`);
+  let t = NOW;
+  const w = world(entries, { now: () => t, scanner: { progressIntervalMs: 1000 } });
+  // 假时钟必须能推进：每条条目 +1ms ⇒ 3000 条走完是 3000ms，1000ms 一片 ⇒ 约 3 帧。
+  // 冻结时钟下第一次 NOW-0>=1000 成立、之后 lastEmit=NOW 让 NOW-NOW=0>=1000 永假 ⇒ 恒 1 帧，
+  // 于是"推一帧就死"的错实现也能过 >0 的下界（Ruling-69 C7）。下界提到 >=2 才是双向堵：
+  // 不节流 = 3000 帧（红），只推一次 = 1 帧（红）。
+  await w.sc.scan([rule()], { every: () => { t += 1; } });
+  assert.ok(w.progress.length >= 2 && w.progress.length < 60, `进度帧数=${w.progress.length}，应远小于条目数且不止一帧`);
   assert.deepEqual(Object.keys(w.progress[0]).sort(), ['bytes', 'dir', 'hit', 'walked']);
 });
 
@@ -4218,16 +4242,21 @@ await checkAsync('cln-10 riskOf：浏览器/IM 缓存标 mid 并说明会被锁�
   assert.ok(SC.riskOf({ id: 'edge-cache', kind: '缓存' }).why.length > 0);
 });
 
-await checkAsync('cln-真机-1 真遍历 %TEMP%：至少跑通不抛，walked>0', async () => {
+await checkAsync('cln-真机-1 真遍历 %TEMP%：Task 11 的规则原样送进扫描器，walked>0', async () => {
   const fs = await import('node:fs');
-  const os = await import('node:os');
   const path = await import('node:path');
+  const { BUILTIN_RULES } = await import('../lib/clean/rules.js');
   const sc = SC.createScanner({
     fsMod: { readdirSync: fs.readdirSync, statSync: fs.statSync, join: path.join },
-    osMod: { homedir: os.homedir }, now: () => Date.now(), logger: { warn() {} }, onProgress() {},
+    now: () => Date.now(), logger: { warn() {} }, onProgress() {},
   });
-  const r = await sc.scan([SC.expandRule({ id: 'temp-user', n: '用户临时目录', kind: '缓存', ageDays: 0, rel: 'AppData/Local/Temp', glob: 'C:\\' }, { home: os.homedir() })]);
+  const temp = BUILTIN_RULES.find((r) => r.id === 'temp-user');
+  assert.ok(temp, '内置库里没有 temp-user —— 这条真机例钉的就是 Task 11 → Task 12 的交接面');
+  // **原样送，不再 expandRule 一遍、不把 glob 重拼成 rel+'/\*'**（原稿那么写正好把 C1 的撞车藏掉了）。
+  // ageDays 覆盖成 0 只为了保证有候选，不改 dir / glob。
+  const r = await sc.scan([{ ...temp, ageDays: 0 }]);
   assert.ok(r.walked > 0, `本机 %TEMP% 遍历条目数为 0，说明假 FS 掩盖了真错：${JSON.stringify(r.skipped)}`);
+  assert.equal(r.skipped.some((s) => /GUARD/.test(s.code)), false, 'Task 11 过了红线的规则，不该被扫描器的第二道闸拦住（两道闸的口径必须一致）');
 });
 
 console.log(`\n  ${passed}/${passed + failed} 通过`);
@@ -4243,16 +4272,16 @@ Expected: `ERR_MODULE_NOT_FOUND` 指向 `lib/clean/scanner.js`。
 
 要点（实现按这几条，别自由发挥）：
 
-- `expandRule`：`dir = path.join(home, rel)`（`rel` 用 `/` 写，join 时统一成平台分隔符）；`pattern` = `glob` 最后一个 `\` 之后的段（没有 `*`/`?` 时为 `'*'`）。
+- `expandRule`：按 Interfaces 里写死的三级取值 —— `dir = rule.dir ?? (rule.glob ? path.dirname(rule.glob) : rule.rel ? path.join(String(home ?? ''), ...String(rule.rel).split('/')) : undefined)`（**每一步都不许抛**：`home` 缺省时拼出的是相对串，交给 guard 以 `GUARD_NO_DRIVE` 拒，比在这里 `TypeError` 好查）。`pattern = rule.pattern ?? (有 glob 时取 glob 最后一个 `\` 之后的段，段里没有 `*`/`?` 则取 `'*'`；无 glob 无 pattern 也取 `'*'`)`。**这里用 `node:path` 的 `join`/`dirname`，不是注入的 `fsMod.join`**（模块级函数拿不到注入参数；Ruling-69 C10），win32 下 `path.join`/`dirname` 出来带反斜杠，cln-1 断的就是这个。
 - `globToRegExp`：逐字符转义除 `*` `?`，`*` → `[^\\/]*`，`?` → `[^\\/]`，整体 `^…$` + `i`；含 `**` 抛 `Error('不接受 **')`。
-- `scan(rules, { every })`：`for (const rule of rules)` 外层；每条规则先 `const g = await guardCheck(rule.dir)` —— **用 `check(rule.dir)` 而不是相信调用方筛过**（Task 6 之外的第二道，cln-6 靠它）；不通过 → `skipped.push({dir, code: g.code, why: g.why})` 并 `logger.warn`。
+- `scan(rules, { every })`：`for (const raw of rules)` 外层；先 `const rule = expandRule(raw, {})`（**传 `{}` 不是笔误** —— Task 11 的规则到这里都该有 `dir` 或 `glob`；真两个都没有，`path.join(undefined,…)` 出来的串会被 `check` 以 `GUARD_BAD_INPUT` 拒，正好落进同一道 skipped 通道，不另立形状错误分支，见 Ruling-69 C11），再 `const g = check(rule.dir, { mode: 'path' })` —— **同步调用、没有 `await`，导出名是 `check` 不是 `guardCheck`**（原稿那句 `await guardCheck(...)` 两头都不对）；这是 Task 11 之外的**第二道**闸，cln-6 靠它；不通过 → `skipped.push({dir: rule.dir, code: g.code, why: g.why})` 并 `logger.warn`。**glob 的 `mode:'glob'` 复检不在这里**：Task 11 的 `validate()` 与 `activeRules()` 已经过了，红线只有一套口径。
 - 遍历用显式栈（不用递归函数，深目录不吃栈）：栈元素 `{ path, depth }`。对规则目录的**第一层条目**建一个 candidate：`{ path, size, count, newest }`；层内更深的路径只累加不单独成条（cln-2/3 的语义）。
 - `every?.()` 在每个条目处理完后调用（cln-7 用它注入 `stop()`）；`this.stopped` 为真时 break 双层循环。
 - 时间片进度：`if (now() - lastEmit >= progressIntervalMs) { onProgress({ dir, walked, hit, bytes }); lastEmit = now(); }`。
 - `maxEntries`：`walked >= maxEntries` 时 `truncated = true`、`logger.warn('…达到条目上限…')`、停止下探但仍返回已收集结果。
 - `maxDepth`：超深度的目录 push 到 `skipped`，`code: 'DEPTH'`。
 - `atime` 口径：candidate 的 `atime` = 条目内文件 `atimeMs` 的**最大值**（最近一次被动过），判定用 `atime <= now - ageDays*DAY`。cln-3 断言的就是这个保守口径。
-- `riskOf(rule)`：`id` 含 `edge`/`wechat`/`dingtalk`/`vscode`/`packages` 或 `kind==='缓存'` → `mid`，`why` 用「运行中的应用会锁住部分文件，锁住的项会被跳过」；`崩溃转储`/`旧版本` → `low`，`why` 用「只影响事后分析或需重新下载」。`why` 直接进清单「风险」列。
+- `riskOf(rule)`：`id` 含 `edge`/`wechat`/`dingtalk`/`vscode`/`packages` 或 `kind==='缓存'` → `mid`，`why` 用「运行中的应用会锁住部分文件，锁住的项会被跳过」；`崩溃转储`/`旧版本` → `low`，`why` 用「只影响事后分析或需重新下载」。`why` 直接进清单「风险」列。**两张表都不命中的（用户自建规则的 kind/id 五花八门）默认 `mid`**，`why` 用「不在风险表内，请按目录用途自行确认」—— 不要默认 `low`：`low` 那句「只影响事后分析或需重新下载」对任意目录是一个做不了保证的假承诺，宁可多提示一次。
 - `item.id`：`<ruleId>-<base64url(path 小写)>`（用 `Buffer.from(p).toString('base64url')`，Task 13/15 只把它当不透明串）。
 - 目录 `ENOENT`（规则目录本身不存在）→ `skipped` 记 `ENOENT` 并继续下一条规则，**不抛**：本机没装 Edge 不是错误。
 
@@ -4265,18 +4294,39 @@ Expected: `11/11 通过` + 1 行 `SKIP cln-真机-1`。
 
 - [ ] **Step 5: 真机耗时实测（spec §1.2 的 7.3s 结论要跟着走）**
 
-```bash
-node --input-type=module -e "
-const fs=await import('node:fs'),os=await import('node:os'),path=path0=await import('node:path');
-const SC=await import('./lib/clean/scanner.js');const {BUILTIN_RULES}=await import('./lib/clean/rules.js');
-const t0=Date.now();
-const sc=SC.createScanner({fsMod:{readdirSync:fs.readdirSync,statSync:fs.statSync,join:path.join},osMod:{homedir:os.homedir},now:()=>Date.now(),logger:{warn(){}},onProgress:(p)=>{if(Date.now()-t0>2000&&p.walked%1===0){}}});
-const rules=BUILTIN_RULES.filter(r=>['temp-user','npm-cache','pip-cache','edge-cache'].includes(r.id)).map(r=>SC.expandRule({...r,glob:r.rel+'/*'},{home:os.homedir()}));
-const res=await sc.scan(rules);
-console.log('耗时ms',Date.now()-t0,'walked',res.walked,'items',res.totals.n,'bytes',Math.round(res.totals.bytes/2**20),'MB','skipped',res.skipped.length,'truncated',res.truncated);
-"
+**必须落成文件再跑，不许用 `node -e` / `node --input-type=module -e` 内联**：本机 bash 会吃脚本里的 `\` 转义（这是本仓库执行至今的硬约束），原稿那版还有个 `path=path0=await import(...)` 笔误，内联跑一次就炸一次。写 `tmp/t12perf.mjs`（`tmp/` 已在 `.gitignore` 里，不提交）：
+
+```js
+/* Task 12 Step 5：真机耗时实测。放在 tmp/ 下，所以 import 用 ../lib/... */
+const fs = await import('node:fs');
+const path = await import('node:path');
+const SC = await import('../lib/clean/scanner.js');
+const { BUILTIN_RULES } = await import('../lib/clean/rules.js');
+
+const ids = ['temp-user', 'npm-cache', 'pip-cache', 'edge-cache'];
+const rules = BUILTIN_RULES.filter((r) => ids.includes(r.id));
+if (rules.length !== ids.length) {
+  throw new Error(`内置库里缺规则：期望 ${ids.join(',')}，实得 ${rules.map((r) => r.id).join(',')}`);
+}
+
+const t0 = Date.now();
+const sc = SC.createScanner({
+  fsMod: { readdirSync: fs.readdirSync, statSync: fs.statSync, join: path.join },
+  now: () => Date.now(),
+  logger: { warn: (m) => console.error('WARN', m) },
+  onProgress: () => {},
+});
+const res = await sc.scan(rules);   // **原样送**：不 expandRule、不把 glob 重拼成 rel+'/*'
+console.log('规则', rules.map((r) => r.id).join(','));
+console.log('耗时ms', Date.now() - t0, 'walked', res.walked, 'items', res.totals.n,
+  'bytes', Math.round(res.totals.bytes / 2 ** 20) + 'MB',
+  'skipped', res.skipped.length, 'truncated', res.truncated, 'stopped', res.stopped);
+for (const s of res.skipped) console.log('SKIP', s.code, s.dir, s.why);
 ```
-Expected: 无异常退出；`walked` 与耗时同量级合理（4 条规则约几千~十几万条目）。若耗时 > 60s，把 `maxEntries` 默认值降到 100000 并在扫描条上显示「已达遍历上限」而不是让它跑到天荒地老。
+
+Run: `node tmp/t12perf.mjs > tmp/t12-perf.txt 2>&1`（中文经 cp936 控制台会乱码，读 `tmp/t12-perf.txt`）
+Expected: 退出码 0；`walked` 与耗时同量级合理 —— 同机现采的参照量级在 `tmp/t11-probe.txt`（`temp-user` 一层 6524 条目、`npm-cache` / `pip-cache` / `edge-cache` 各 2 条），4 条规则的遍历量应在几千到几万级。两条分支都写死：**耗时 > 60s** ⇒ 把 `maxEntries` 默认值降到 100000 并在扫描条上显示「已达遍历上限」，不许让它跑到天荒地老；**出现 `GUARD_*` 的 SKIP** ⇒ 说明扫描器这道闸与 Task 11 那道口径不一致（`cln-真机-1` 会先红在这里），改的是扫描器的取值，**不是**内置库的路径。把 `tmp/t12-perf.txt` 的实际读数写进汇报。
+
 提交信息草稿：`feat(sysops): 清理扫描器（整条够老才算候选 + 可停止 + 进度节流）`
 
 ---
@@ -4286,7 +4336,8 @@ Expected: 无异常退出；`walked` 与耗时同量级合理（4 条规则约�
 **Files:**
 - Rename: `lib/alerts/spec.js` → `lib/records/spec.js`（三张表齐了才看得出它不属于 alerts；`lib/alerts/store.js` 与 `test/alerts.test.mjs` 的 import 同步改）
 - Modify: `lib/records/spec.js`（追加 `clean_plan` / `clean_log` 两表）
-- Create: `lib/kv-records-base.js`（四段共用骨架工厂 —— 见下方 Ruling-63，第三/第四份复制禁止）
+- Create: `lib/kv-records-base.js`（四段共用骨架工厂 + **按设施去重的域打开登记表与引用计数关闭** —— 见下方 Ruling-63 与 Ruling-71 T13-D，第三/第四份复制禁止）
+- Modify: `lib/alerts/store.js`（**只改一处**：`ensureDomain()` 里那发 `facility.open(alertsDomain)` 改为经 `kv-records-base.js` 的登记表取 handle，`close()` 改为 `release()`。骨架、错误词表、写队列一律不动 —— Ruling-63 禁的是整体迁移，不是这一行的撞车修复）
 - Create: `lib/clean/plan-store.js`
 - Create: `lib/clean/log-store.js`
 - Modify: `test/clean.test.mjs`（追加 ②段）
@@ -4299,6 +4350,30 @@ Expected: 无异常退出；`walked` 与耗时同量级合理（4 条规则约�
   - plan 形状：`{ planId, at, beforeFree, afterFree, modeDefault, rulesUsed: [{id,n,kind}], items: [item…], totals }`
   - `createLogStore({ getFacility, logger, now })` → `{ available, start({planId, itemIds, mode}) → log, finish(logId, {ok, skipped, failed, rejected, bytesFreed, afterFree}) → log, list({limit}), unfinished() → log[], close() }`
   - `RECORDS_ERROR`（`UNAVAILABLE` `DUPLICATE` `NOT_FOUND` `CLOSED`，与 `PREFS_ERROR` 同名同形）
+
+- [ ] **Step 0: 预检裁定（控制器 2026-09-27 实测，执行者照此实现，不要再自行发明）**
+
+> **Ruling-71（Task 13 预检：四处 plan defect，其中 T13-D 会让真机上线必炸）**
+>
+> **T13-D（Critical，先说最重的）**：三张表在**同一个 domain** `sysops_records` 里，于是这个域有**三个 open 者** —— Task 9 的 `createAlertHitStore`（已交付，`lib/alerts/store.js:70` 自己缓存一个 `opening`）、本任务的 `createPlanStore`、`createLogStore`。而宿主契约写明「**domain 名是排他的**，重复 open 报 `already-open`」（`dsh-plugin-stock-analysis/docs/host-capabilities.md:153`、`:211`）。参照实现躲开这一劫是因为它三个域各一仓储（`stock_analysis` / `_prefs` / `_live`），**「每个仓储各缓存一个 promise」的前提是每个仓储开的是不同的域** —— 本任务三仓储同域，那个写法直接失效。
+> 现采证据（`node tmp/t13dprobe.mjs` → `tmp/t13d-probe.txt`）：同一 memory facility 上建两个各自缓存 open 的仓储，第一个 `append` OK，第二个 `append` **THREW `RECORDS_UNAVAILABLE | 告警记录域 open 失败：already-open`**。这不是测试桩的怪癖，是照真实现写的桩（`test/_helpers.mjs:13`）。
+> **裁定：`lib/kv-records-base.js` 必须自带「按设施去重的域打开登记表 + 引用计数关闭」，并且 `lib/alerts/store.js` 的 `ensureDomain` 改为经由该登记表取 handle（一处 import + 一处调用，不是整体迁移）。** 具体契约：
+> - 模块级 `WeakMap<facility, Map<domainName, entry>>`，`entry = { promise, handle, refs, closing }`。用 WeakMap 是为了测试里每例新建一个设施时不留强引用（否则每跑一例泄漏一个域）。
+> - `acquire(facility, domain, { logger, labels })`：首个调用者真正 `facility.open(domain)` 并存 promise；后来者 `await` 同一个 promise 且 `refs += 1`。**open 失败必须清掉 entry**（保留原骨架「失败可重试」的语义），并把错误映射成带 `code` 的 `UNAVAILABLE`。
+> - `release(facility, domain)`：`refs -= 1`；**只有降到 0 才真正 `await handle.close()`**。这解决关闭侧的对称问题 —— 若 `planStore.close()` 直接关域，还活着的 `logStore` 与告警仓储会拿到一个失效 handle。
+> - 每个仓储实例仍保有自己的 `closed` 终态标志与写队列：**「close 后自己写报 `CLOSED`」是每仓储的语义，「关掉域」是登记表的语义**，两者不许混。Ruling-63 说的「不迁移 `lib/prefs/store.js` / `lib/alerts/store.js`」指的是不把它们的骨架重写成 base 的薄包（各有已钉死的变异级测试），把 `ensureDomain` 里那一发 `facility.open()` 改成经登记表**不在禁止范围内**，且是必需的。
+> - 新增 `rec-10` 把这条钉住（见 Step 2 的用例文本）。
+>
+> **T13-A（Critical）**：Task 12 产出的 item 是**嵌套** `risk: { level, why }`（line 4052 的 `item = { …, risk: {level, why} }`），而本任务 `cleanItem` schema 声明的是**扁平** `riskLevel` / `riskWhy`，Task 15/22 消费的也是扁平名（`:4886`、`:6859`）。`record()` 会**静默丢弃未声明字段**（`lib/kv-schema.js:199-221`），`riskLevel` 又是 `requiredString` ⇒ `save` 若把 `scanResult.items` 原样塞进 parse，**每条快照写入都抛 `RECORDS_INVALID`**。更坏的是原稿 ②段夹具直接写了扁平形状，测试全绿而真机必炸。裁定：`save` 内做**一次显式投影**（`riskLevel: it.risk.level`、`riskWhy: it.risk.why`，其余字段白名单逐个取，不许 `...it` 展开），并把 `itemFixture()` 改成**嵌套形状**（与扫描器真产物一致）—— 夹具的形状必须是上游的真形状，否则 ②段测的是想象。
+>
+> **T13-B（Important）**：Step 4 写「裁剪到 `PLAN_KEEP`（按 `planId` 内含的时间前缀排序，字典序=时间序）」，与已签收的 **Ruling-55** 直接冲突（`lib/alerts/store.js` 的 `trim` 注释：`hitKey` 的时间前缀只在毫秒位数相同时才等于时间序，假时钟下 `h-9 > h-10` ⇒ 会裁掉最新那条）。本任务的 `newId` 默认虽是 `p-<now>-<4位随机>`，但 `rec-5` 注入的是 `p-1..p-21`，字典序把 `p-10` 排在 `p-2` 前面。裁定：`trim` 一律按 **`Number(v.at)` 数值升序**、同值再按 key 的 `localeCompare` 兜底（与 `lib/alerts/store.js` 的 `trim` 逐字同式），并在注释里点名 Ruling-55；`recWorld` 的 `now` 必须是**会走的时钟**（见 Step 2），不能像原稿那样冻结在 5000 —— 冻结时钟下「数值升序」与「字典序」两种实现给出同一个被删项，变异证不出差别。
+>
+> **T13-E（Important，预检时发现的新项）**：`rec-5` 断 `list[0].planId === ids[1]`，注释写「最旧的 p-1 应被挤掉」—— 但 Interfaces 与 `hits()` 的既定契约都是 **`list()` 时间倒序**（alert-13 已把「倒序是 store 的契约、service 不重排」钉死）。倒序下剩余 20 条的 `list[0]` 是**最新**的 `ids[20]`，`ids[1]` 在最末。原稿这条断言与自家契约相反。裁定：改断言为 `list[0] === ids[20]` 且 `list[PLAN_KEEP-1] === ids[1]`，并保留 `get(ids[0]) === null`（那才是「挤掉最旧」的直接证据）。
+>
+> **T13-C（Minor）**：本任务的旁路读数 `alerts 29/29` 已过期，Task 10 修复轮后是 **33/33**（三处已同步改）。
+>
+> 计数随之变：②段 `rec-1..rec-9` + 新增 `rec-10` = **10** 例 ⇒ 门禁 `22/22`（①11 + 真机 1 + ②10），`SKIP_LOCAL=1` 下 `21/21` + 1 行 SKIP。
+
 
 - [ ] **Step 1: 建 records 域（改名 + 追加两表）**
 
@@ -4358,16 +4433,21 @@ const { recordsDomain, PLAN_KEEP, LOG_KEEP } = await import('../lib/records/spec
 const { createPlanStore } = await import('../lib/clean/plan-store.js');
 const { createLogStore, RECORDS_ERROR } = await import('../lib/clean/log-store.js');
 
+// 形状必须是 Task 12 扫描器的**真产物**：risk 是嵌套的 {level, why}。
+// 扁平的 riskLevel/riskWhy 是 plan-store 投影**之后**的样子（Ruling-71 T13-A）——
+// 夹具若直接写扁平，「save 不拍平 ⇒ 每条快照写入抛 RECORDS_INVALID」这个缺陷永远测不到。
 const itemFixture = (over = {}) => ({
   id: 'temp-user-aG9tZQ', ruleId: 'temp-user', ruleName: '用户临时目录', kind: '缓存',
   path: 'C:\\Users\\gongj\\AppData\\Local\\Temp\\old.log', size: 1000, count: 1,
-  atime: 1, mtime: 1, riskLevel: 'mid', riskWhy: '应用可能锁文件', ...over,
+  atime: 1, mtime: 1, risk: { level: 'mid', why: '应用可能锁文件' }, ...over,
 });
 
 function recWorld(over = {}) {
   const facility = over.facility === undefined ? createMemoryFacility() : over.facility;
   let n = 0;
-  const planStore = createPlanStore({ getFacility: () => facility, logger: { warn() {} }, now: () => 5000, newId: () => `p-${++n}` });
+  // 时钟必须会走（Ruling-71 T13-B）：冻结在 5000 时「按 at 数值升序」与「按 planId 字典序」
+  // 删掉的是同一条，rec-5 证不出裁剪究竟看了哪个字段。
+  const planStore = createPlanStore({ getFacility: () => facility, logger: { warn() {} }, now: (() => { let at = 4000; return () => (at += 1000); })(), newId: () => `p-${++n}` });
   const logStore = createLogStore({ getFacility: () => facility, logger: { warn() {} }, now: () => 6000 });
   return { facility, planStore, logStore, n: () => n };
 }
@@ -4396,6 +4476,10 @@ await checkAsync('rec-3 save 冻结快照：读回的路径与条数与扫描结
   assert.equal(back.items[0].path, 'C:\\Users\\gongj\\AppData\\Local\\Temp\\old.log');
   assert.equal(back.beforeFree, 70 * 2 ** 30);
   assert.equal(back.rulesUsed.length, 1, 'rulesUsed 由 items 反推，界面「命中规则」列要用');
+  // 投影必须真的发生：写进去的是嵌套 risk，读回来必须是扁平名（Task 15/22 只认扁平名）
+  assert.equal(back.items[0].riskLevel, 'mid', 'save 没把嵌套 risk 拍平 ⇒ 读回来根本没有这个字段');
+  assert.equal(back.items[0].riskWhy, '应用可能锁文件');
+  assert.equal('risk' in back.items[0], false, 'record() 静默丢弃未声明字段，读回来不该再有 risk');
 });
 
 await checkAsync('rec-4 快照 append-only：同 planId 再写必须抛（清单不可被改写）', async () => {
@@ -4413,8 +4497,10 @@ await checkAsync('rec-5 快照只留最近 20 段，第 21 段挤掉最旧', asy
   for (let i = 0; i < 21; i++) ids.push((await w.planStore.save(scanFixture(), { beforeFree: i, modeDefault: 'delete-file' })).planId);
   const list = await w.planStore.list({ limit: 50 });
   assert.equal(list.length, PLAN_KEEP);
-  assert.equal(list[0].planId, ids[1], '最旧的 p-1 应被挤掉');
-  assert.equal(await w.planStore.get(ids[0]), null);
+  // list() 是**时间倒序**（与 hits() 同契约，alert-13 已把「倒序是 store 的契约」钉死）：
+  // 原稿在这里断 list[0] === ids[1]，把自家契约写反了 —— 见 Ruling-71 T13-E。
+  assert.equal(list[0].planId, ids[20], '倒序：第一条必须是最新的 p-21');
+  assert.equal(list[PLAN_KEEP - 1].planId, ids[1], '倒序：末条是剩余 20 条里最旧的 p-2');
 });
 
 await checkAsync('rec-6 log.start 立刻落一条 running 记录（中断后能查出「未确认完成」）', async () => {
@@ -4452,6 +4538,28 @@ await checkAsync('rec-9 close() 可 await；close 后写报 CLOSED；跨 open �
   assert.equal((await w2.planStore.get(plan.planId)).planId, plan.planId);
 });
 
+await checkAsync('rec-10 同一设施上多个仓储共用一个域：各自读写都可用，关一个不带走别人', async () => {
+  // Ruling-71 T13-D：sysops_records 里有三张表 = 三个 open 者（alert_hit 的 Task 9 仓储 + 本任务的两个），
+  // 而宿主契约写明「domain 名是排他的，重复 open 报 already-open」。没有登记表，Task 19 装配现场必炸。
+  const w = recWorld();
+  const plan = await w.planStore.save(scanFixture(), { beforeFree: 1, modeDefault: 'delete-file' });
+  const log = await w.logStore.start({ planId: plan.planId, itemIds: ['a'], mode: 'delete-file' });
+  assert.equal(plan.planId, 'p-1', 'planStore 先 open 并持有域');
+  assert.equal(typeof log.logId, 'string', 'logStore 复用的是登记表里那个 handle —— 它若自己 open 会在这里抛 UNAVAILABLE');
+  assert.equal((await w.logStore.unfinished()).length, 1);
+  assert.equal((await w.planStore.get(plan.planId)).planId, plan.planId, '两个仓储各自读写，互不干扰');
+  // 引用计数：还剩 logStore 持有，域必须活着 ⇒ planStore 自己进终态，但不许把域一起关掉
+  await w.planStore.close();
+  await assert.rejects(() => w.planStore.save(scanFixture(), { beforeFree: 1, modeDefault: 'delete-file' }),
+    (e) => e.code === RECORDS_ERROR.CLOSED, 'close 是该仓储的终态，与域是否关闭无关');
+  const done = await w.logStore.finish(log.logId, { ok: 1, skipped: 0, failed: 0, rejected: 0, bytesFreed: 1, afterFree: 2 });
+  assert.equal(done.ok, 1, 'planStore 关了不许把域关掉，否则这里报 UNAVAILABLE');
+  // 最后一个持有者关掉后名字释放：新实例复用同一设施能重新 open，且读到旧行
+  await w.logStore.close();
+  const w3 = recWorld({ facility: w.facility });
+  assert.equal((await w3.planStore.get(plan.planId)).planId, plan.planId, '关干净后重开，数据必须还在（介质权威）');
+});
+
 console.log(`\n  ${passed}/${passed + failed} 通过`);
 process.exit(failed ? 1 : 0);
 ```
@@ -4459,7 +4567,7 @@ process.exit(failed ? 1 : 0);
 - [ ] **Step 3: 跑测试确认失败**
 
 Run: `node test/clean.test.mjs`
-Expected: `rec-1` FAIL（`lib/alerts/spec.js` 已被改名 → `ERR_MODULE_NOT_FOUND`）或 schema 缺表报错。改名后 alerts 测试必须同步变绿：Run `node test/alerts.test.mjs` Expected `29/29`。
+Expected: `rec-1` FAIL（`lib/alerts/spec.js` 已被改名 → `ERR_MODULE_NOT_FOUND`）或 schema 缺表报错。改名后 alerts 测试必须同步变绿：Run `node test/alerts.test.mjs` Expected `33/33`。
 
 - [ ] **Step 4: 写实现**
 
@@ -4479,7 +4587,8 @@ Expected: `rec-1` FAIL（`lib/alerts/spec.js` 已被改名 → `ERR_MODULE_NOT_F
  */
 ```
 
-- `createPlanStore.save(scanResult, meta)`：`planId = meta.planId ?? newId()`（`newId` 注入，默认 `p-<now>-<4 位随机>`）；`rulesUsed` 由 `items` 去重反推；写前 `domain.table('clean_plan').get(key)`，存在则抛 `DUPLICATE`；写完裁剪到 `PLAN_KEEP`（按 `planId` 内含的时间前缀排序，字典序=时间序）。
+- `createPlanStore.save(scanResult, meta)`：`planId = meta.planId ?? newId()`（`newId` 注入，默认 `p-<now>-<4 位随机>`）；`rulesUsed` 由 `items` 去重反推；写前 `domain.table('clean_plan').get(key)`，存在则抛 `DUPLICATE`；写完裁剪到 `PLAN_KEEP`（**按 `Number(v.at)` 数值升序删最旧，同值再按 key 的 `localeCompare` 兜底 —— 与 `lib/alerts/store.js` 的 `trim` 逐字同式，理由见 Ruling-55；禁止按 `planId` 字典序**，注入的 `p-1..p-21` 下字典序会把 `p-10` 排在 `p-2` 前）。
+- `save` 必须对 items 做**一次显式投影**（Ruling-71 T13-A）：逐字段白名单取出 `id/ruleId/ruleName/kind/path/size/count/atime/mtime`，再加 `riskLevel: it.risk.level`、`riskWhy: it.risk.why`，**不许 `...it` 展开** —— `record()` 会静默丢弃未声明的 `risk` 而 `riskLevel` 是必填，展开写法每条都抛 `RECORDS_INVALID`。
 - `get(planId)` → 快照行或 `null`；`list({limit})` → 时间倒序。
 - `createLogStore`：`start()` put 一条无 `finishedAt` 的记录；`finish()` 先 `get`，若已有 `finishedAt` → **原样返回旧行并 `logger.warn`**（rec-7 断言），否则写补齐后的行；`unfinished()` = 全表里 `finishedAt` 为空的行（Task 15 重启后据此提示）。裁剪到 `LOG_KEEP`。
 - `RECORDS_ERROR` 四个 code 的字面值：`SYSOPS_RECORDS_UNAVAILABLE` / `…_DUPLICATE` / `…_NOT_FOUND` / `…_CLOSED`（Task 18 按 code 分支）。
@@ -4487,9 +4596,9 @@ Expected: `rec-1` FAIL（`lib/alerts/spec.js` 已被改名 → `ERR_MODULE_NOT_F
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `node test/clean.test.mjs`
-Expected: `21/21 通过`（①11 + 真机 1 + ②9 —— SKIP_LOCAL 下 20/20 + 1 SKIP）
-Run: `SKIP_LOCAL=1 node test/clean.test.mjs` → `20/20 通过`
-Run: `node test/alerts.test.mjs` → `29/29 通过`（改名回归）
+Expected: `22/22 通过`（①11 + 真机 1 + ②10 —— SKIP_LOCAL 下 21/21 + 1 SKIP）
+Run: `SKIP_LOCAL=1 node test/clean.test.mjs` → `21/21 通过` + 1 行 `SKIP cln-真机-1`
+Run: `node test/alerts.test.mjs` → `33/33 通过`（改名回归）
 提交信息草稿：`refactor(sysops): 记录域改名 records 并加清单快照/执行留痕仓储`
 
 ---
@@ -7334,7 +7443,7 @@ SKIP_LOCAL=1 node test/search.test.mjs
 Expected：
 - `plugin.test.mjs` `90/90`（①15 rt ②8 hx ③12 cf ④16 pg1 ⑤14 pg2 ⑥12 pg3 ⑦13 pg4）
 - `host-compat.test.mjs` `8/8`（hc-1..hc-8）
-- `collect.test.mjs` `48/48`、`alerts.test.mjs` `29/29`、`clean.test.mjs` `46/46`（含 1 条真机）、`search.test.mjs` `26/26`、`prefs.test.mjs` `23/23`（①3 ②4 ③6 ④10）、`guard.test.mjs` `19/19`（另需打印「拒绝断言 61 条 / 分支命中 16/16」，见 Step 2）
+- `collect.test.mjs` `48/48`、`alerts.test.mjs` `33/33`、`clean.test.mjs` `46/46`（含 1 条真机）、`search.test.mjs` `26/26`、`prefs.test.mjs` `23/23`（①3 ②4 ③6 ④10）、`guard.test.mjs` `19/19`（另需打印「拒绝断言 61 条 / 分支命中 16/16」，见 Step 2）
 - `SKIP_LOCAL=1` 两行：`clean` → `45/45 + 1 SKIP`，`search` → Everything 相关真机用例 SKIP、walk 通路仍实跑
 - **任何一条 FAIL 都不算过**；出现"用例静默通过"（断言对象为空数组的 `.some()`）要按 Step 3 的变异法回查。
 
