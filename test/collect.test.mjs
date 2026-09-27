@@ -329,5 +329,88 @@ check('sup-11 status() 每项带 label / state / restarts / pid / detail，界�
   assert.equal(row.detail, '已排 0 次重启');
 });
 
+/* ④段：typeperf 解析（纯函数，零子进程） */
+const fs = await import('node:fs');
+const L1A = await import('../lib/collect/l1a-typeperf.js');
+const FIX = fs.readFileSync(new URL('./fixtures/typeperf-multi-instance.txt', import.meta.url), 'utf8').split(/\r?\n/);
+
+check('tp-1 splitCsv 认带引号的字段，且不把转义引号当分隔', () => {
+  assert.deepEqual(L1A.splitCsv('"a","b,c","d"'), ['a', 'b,c', 'd']);
+  assert.deepEqual(L1A.splitCsv('"\\"q\\"",x'), ['"q"', 'x']);
+});
+
+check('tp-2 parseHeader 丢机器名前缀，只取实例名与计数器名', () => {
+  const { counters } = L1A.parseHeader(FIX[0]);
+  assert.equal(counters.length, 4);
+  assert.equal(counters[0].instance, 'Intel[R] Wi-Fi 6 AX201 160MHz');
+  assert.equal(counters[0].counter, 'Bytes Received/sec');
+  assert.equal(counters[0].metric, 'netDown');
+  assert.equal(counters[1].metric, 'netUp');
+  assert.equal(counters[2].instance, '\\isatap.{ABCDEF}');
+});
+
+check('tp-3 非表头行返回 null（流式解析会先撞上样本行）', () => {
+  assert.equal(L1A.parseHeader(FIX[1]), null);
+  assert.equal(L1A.parseHeader('正在退出，请稍候...'), null);
+});
+
+check('tp-4 parsePdTime 按本地时间解析 MM/DD/YYYY HH:mm:ss.fff', () => {
+  const t = L1A.parsePdTime('09/27/2026 12:49:41.046');
+  const d = new Date(t);
+  assert.equal(d.getFullYear(), 2026);
+  assert.equal(d.getMonth(), 8);
+  assert.equal(d.getDate(), 27);
+  assert.equal(d.getHours(), 12);
+  assert.equal(d.getMinutes(), 49);
+  assert.equal(d.getSeconds(), 41);
+});
+
+check('tp-5 样本解析：多实例按指标求和（界面要的是本机总吞吐），原始浮点不取整', () => {
+  const { counters } = L1A.parseHeader(FIX[0]);
+  const s = L1A.parseSampleLine(FIX[3], counters);
+  // 断言字面量。`v` 是字节/秒的原始浮点，取整只在界面格式化时做。
+  // （这里原本写的是 `Math.round(s.values.netDown) === 1048576 + 1.5` —— 左边四舍五入成
+  //   1048578、右边是 1048577.5，**恒不相等**，预检实跑 tp-5 直接红。）
+  assert.equal(s.values.netDown, 1048577.5);
+  assert.equal(s.values.netUp, 131074.5);
+});
+
+check('tp-6 *_no data 列不计入和，但其它列照样出数；整行全是 *_no data 则整行不出数', () => {
+  const { counters } = L1A.parseHeader(FIX[0]);
+  const s = L1A.parseSampleLine(FIX[2], counters);
+  assert.equal(s.values.netDown, 524288);
+  assert.equal(s.values.netUp, 65536);
+  // 真机每窗第一行常见形态就是全部 `*_no data`（typeperf 暖身期）。这种行必须整行丢弃：
+  // 把它折成 0 会在曲线上画出一个假谷底，而 0 恰好是"没人用网"的意思，最难被发现。
+  assert.equal(L1A.parseSampleLine('"09/27/2026 12:49:41.000","*_no data","*_no data","*_no data","*_no data"', counters), null);
+});
+
+check('tp-7 半行断流（列数不足 / 引号未闭合）返回 null，不抛、也不补 0', () => {
+  const { counters } = L1A.parseHeader(FIX[0]);
+  assert.equal(L1A.parseSampleLine(FIX[4], counters), null);
+  assert.equal(L1A.parseSampleLine('正在退出，请稍候...', counters), null);
+  // 列数不足但每列都有值（截断正好落在两个字段之间）也要判不完整，否则出半个吞吐值。
+  assert.equal(L1A.parseSampleLine('"09/27/2026 12:49:44.093","2097152.0000"', counters), null);
+});
+
+check('tp-8 decodePd：GBK 字节解出中文，纯 ASCII 不受影响，解出替换符时回落 latin1', () => {
+  assert.equal(L1A.decodePd(Buffer.from([0xce, 0xf1, 0xb9, 0xfa])), '务国');
+  assert.equal(L1A.decodePd(Buffer.from('"1234.5"', 'latin1')), '"1234.5"');
+  // 真机表头实测（计划期修正 #2 复核）：`"(PDH-CSV 4.0)","\\龚进的华为笔记\Network Interface(Intel[R] Wi-Fi 6 AX201 160MHz)\Bytes Received/sec"`
+  // —— 机器名是 GBK 字节，其余全是 ASCII，所以"含高位字节就要解、纯 ASCII 不能被动过"是硬要求。
+  // 非法 GBK 序列：TextDecoder('gbk') 默认非 fatal，**不抛**而是出 U+FFFD，
+  // 所以回落必须靠检测替换符（原实现的 try/catch 是死代码，预检实测 [0x81] → '\uFFFD'）。
+  assert.equal(L1A.decodePd(Buffer.from([0x81])), '\x81');
+});
+
+check('tp-9 COUNTER_ARGS / 窗口参数是常量，界面文案要用它们而不是再抄一遍', () => {
+  assert.deepEqual(L1A.COUNTER_ARGS, [
+    '\\Network Interface(*)\\Bytes Received/sec',
+    '\\Network Interface(*)\\Bytes Sent/sec',
+  ]);
+  assert.equal(L1A.WINDOW_SAMPLES, 30);
+  assert.equal(L1A.INTERVAL_SEC, 1);
+});
+
 console.log(`\n  ${passed}/${passed + failed} 通过`);
 process.exit(failed ? 1 : 0);

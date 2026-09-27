@@ -1,0 +1,7 @@
+"(PDH-CSV 4.0)","\\HOSTNAME\Network Interface(Intel[R] Wi-Fi 6 AX201 160MHz)\Bytes Received/sec","\\HOSTNAME\Network Interface(Intel[R] Wi-Fi 6 AX201 160MHz)\Bytes Sent/sec","\\HOSTNAME\Network Interface(\isatap.{ABCDEF})\Bytes Received/sec","\\HOSTNAME\Network Interface(\isatap.{ABCDEF})\Bytes Sent/sec"
+"09/27/2026 12:49:41.046","161665.280249","17174.648338","0.000000","0.000000"
+"09/27/2026 12:49:42.062","524288.000000","65536.000000","*_no data","*_no data"
+"09/27/2026 12:49:43.078","1048576.000000","131072.000000","1.5","2.5"
+"09/27/2026 12:49:44.093","2097152.0000
+正在退出，请稍候...
+命令成功结束。
