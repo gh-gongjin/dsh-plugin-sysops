@@ -265,7 +265,7 @@ Expected: 打印导出个数（**18**，与上面 Produces 清单逐一对得上
 
 - [ ] **Step 1: 写失败的测试**
 
-新建 `test/guard.test.mjs`（harness 见上文）。**用例数与"矩阵例数"是两个口径**：本任务写 19 个 `check()` 用例；spec §5 的「红线矩阵 ≥40 例」按**拒绝断言**计数（`deny()` / `denyOp()` 每调一次算一例），19 个用例里的拒绝断言合计 53 条，`guard-19` 把这条数固化成断言防回归。
+新建 `test/guard.test.mjs`（harness 见上文）。**用例数与"矩阵例数"是两个口径**：本任务写 19 个 `check()` 用例；spec §5 的「红线矩阵 ≥40 例」按**拒绝断言**计数（`deny()` / `denyOp()` 每调一次算一例），19 个用例里的拒绝断言合计 **61 条**（Task 2 实现期从 53 涨到 61：修复轮补了异盘受保护、drive-relative `..`、未闭合 `%VAR`、注册表内嵌形态等断言，全部补进既有用例体内，用例数仍 19），`guard-19` 把「>= 40」这条口径固化成断言防回归。
 
 > **名字冲突是硬坑**：harness 已经占了 `check(name, fn)` 这个名字，guard 的导出也叫 `check`。所以 import 时**不解构 `check`**，整个模块存进 `Guard`，用例内部一律写 `Guard.check(...)`。若写成 `const { check } = await import(...)`，同一模块作用域里会出现两次声明 → 文件直接 `SyntaxError` 跑不起来（这正是本条要拦住的错）。
 
@@ -597,7 +597,7 @@ export function checkOperation(op) {
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `node test/guard.test.mjs`
-Expected: `19/19 通过` + 一行「红线矩阵：拒绝断言 53 条 / 分支命中 16/16」，退出码 0。若 `matchProtected` 对 `program files` 的相对段判定不稳，改 `PROTECTED` 的 `prefixes` 形状而不是放松 guard —— **红线只能收紧不能放宽**，这条也是 review 时的重点。
+Expected: `19/19 通过` + 一行「红线矩阵：拒绝断言 61 条 / 分支命中 16/16」，退出码 0。若 `matchProtected` 对 `program files` 的相对段判定不稳，改 `PROTECTED` 的 `prefixes` 形状而不是放松 guard —— **红线只能收紧不能放宽**，这条也是 review 时的重点。
 
 - [ ] **Step 5: 变异断言（证明用例真的在管事）**
 
@@ -6479,7 +6479,7 @@ SKIP_LOCAL=1 node test/search.test.mjs
 Expected：
 - `plugin.test.mjs` `90/90`（①15 rt ②8 hx ③12 cf ④16 pg1 ⑤14 pg2 ⑥12 pg3 ⑦13 pg4）
 - `host-compat.test.mjs` `8/8`（hc-1..hc-8）
-- `collect.test.mjs` `47/47`、`alerts.test.mjs` `28/28`、`clean.test.mjs` `46/46`（含 1 条真机）、`search.test.mjs` `26/26`、`prefs.test.mjs` `24/24`（①3 ②4 ③7 ④10）、`guard.test.mjs` `19/19`（另需打印「拒绝断言 53 条 / 分支命中 16/16」，见 Step 2）
+- `collect.test.mjs` `47/47`、`alerts.test.mjs` `28/28`、`clean.test.mjs` `46/46`（含 1 条真机）、`search.test.mjs` `26/26`、`prefs.test.mjs` `24/24`（①3 ②4 ③7 ④10）、`guard.test.mjs` `19/19`（另需打印「拒绝断言 61 条 / 分支命中 16/16」，见 Step 2）
 - `SKIP_LOCAL=1` 两行：`clean` → `45/45 + 1 SKIP`，`search` → Everything 相关真机用例 SKIP、walk 通路仍实跑
 - **任何一条 FAIL 都不算过**；出现"用例静默通过"（断言对象为空数组的 `.some()`）要按 Step 3 的变异法回查。
 
@@ -6490,7 +6490,7 @@ Task 2 的 `guard-18` / `guard-19` 已经把两条口径变成断言了，本步
 Run: `node test/guard.test.mjs`
 Expected 末两行：
 ```
-  红线矩阵：拒绝断言 53 条 / 分支命中 16/16
+  红线矩阵：拒绝断言 61 条 / 分支命中 16/16
   19/19 通过
 ```
 `19/19` 里的 `guard-18` 读的是 `seenBranches` 台账（用例里每条 `deny()` / `denyOp()` 命中一条分支就 +1），`guard-19` 读 `denyAssertions`（spec §5 的「≥40 例」按拒绝断言计，不按 `check()` 用例名计）。**这两条挂了只能补用例，不许改 `BRANCH_IDS` 或把 40 调小** —— 台账与清单不同步本身就是红线漂移的信号。
@@ -6501,7 +6501,7 @@ Expected 末两行：
 
 对最容易退化成空断言的四条各做一次变异，跑完立刻改回：
 1. `client.js` 的 `fmtRate` 改成 `v / 8e6` → `pg1-1`/`pg1-2` 必须 FAIL
-2. `clean/guard.js` 的 `PROTECTED` 去掉 `$recycle.bin` → `test/guard.test.mjs` 的 `guard-02` FAIL，且台账里 `b-recycle-bin` 掉到 0 → `guard-18` 同步 FAIL（拒绝断言降到 50 仍 ≥40，所以 `guard-19` 该继续绿 —— 它管的是量，`guard-18` 管的才是覆盖面）
+2. `clean/guard.js` 的 `PROTECTED` 去掉 `b-recycle-bin` 整条规则 → `test/guard.test.mjs` 的 `guard-02` FAIL（4 条 deny 全红），台账里 `b-recycle-bin` 掉到 0 → `guard-18` 同步 FAIL；拒绝断言 61 → 57 仍 ≥40，所以 `guard-19` 该继续绿 —— 它管的是量，`guard-18` 管的才是覆盖面（执行时以实测差值为准，别照抄 57）
 3. `lib/api.js` 的回环闸门 `return true` → `rt-12` 必须 FAIL
 4. `client.js` 的 `apply` 首行去掉 `if (!cfg().routePrefix) return;` → `cf-3` 必须 FAIL
 
