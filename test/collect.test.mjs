@@ -234,6 +234,14 @@ check('sup-5 kill 走 taskkill /PID /T /F，PID 只能来自 spawn 返回值', (
   // `/T`（连进程树一道杀）是这个用例标题的真实承诺：typeperf / powershell 都会再派生子进程，
   // 只杀父进程会留下一群孤儿继续吃 CPU。参数形状单独断，才不会因为测试注入了 killFn 而落空。
   assert.deepEqual(KILL_ARGS(4321), ['/PID', '4321', '/T', '/F']);
+  // 同键重复 start 也必须走同一条"不留孤儿"的承诺：Task 8 的采集开关若忘记先 stop，
+  // 只要这里漏掉 kill，注册表被覆盖但旧孩子仍在跑，且它的 stdout 监听器还在喂数据。
+  const h2 = harness();
+  h2.sup.start('k', { label: 'k', cmd: 'c', args: [], intervalMs: 1000, onData() {} });
+  const firstKid = h2.lastKid();
+  h2.sup.start('k', { label: 'k', cmd: 'c', args: [], intervalMs: 1000, onData() {} });
+  assert.deepEqual(h2.kills, [firstKid.c.pid], '重复 start 必须 kill 掉旧子进程');
+  assert.equal(h2.sup.keys().length, 1, '重复 start 之后同键只能有一个注册项');
 });
 
 check('sup-6 心跳：超过 3× 采样间隔无输出判 stalled，kill 并计一次重启', () => {
@@ -249,6 +257,27 @@ check('sup-6 心跳：超过 3× 采样间隔无输出判 stalled，kill 并计�
   // 与 Task 21 采集源条的**红字依据**（`stalled|crashed|exited-max → so-pill-red`）。
   // 实现里只要不赋值这个态，界面就只会显示"崩了"而说不出"是挂着不吐数据" —— 故经 onChange 留痕断。
   assert.ok(h.changes.some((c) => c.state === SUP_STATE.STALLED), '必须真的进入过 stalled，否则该态是死枚举');
+  // stalled 那条路是"自己 kill 的"（killChild 里 stopping=true），被杀的孩子随后必然补发一个 exit。
+  // 这个尾巴不得把"等待重启"覆盖成 off —— handleExit 顶上那道 crashed/exited-max 闸门此前无人断言。
+  h.kids[0].c.emit('exit', 1, null);
+  const afterTail = h.sup.state('k').state;
+  assert.ok(
+    afterTail === SUP_STATE.CRASHED || afterTail === SUP_STATE.STARTING,
+    `被 kill 孩子的 exit 尾巴不该把等待重启翻成 off（读到 ${afterTail}）`,
+  );
+  // 判卡之后那一次重启必须真的发生：退避定时器点火时若被 stopping 拦住，state 就永久停在
+  // crashed、restarts 冻结、无孩子无定时器，而 tick() 只看 ON —— 采集源从此静默停摆，20/20 全绿也照不出来。
+  h.fire();
+  assert.equal(h.sup.state('k').state, SUP_STATE.STARTING, 'stalled 后排的退避定时器点火必须真正重启');
+  assert.equal(h.kids.length, 2, '重启要真的再 spawn 一个');
+  // 启动看门狗：进程活着但一句都不输出（typeperf 计数器名写错只往 stderr 喷）时永远进不了 ON，
+  // 而心跳那条路只看 ON，于是它就挂在 starting 上无人发现。基准是 launch 置的 startedAt。
+  const h2 = harness();
+  h2.sup.start('k', { label: 'k', cmd: 'c', args: [], intervalMs: 1000, onData() {} });
+  h2.adv(3500);
+  h2.sup.tick();
+  assert.equal(h2.sup.state('k').state, SUP_STATE.CRASHED, 'starting 里长期无输出也要判起不来并走同一条收口');
+  assert.equal(h2.kills.length, 1, '起不来也要真 kill，否则留下长挂的孤儿进程');
 });
 
 check('sup-7 rolling：窗口正常结束立即续采，不计入重启次数', () => {
