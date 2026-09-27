@@ -461,8 +461,8 @@ const oneRow = (over = {}) => JSON.stringify({
   rows: [{ id: 4, n: 'svchost.exe', ws: 1024 ** 2, cpu: 12.5 }, { id: 7, n: 'chrome.exe', ws: 512 * 1024 ** 2 / 1024, cpu: 0 }, ...[over.extra].filter(Boolean)],
 });
 
-check('ps-1 buildLoopScript：常驻 while、UTF-8 前置、条数上限、采样间隔都在脚本里写死', () => {
-  const s = L1B.buildLoopScript({ intervalSec: 3, maxRows: 400, withCpu: true });
+check('ps-1 buildLoopScript：常驻 while、UTF-8 前置、采样间隔在脚本里写死、不预裁条数', () => {
+  const s = L1B.buildLoopScript({ intervalSec: 3, withCpu: true });
   assert.match(s, /\$OutputEncoding=\[Console\]::OutputEncoding=\[Text\.Encoding\]::UTF8/, '不设 UTF-8，中文进程名会变问号');
   // 预检真机读数：语句只用空格拼接 ⇒ powershell exit=1、stdout 0 字节（"表达式或语句中包含意外的标记"）。
   // 这两条把"能跑"钉进用例，而不是留给 Step 5 的肉眼。
@@ -470,13 +470,16 @@ check('ps-1 buildLoopScript：常驻 while、UTF-8 前置、条数上限、采�
   assert.doesNotMatch(s, /Write-Output \$/, '$? 是布尔不是那行 JSON');
   assert.match(s, /while\(\$true\)/);
   assert.match(s, /Start-Sleep -Seconds 3/);
-  assert.match(s, /Select-Object -First 400/);
+  // 评审 M-1 的裁定：`Get-CimInstance Win32_Process` 不排序，脚本里 `-First 400` 取到的是"任意 400 个"，
+  // 而 `parseProcLine` 的 truncated 又恒为 0（源已裁）⇒ 进程数 >400 的机器上"内存最大的那些"会无声消失。
+  // 裁条数只在解析层做，脚本必须如实把全量吐出来。
+  assert.doesNotMatch(s, /Select-Object\s+-First/, '条数上限归解析层，不许在脚本里预裁');
   assert.match(s, /ConvertTo-Json -Compress/);
   assert.match(s, /PercentProcessorTime/, 'withCpu=true 必须取 CPU');
 });
 
 check('ps-2 withCpu=false 时不查 Perf 表（CPU 列实测超预算时的降级分支）', () => {
-  const s = L1B.buildLoopScript({ intervalSec: 3, maxRows: 400, withCpu: false });
+  const s = L1B.buildLoopScript({ intervalSec: 3, withCpu: false });
   assert.doesNotMatch(s, /PercentProcessorTime/);
   assert.match(s, /WorkingSetSize/);
 });
@@ -486,6 +489,11 @@ check('ps-3 parseProcLine 归一化：id→pid、n→name、ws→字节、cpu→
   assert.equal(r.t, 1760000000000);
   assert.equal(r.rows.length, 2);
   assert.deepEqual({ ...r.rows[0] }, { pid: 4, name: 'svchost.exe', ws: 1024 ** 2, cpuPct: 1.5625 });
+  // 评审 M-2：`Number(x) || 0` 会把取不到的 pid 折成 0，而真机恒有 pid 0 的 System Idle Process
+  // （且它的 cpuPct 是聚合值）—— 两者撞主键会让界面把"缺 pid"的行当成 Idle。缺就是 null。
+  const bad = L1B.parseProcLine(JSON.stringify({ t: 1, rows: [{ id: 'x', n: 'a.exe', ws: 5 }] }), { procCount: 8 });
+  assert.equal(bad.rows[0].pid, null);
+  assert.equal(bad.rows[0].ws, 5);
 });
 
 check('ps-4 CPU 缺列（withCpu=false 或系统未给）时 cpuPct 为 null，不是 0', () => {
@@ -505,11 +513,18 @@ check('ps-5 非 JSON 行（PowerShell 的告警、进度条、空行）返回 nu
   assert.equal(L1B.parseProcLine('{"rows":"不是数组"}', { procCount: 8 }), null);
 });
 
-check('ps-6 单行超长（实测 391 进程 / 行 21018 字节）不影响解析；rows 超过 maxRows 截断并计数', () => {
+check('ps-6 单行超长（实测 391 进程 / 行 21018 字节）不影响解析；超上限时按 ws 降序留前 maxRows 并计数', () => {
   const rows = Array.from({ length: 600 }, (_, i) => ({ id: i + 1, n: 'p' + i, ws: 1024, cpu: 0 }));
   const r = L1B.parseProcLine(JSON.stringify({ t: 5, rows }), { procCount: 8, maxRows: 400 });
   assert.equal(r.rows.length, 400);
   assert.equal(r.truncated, 200);
+  // 评审 M-1 的第二半：CIM 不排序，"前 400 个"是任意 400 个，界面要的是内存最大的 400 个。
+  // 造一组 ws 递增的：截断后必须留下最大的那些（ws 从 600*1024 往下数 400 个），而不是枚举顺序的前 400。
+  const rise = Array.from({ length: 600 }, (_, i) => ({ id: i + 1, n: 'p' + i, ws: (i + 1) * 1024, cpu: 0 }));
+  const t = L1B.parseProcLine(JSON.stringify({ t: 6, rows: rise }), { procCount: 8, maxRows: 400 });
+  assert.equal(t.rows[0].ws, 600 * 1024, '截断要保留内存最大的一批');
+  assert.equal(t.rows.at(-1).ws, 201 * 1024);
+  assert.equal(t.truncated, 200);
 });
 
 check('ps-7 默认参数与实测一致：sleep 3s，但实际周期 4.6–4.9s ⇒ 心跳基准另算', () => {
@@ -541,8 +556,17 @@ check('ps-8 l1b 门面：onData 收 Buffer、UTF-8 解码一次、非 JSON 行�
   feed('Write-Error : 找不到驱动');                                 // 非 JSON 行必须走 (null, line) 分支，不许静默 return
   assert.deepEqual(got, ['rows', 'noise']);
   assert.equal(b.state().state, 'on');
+  // 评审 Important-1：残值。源停了或新一轮还没出数时，latest() 不能再把上一轮的 rows 冒充"当前"。
   b.disable();
   assert.deepEqual(stops, ['l1b']);
+  assert.equal(b.latest(), null, 'disable 必须清缓存：否则界面拿着已停源的旧进程榜当实时');
+  feed(JSON.stringify({ t: 1760000000001, rows: [{ id: 5, n: 'x.exe', ws: 10, cpu: 1 }] }));  // 把缓存重新灌满，好让下一条断言真的承重
+  b.enable();
+  assert.equal(b.latest(), null, 'enable 之后、首轮到达之前同样不许留旧值');
+  // 评审 M-3 的落点（按 Ruling-16 折进本条，不新开 check）：装配漏传 onRows 时，实现里的
+  // `onRows?.()` 会把整条进程榜静默吞掉 —— 所以构造入口就要抛，而不是等数据流走空。
+  assert.throws(() => L1B.createL1b({ sup }), /onRows/);
+  assert.throws(() => L1B.createL1b({ sup, onRows: 1 }), /onRows/);
 });
 
 console.log(`\n  ${passed}/${passed + failed} 通过`);
