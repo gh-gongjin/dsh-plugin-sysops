@@ -219,5 +219,183 @@ await checkAsync('hit-5 close() 是终态；换实例复用同一域仍读得到
     '记录在宿主域里，不在 store 实例的内存里 —— 换实例不许把历史丢掉');
 });
 
+/* ④段：prefs 阈值覆盖内置规则 */
+check('merge-1 覆盖数值与冷却，冷却按秒换算成毫秒', () => {
+  const out = R.mergeRules(R.DEFAULT_RULES, { cpu: { value: 95, consecutive: 5, cooldownSec: 120 } });
+  const cpu = out.find((r) => r.metric === 'cpu');
+  assert.equal(cpu.value, 95);
+  assert.equal(cpu.consecutive, 5);
+  assert.equal(cpu.cooldownMs, 120_000);
+  assert.equal(out.find((r) => r.metric === 'mem').value, 90, '未覆盖的规则原样保留');
+});
+
+check('merge-2 enabled:false 映射为 userOff（置灰分支与依赖分支是两回事）', () => {
+  const out = R.mergeRules(R.DEFAULT_RULES, { procCpu: { value: 60, consecutive: 1, cooldownSec: 600, enabled: false } });
+  assert.equal(out.find((r) => r.metric === 'procCpu').userOff, true);
+});
+
+check('merge-3 不修改入参（DEFAULT_RULES 是常量表，改一次就污染全局）', () => {
+  const before = JSON.stringify(R.DEFAULT_RULES);
+  R.mergeRules(R.DEFAULT_RULES, { cpu: { value: 1, consecutive: 1, cooldownSec: 60 } });
+  assert.equal(JSON.stringify(R.DEFAULT_RULES), before);
+});
+
+check('merge-4 未知指标键忽略但可被发现；缺字段的覆盖不半套生效', () => {
+  const out = R.mergeRules(R.DEFAULT_RULES, { gpu: { value: 1 }, mem: { value: 70 } });
+  assert.equal(out.find((r) => r.metric === 'mem').value, 70);
+  assert.equal(out.find((r) => r.metric === 'mem').consecutive, 1, 'consecutive 未覆盖时保留内置值');
+  assert.equal(out.length, R.DEFAULT_RULES.length);
+});
+
+/* ⑤段：告警服务（假 collect + 假 hitStore + 假时钟） */
+const { createAlertService } = await import('../lib/alerts/service.js');
+
+/**
+ * 假世界三条约定，缺一条就会把编排测成假绿：
+ *  1. **每个采样点自带 1 秒推进**。`evaluate` 前面有 Task 9 的点序闸门
+ *     （`tail[i].t > tail[i-1].t` 严格递增），时钟不推进 ⇒ 三点同 `t` ⇒ 永远不报，
+ *     alert-1/2/6/8 全部只是"没测到"而不是"测错了"。
+ *  2. **订阅者存成数组**。`dispose()` 走的是 unsub 路径，桩里只留一个 `_cb` 的话
+ *     退订与重复订阅都看不见（`start()` 两次也只是覆盖同一个变量）。
+ *  3. **落库是异步的**，`alert-store` 失败事件要等一回合才到 listeners，
+ *     所以需要 `tick()`；成功分支不用（假 `append` 体里没有 await，push 在同步段就跑完了）。
+ */
+function alertWorld(over = {}) {
+  let t = 0;
+  const events = [];
+  const appended = [];
+  const cbs = [];
+  const srcStates = over.srcStates ?? { l0: 'on', l1a: 'on', l1b: 'on' };
+  const series = { cpu: [], mem: [], diskFreePct: [], netDown: [], netUp: [], ...over.series };
+  const collect = {
+    snapshot: () => ({
+      series,
+      latest: {},
+      cadence: over.cadence ?? '1s',
+      sources: Object.entries(srcStates).map(([key, state]) => ({ key, state })),
+      proc: { rows: over.procRows ?? [] },
+    }),
+    onEvent: (cb) => {
+      cbs.push(cb);
+      return () => { const i = cbs.indexOf(cb); if (i >= 0) cbs.splice(i, 1); };
+    },
+  };
+  const hitStore = over.noStore ? null : {
+    available: true,
+    append: async (h) => { if (over.storeFails) throw new Error('disk full'); appended.push(h); return h; },
+    list: async ({ limit } = {}) => appended.slice(-limit).reverse(),
+  };
+  const svc = createAlertService({
+    collect,
+    hitStore,
+    getRulePrefs: () => over.alertPrefs,
+    now: () => t,
+    logger: { warn(msg) { events.push({ type: 'log', msg }); } },
+  });
+  svc.onEvent((e) => events.push(e));
+  svc.start();
+  const adv = (ms) => { t += ms; };
+  const fire = (ev) => cbs.slice().forEach((cb) => cb(ev));
+  const emitPoint = (key, v) => { t += 1000; series[key].push({ t, v }); fire({ type: 'metrics', key, point: { t, v } }); };
+  const emitProc = (rows) => { over.procRows = rows; fire({ type: 'proc', rows }); };
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  return { svc, adv, t: () => t, events, appended, cbs, emitPoint, emitProc, tick, series, srcStates };
+}
+
+await checkAsync('alert-1 CPU 连续 3 次越线 → emit alert 且落库一次', async () => {
+  const w = alertWorld();
+  w.emitPoint('cpu', 90); w.emitPoint('cpu', 91);
+  assert.equal(w.events.filter((e) => e.type === 'alert').length, 0, '两次不够，别提前报');
+  w.emitPoint('cpu', 92);
+  await w.tick(); // record 的尾巴（append 之后）是异步的，不 settle 就数不清几次
+  const hit = w.events.find((e) => e.type === 'alert').hit;
+  assert.equal(hit.ruleId, 'r1');
+  assert.equal(w.appended.length, 1);
+  assert.equal(w.events.filter((e) => e.type === 'alert').length, 1, '一次命中只能有一条 alert');
+});
+
+await checkAsync('alert-2 冷却内再越线不重复报（时间线会被同一次尖峰刷屏）', async () => {
+  const w = alertWorld();
+  for (const v of [90, 91, 92]) w.emitPoint('cpu', v);
+  w.adv(1000);
+  w.emitPoint('cpu', 99);
+  await w.tick();
+  assert.equal(w.appended.length, 1, `冷却 10 分钟，第二次不该落库，实得 ${w.appended.length}`);
+});
+
+await checkAsync('alert-3 依赖源关了 → 整条规则不评估（不是评估后隐藏）', async () => {
+  const w = alertWorld({ srcStates: { l0: 'on', l1a: 'off', l1b: 'on' } });
+  for (let i = 0; i < 70; i++) { w.adv(1000); w.emitPoint('netDown', 30e6); }
+  assert.equal(w.appended.length, 0);
+  assert.equal(w.svc.ruleRows().find((r) => r.rule.id === 'r4').st.dim, true);
+});
+
+await checkAsync('alert-4 档位暂停 = l0 源 off → cpu/mem/磁盘三条一起置灰', async () => {
+  const w = alertWorld({ srcStates: { l0: 'off', l1a: 'on', l1b: 'on' } });
+  w.emitPoint('cpu', 99);
+  const rows = w.svc.ruleRows();
+  assert.deepEqual(rows.filter((r) => r.rule.dep === 'l0').map((r) => r.st.dim), [true, true, true]);
+  assert.equal(w.appended.length, 0);
+});
+
+await checkAsync('alert-5 用户关掉规则 → 不报，但 st 是「已暂停」不是「依赖关闭」', async () => {
+  const w = alertWorld({ alertPrefs: { mem: { value: 90, consecutive: 1, cooldownSec: 900, enabled: false } } });
+  w.emitPoint('mem', 99);
+  assert.equal(w.appended.length, 0);
+  assert.equal(w.svc.ruleRows().find((r) => r.rule.id === 'r2').st.st, '已暂停');
+});
+
+await checkAsync('alert-6 未读计数：命中 +1，markRead 归零（驱动侧边栏蓝点）', async () => {
+  const w = alertWorld();
+  w.emitPoint('cpu', 90); w.emitPoint('cpu', 91); w.emitPoint('cpu', 92);
+  await w.tick(); // 只能在 record 全落定后断言，否则"命中 +1 且只 +1"是撞对的
+  assert.equal(w.svc.unread(), 1);
+  w.svc.markRead();
+  assert.equal(w.svc.unread(), 0);
+});
+
+await checkAsync('alert-7 procCpu 走 rows 判定，命中后 note 是进程名', async () => {
+  const w = alertWorld({ alertPrefs: { procCpu: { value: 60, consecutive: 1, cooldownSec: 600, enabled: true } } });
+  w.emitProc([{ pid: 1, name: 'render.exe', ws: 1, cpuPct: 88 }]);
+  const hit = w.appended[0];
+  assert.equal(hit.metric, 'procCpu');
+  assert.equal(hit.note, 'render.exe');
+});
+
+await checkAsync('alert-8 落库失败不静默：转成 alert-store 事件 + logger.warn', async () => {
+  const w = alertWorld({ storeFails: true });
+  w.emitPoint('cpu', 90); w.emitPoint('cpu', 91); w.emitPoint('cpu', 92);
+  await w.tick(); // append 的 rejection 在下一个微任务回合才落到 catch，不等就永远看不到这条事件
+  const e = w.events.find((x) => x.type === 'alert-store');
+  assert.ok(e, '必须有一条可见的失败事件');
+  assert.match(e.error, /disk full/);
+  assert.ok(w.events.some((x) => x.type === 'log'));
+  assert.equal(w.svc.unread(), 1, '落库失败不影响未读计数');
+});
+
+await checkAsync('alert-9 宿主没给 storageDomain：仍评估仍计未读，但写与读都是可见的降级', async () => {
+  const w = alertWorld({ noStore: true });
+  w.emitPoint('cpu', 90); w.emitPoint('cpu', 91); w.emitPoint('cpu', 92);
+  assert.equal(w.appended.length, 0);
+  assert.equal(w.svc.unread(), 1, '没库也要报到人前');
+  const e = w.events.find((x) => x.type === 'alert-store');
+  assert.ok(e && /storageDomain/.test(e.error), '不可用必须是事件，不是沉默');
+  assert.ok(w.events.some((x) => x.type === 'log'));
+  const r = await w.svc.hits({ limit: 10 });
+  assert.deepEqual(r, { rows: [], error: 'storageDomain 不可用' });
+});
+
+await checkAsync('alert-10 dispose 退订：之后的采样点不再产生任何事件，start() 两次也只订阅一次', async () => {
+  const w = alertWorld();
+  w.svc.start(); // 重复 start 必须被去重，否则一次尖峰会报两遍
+  assert.equal(w.cbs.length, 1, `start() 两次不该留两条订阅，实有 ${w.cbs.length}`);
+  w.emitPoint('cpu', 90); w.emitPoint('cpu', 91);
+  w.svc.dispose();
+  assert.equal(w.cbs.length, 0, 'dispose 必须真的从桩里退订');
+  w.emitPoint('cpu', 92);
+  assert.equal(w.appended.length, 0, 'dispose 后必须退订');
+  assert.equal(w.svc.unread(), 0);
+});
+
 console.log(`\n  ${passed}/${passed + failed} 通过`);
 process.exit(failed ? 1 : 0);
