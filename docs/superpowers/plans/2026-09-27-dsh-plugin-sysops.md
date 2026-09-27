@@ -134,7 +134,7 @@ async function checkAsync(name, fn) {
 
 用例名里含「真机」三个字的会被 `SKIP_LOCAL=1` 跳过 —— 这是全局约定，写用例时要遵守。
 
-**关于 commit 步骤：** 本工作区不是 git 仓库（`F:\dsh-plugins` 下 `git rev-parse` 返回 `fatal: not a git repository`，2026-09-27 实测）。因此每个任务的收尾步骤是「跑测试并留存输出」而不是 `git commit`；若后续用户授权 `git init`，再把各任务的收尾步骤替换为提交，提交信息在各任务里已写好。
+**关于 commit 步骤：** 本插件目录**已经是 git 仓库**（2026-09-27 用户授权后在 `F:\dsh-plugins\dsh-plugin-sysops` 单独 `git init`，工作分支 `feat/sysops-impl`，首提交 `60ea399`）。因此每个任务的收尾一律是：**测试全绿 → `git add` 本任务列出的文件 → 用该任务写好的提交信息 commit**。各任务正文里若还残留「无 git：本任务不提交」字样，按本段为准（那是授权前写的），执行时替换为提交。提交只含本任务 Files 里的路径，不许 `git add -A`；`tmp/`、`.superpowers/` 已在 `.gitignore` 里。
 
 **关于 ④~⑦段（Task 21~24）的 Step 3：** 这四段是界面任务，Step 3 给的是**行为契约、文案来源与逐块对应关系**，不贴完整 JSX —— 权威视觉源是已确认的 `prototype/index.html`（spec §6），实现时按对应 `panel-*` 逐块搬、类名前缀改 `so-`、颜色换成 token 的 `var()` 引用。判断这一类步骤是否到位的唯一标准是**该段用例全绿**：用例里写死的每一句文案、每一个类名与 `disabled`，就是 Step 3 没贴出来的那段 JSX 必须产出的东西。
 
