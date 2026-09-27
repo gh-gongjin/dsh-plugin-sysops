@@ -134,6 +134,8 @@ async function checkAsync(name, fn) {
 
 用例名里含「真机」三个字的会被 `SKIP_LOCAL=1` 跳过 —— 这是全局约定，写用例时要遵守。
 
+**异步用例必须写成 `await checkAsync('…', async () => { … })`，不能写 `check('…', async () => …)`。** 取证：`check()` 是同步 `try/catch`，收到 async 函数时它拿到的是一个**正在挂起的 Promise** —— `fn()` 在第一个 `await` 处就返回了，`try` 块里一条断言都没执行完，于是立刻计一次 PASS；之后的断言失败变成**没人 catch 的 rejection**，进程退出时才报（且 `passed` 已经虚高）。Task 8 预检实测：`svc-4`/`svc-8` 用 `check()` 挂 async 时，把实现里 `setVisible` 的 `clearProc()` 和 `dispose` 的 `buildRings()` **整行删掉照样 48/48**；换成 `await checkAsync` 后同样两处变异分别红在 svc-4、svc-8。这一条对已写好的 ①~⑤段没有影响（它们全是同步用例），但**任何后续任务的异步用例都按此写**。
+
 **关于 commit 步骤：** 本插件目录**已经是 git 仓库**（2026-09-27 用户授权后在 `F:\dsh-plugins\dsh-plugin-sysops` 单独 `git init`，工作分支 `feat/sysops-impl`，首提交 `60ea399`）。因此每个任务的收尾一律是：**测试全绿 → `git add` 本任务列出的文件 → 用该任务写好的提交信息 commit**。各任务正文里若还残留「无 git：本任务不提交」字样，按本段为准（那是授权前写的），执行时替换为提交。提交只含本任务 Files 里的路径，不许 `git add -A`；`tmp/`、`.superpowers/` 已在 `.gitignore` 里。
 
 **关于 ④~⑦段（Task 21~24）的 Step 3：** 这四段是界面任务，Step 3 给的是**行为契约、文案来源与逐块对应关系**，不贴完整 JSX —— 权威视觉源是已确认的 `prototype/index.html`（spec §6），实现时按对应 `panel-*` 逐块搬、类名前缀改 `so-`、颜色换成 token 的 `var()` 引用。判断这一类步骤是否到位的唯一标准是**该段用例全绿**：用例里写死的每一句文案、每一个类名与 `disabled`，就是 Step 3 没贴出来的那段 JSX 必须产出的东西。
@@ -2159,6 +2161,14 @@ check('ps-3 parseProcLine 归一化：id→pid、n→name、ws→字节、cpu→
   const bad = L1B.parseProcLine(JSON.stringify({ t: 1, rows: [{ id: 'x', n: 'a.exe', ws: 5 }] }), { procCount: 8 });
   assert.equal(bad.rows[0].pid, null);
   assert.equal(bad.rows[0].ws, 5);
+  // 复审 Imp-2：`id` 是 JSON 的 null 或空串时，`Number()` 给出的是 **0**（不是 NaN），会被判成"合法 pid 0"
+  // 正好撞上真机恒有的 System Idle Process —— 上面那条 `'x'` 用例挡不住这一形，必须各钉一发。
+  const nullId = L1B.parseProcLine(JSON.stringify({ t: 2, rows: [{ id: null, n: 'b.exe', ws: 6 }, { id: '', n: 'c.exe', ws: 7 }] }), { procCount: 8 });
+  assert.equal(nullId.rows[0].pid, null, '"id":null 不是 pid 0');
+  assert.equal(nullId.rows[1].pid, null, '"id":"" 不是 pid 0');
+  assert.deepEqual(nullId.rows.map((x) => x.ws), [6, 7], '畸形 pid 的行不许被丢掉，name/ws 照样带出');
+  const real0 = L1B.parseProcLine(JSON.stringify({ t: 3, rows: [{ id: 0, n: 'System Idle Process', ws: 4096, cpu: 800 }] }), { procCount: 8 });
+  assert.equal(real0.rows[0].pid, 0, '真的 pid 0 必须是数字 0，与上面的 null 区分开');
 });
 
 check('ps-4 CPU 缺列（withCpu=false 或系统未给）时 cpuPct 为 null，不是 0', () => {
@@ -2192,7 +2202,7 @@ check('ps-6 单行超长（实测 391 进程 / 行 21018 字节）不影响解�
   assert.equal(t.truncated, 200);
 });
 
-check('ps-7 默认参数与实测一致：sleep 3s，但实际周期 4.6–4.9s ⇒ 心跳基准另算', () => {
+check('ps-7 默认参数与实测一致：sleep 3s，但实际周期 4.37–4.91s ⇒ 心跳基准另算', () => {
   assert.equal(L1B.INTERVAL_SEC, 3);
   assert.equal(L1B.MAX_ROWS, 400);
 });
@@ -2249,7 +2259,7 @@ Expected: `ERR_MODULE_NOT_FOUND` 指向 `lib/collect/l1b-powershell.js`。
  * 实测（三组读数的并集：派单前预检 Ruling-37、实现者一轮、评审一轮；计划期修正 #3 的旧数字已过期）：
  *  - 首行 1777–2246ms（热态连跑），**冷启动单点量到过 3774ms** ⇒ 降级判定按稳态周期，不按单次首行；
  *  - `Start-Sleep 3` + 单轮干活 1.6–1.9s ⇒ **实际周期 4.37–4.91s**，所以心跳基准不能按 3s 算；
- *  - 370–392 进程 / 行 19968–21842 字节、无 BOM（不是旧记录的 385 / 17.7KB，也别把区间端点当常量用）；
+ *  - 369–392 进程 / 行 19968–21842 字节、无 BOM（四组读数的并集：预检 / 实现者 / 复审 / 控制器；不是旧记录的 385 / 17.7KB，也别把区间端点当常量用）；
  *  - `taskkill /PID /T /F` 收得掉；stdout 在加 UTF-8 前置后是 UTF-8（不加是 GBK，实测 `b9a8bdf8`），stderr 恒是 GBK。
  * 默认**不开**、由页面可见性驱动（spec §1.2 的结论）。
  */
@@ -2295,11 +2305,14 @@ export function parseProcLine(text, { procCount = 1, maxRows = Infinity } = {}) 
     // 而 `Number(null) === 0` —— 不认掉就会把"没测到"折成 0%，Task 9 的 evaluateProc 吃的正是这个键。
     const cell = r?.cpu;
     const raw = cell === null || cell === undefined || cell === '' ? NaN : Number(cell);
-    const id = Number(r?.id);
+    const idRaw = r?.id;
+    const idCell = idRaw === null || idRaw === undefined || idRaw === '' ? NaN : Number(idRaw);
     return {
       // 评审 M-2：取不到就是 null。`|| 0` 会把畸形 pid 折成 0，而真机恒有 pid 0 的 System Idle Process
       // （它的 cpuPct 还是 `_Total`/`Idle` 覆盖出来的聚合值）—— 撞在主键上界面就会把缺 pid 的行当 Idle 摆。
-      pid: Number.isFinite(id) ? id : null,
+      // 复审 Imp-2：判形要**和 cpu 那一列同料**，不能只 `Number(r?.id)` —— `Number(null)` 与 `Number('')` 都是 0，
+      // 于是 `"id":null` 的行恰好折进上面那个真 pid 0，正是这条修法要防的事。
+      pid: Number.isFinite(idCell) ? idCell : null,
       name: typeof r?.n === 'string' ? r.n : '',
       ws: Number(r?.ws) || 0,
       // PercentProcessorTime 是"所有核合计"口径（可 >100），按核数均摊成单核百分比；缺列为 null 而不是 0
@@ -2413,7 +2426,7 @@ setTimeout(async () => {
 Run: `node tmp/e2e-l1b.mjs`
 Expected 与决策规则（预检实测已把这些数字钉死，记进汇报，不要含糊过去）：
 - `script len` 应为 **574**（去掉 `-First` 后从 599 缩短；仍打印 `含 -First？ false`）。
-- 20s 内 **轮数 ≥ 4**（实测周期 4.37–4.91s ⇒ 20s 应有 4 轮），每轮 `n` 在 300~420、首行 `first` 在 **1800–2300ms**、`truncated` 本机恒为 **0**（本机 370–392 进程 < 400；若这里出现 >0 说明裁条数被挪回了脚本或 `MAX_ROWS` 被改小）。
+- 20s 内 **轮数 ≥ 4**（实测周期 4.37–4.91s ⇒ 20s 应有 4 轮），每轮 `n` 在 300~420、首行 `first` 在 **1800–2300ms**、`truncated` 本机恒为 **0**（本机 369–392 进程 < 400；若这里出现 >0 说明裁条数被挪回了脚本或 `MAX_ROWS` 被改小）。
 - **降级判定按稳态周期，不按单次冷启动首行**（控制器裁定，台账 Ruling-41）：实现者一轮冷启动量到过 3774ms 首行，但同机热态复跑 2090/2108/1798ms、评审两轮 1872/1777ms ⇒ 单点冷启动不构成降级理由。**只有稳态周期 > `intervalSec + 2`（即 5s）连续两轮**才把 `enable()` 里的 `withCpu` 改为 `false`，并在界面进程榜卡片上写「CPU 列在本机实测使单轮耗时 X ms（预算 Y ms），已降级为仅内存列」，同时把告警规则 `procCpu` 置为依赖不满足（Task 9 的 `dependencyGated` 会用到）。开/关 CPU 列的实测差值 ≈1.0s/轮（4.37–4.75s vs 3.4–3.7s），仍在 5s 预算内。
 - `cpuNull` 允许 > 0（真机第一轮实测 2 行），但必须是 `null` 而不是 0 —— 若这里出现 `cpuPct === 0` 且原值是 `null`，Step 4b 变异 2 一定没跑到位。
 - 若轮数 < 4 或首行 > 3000ms（说明 `Win32_PerfFormattedData_PerfProc_Process` 那一趟把单轮拖长了）：把 `enable()` 里的 `withCpu` 改为 `false`，并在界面进程榜卡片上写「CPU 列在本机实测使单轮耗时 X ms（预算 Y ms），已降级为仅内存列」，同时把告警规则 `procCpu` 置为依赖不满足（Task 9 的 `dependencyGated` 会用到）。
@@ -2435,7 +2448,7 @@ Expected 与决策规则（预检实测已把这些数字钉死，记进汇报�
 - Produces:
   - `createCollectService({ getPrefs, logger, now, getIntervalFn, makeSupervisor, makeL0, makeL1a, makeL1b, osMod })` → 
     `{ start(), stop(), setCadence(v), setSource(key, on), setVisible(v), snapshot(), sourceRows(), procRows(), onEvent(cb) → unsub, dispose() }`
-  - `snapshot() → { cadence, keepMinutes, timerBackend, series: {cpu, mem, diskFreePct, netDown, netUp}, latest: {cpu, mem, diskFreeGb, diskTotalGb, netDown, netUp, t}, sources: [row], proc: {rows, state, note}, dropped: {stale, bad} }`
+  - `snapshot() → { cadence, keepMinutes, timerBackend, series: {cpu, mem, diskFreePct, netDown, netUp}, latest: {cpu, mem, diskFreeGb, diskTotalGb, netDown, netUp, t}, sources: [row], proc: {rows, state, note, t}, dropped: {stale, bad} }`。**`proc.t` 是 Task 7 §Produces 点名要透传的字段**（PowerShell 侧那一轮的 UTC ms，界面/告警用它算新鲜度）：成功解析一轮才写，其余时刻为 `null` —— 不写它，Task 7 的 I-1 修法（`latest()` 只交当前轮）在编排层就没有落点。
   - `sourceRow = { key, label, state: 'on'|'off'|'starting'|'stalled'|'crashed'|'exited-max'|'unavailable', detail, restarts, pid, stderrTail }`
   - `onEvent` 的事件：`{type:'metrics', key, point}` / `{type:'sources', rows}` / `{type:'proc', rows}`
 
@@ -2452,40 +2465,89 @@ function fakeWorld(over = {}) {
   const started = [];
   const stopped = [];
   const l0Reads = [];
+  const caps = {};                    // 服务传给工厂的出口（onPoint / onRows）落在这里，用例才有东西可断
+  let coreCount = over.cores ?? 8;    // svc-1 要在跑的过程中改核数（热插拔基线复位那条契约）
+  let resetCount = 0;
   const intervalFn = (fn, ms) => { const h = { fn, ms, done: false }; timers.push(h); return h; };
+  // svc-7 走的是 `globalThis.setInterval` 回退分支。**不打桩真的话，`w.timers` 恒是空数组**
+  // —— 预检变异取证：把实现里的 `globalThis.clearInterval(l0Handle.h)` 整行删掉，原样用例仍 PASS（空断言）。
+  const realSI = globalThis.setInterval, realCI = globalThis.clearInterval;
+  const si = [];
+  if (over.noTimer) {
+    globalThis.setInterval = (fn, ms) => { const h = { fn, ms, live: true }; si.push(h); return h; };
+    globalThis.clearInterval = (h) => { if (h && 'live' in h) h.live = false; };
+  }
   const sup = {
     start: (key, spec) => { started.push(key); return { key, state: 'starting', restarts: 0, detail: '' }; },
     stop: async (key) => { stopped.push(key); return null; },
     state: (key) => ({ key, state: over.supState ?? 'on', restarts: 0, pid: 1, lastTick: 0, stderrTail: '', detail: '' }),
     status: () => over.supStatus ?? [],
     tick: () => {},
-    dispose: () => { over.supDisposed = true; },
+    // 标志必须挂在**桩对象自己**上。原先写 `over.supDisposed = true`，而 `over` 没暴露给用例，
+    // svc-8 的 `w.sup.supDisposed` 就永远取不到 —— 探针实测是硬失败（`undefined`），不是空断言。
+    supDisposed: false,
+    dispose() { this.supDisposed = true; },
   };
   const svc = createCollectService({
     getPrefs: () => over.prefs ?? { collect: { cadence: '1s', keepMinutes: 30 }, sources: { l0: true, l1a: true, l1b: false } },
     logger: { warn() {}, info() {} },
     now: () => t,
     getIntervalFn: () => (over.noTimer ? null : intervalFn),
-    osMod: { cpus: () => Array.from({ length: 8 }, () => 0) },
+    osMod: { cpus: () => Array.from({ length: coreCount }, () => 0) },
     makeSupervisor: () => sup,
     makeL0: () => ({
-      read: () => { const i = l0Reads.length; l0Reads.push(1); return over.l0?.(i) ?? { t, cpu: 10 + i, mem: 50, diskFree: 70 * 2 ** 30, diskTotal: 200 * 2 ** 30 }; },
-      reset: () => { l0Reads.length = 0; },
+      // cpu 必须**始终落在 0~100**：percent ring 见到 >100 判 bad 直接丢（真实现也是如此）。
+      // 预检取证：原样写 `cpu: 10 + i` 时第 91 拍起全是 bad，svc-6 的点数上限断言永远填不满，
+      // 于是那条断言只在数一个早就被丢弃的环 —— 断的是替身的形状，不是服务的行为。
+      read: () => { const i = l0Reads.length; l0Reads.push(1); return over.l0?.(i) ?? { t, cpu: 10 + (i % 80), mem: 50, diskFree: 70 * 2 ** 30, diskTotal: 200 * 2 ** 30 }; },
+      reset: () => { l0Reads.length = 0; resetCount += 1; },
     }),
-    makeL1a: ({ sup: s, onPoint }) => ({ enable: () => s.start('l1a'), disable: () => s.stop('l1a'), state: () => sup.state('l1a'), onPoint }),
-    makeL1b: ({ sup: s, onRows }) => ({ enable: () => s.start('l1b'), disable: () => s.stop('l1b'), state: () => sup.state('l1b'), latest: () => over.procRows ?? [], onRows }),
+    makeL1a: ({ sup: s, onPoint }) => { caps.onPoint = onPoint; return { enable: () => s.start('l1a'), disable: () => s.stop('l1a'), state: () => sup.state('l1a') }; },
+    makeL1b: ({ sup: s, onRows }) => { caps.onRows = onRows; return { enable: () => s.start('l1b'), disable: () => s.stop('l1b'), state: () => sup.state('l1b'), latest: () => over.procRows ?? null }; },
   });
   svc.onEvent((e) => events.push(e));
-  return { svc, t: () => t, adv: (ms) => { t += ms; }, events, started, stopped, timers, sup, fire: (n = 1) => { for (let i = 0; i < n; i++) { const h = timers.find((x) => !x.done); if (!h) return; h.done = true; h.fn(); } } };
+  // fire 是"重复敲同一个活着定时器"，不是"消耗一个定时器"：`h.done` 只由服务在 clearL0 时置。
+  // 预检取证：原样 `h.done = true; h.fn();` 时 svc-6 的 400 次循环实际只跑了一拍（第 2 次起 find 不到句柄），
+  // 而把 windowMs/maxPoints 改成 1e12/1e9 那条仍 PASS —— 断言完全空转。
+  return { svc, caps, si, t: () => t, clock: () => t, reads: () => l0Reads.length, resets: () => resetCount, setCores: (n) => { coreCount = n; },
+    adv: (ms) => { t += ms; }, events, started, stopped, timers, sup,
+    fire: (n = 1) => { const h = timers.find((x) => !x.done); if (!h) return; for (let i = 0; i < n; i++) h.fn(); },
+    restore: () => { globalThis.setInterval = realSI; globalThis.clearInterval = realCI; } };
 }
 
-check('svc-1 start 后 L0 按档位跑，每个点写 ring 并 emit metrics', () => {
+check('svc-1 start 后 L0 按档位跑，L1a/L1b 的出口被接上且点真的进环并 emit metrics', () => {
   const w = fakeWorld();
   w.svc.start();
   assert.ok(w.started.includes('l1a'), 'l1a 默认开（实测 <1% 代价），应被 start');
   assert.equal(w.svc.snapshot().cadence, '1s');
-  const l1a = w.events.find((e) => e.type === 'l1a-enable');
-  assert.ok(l1a, '服务应把 l1a 的 onPoint 出口接上（用测试替身暴露的 onPoint 手工灌点）');
+  // 这两条是预检补的：原用例断一个 `type==='l1a-enable'` 的事件，而 `fakeWorld` 里**没有任何代码会 emit 它**
+  // —— 工厂收到的 `onPoint` 被塞进返回对象当属性，`events` 又没暴露给工厂，所以那条断言是硬失败（不是空断言，是根本不可能成立）。
+  // 换成真口径：断服务确实把出口函数传给了工厂，再手工灌一个点，验它落进对应的 ring 并推了事件。
+  assert.equal(typeof w.caps.onPoint, 'function', '服务必须把 onPoint 传给 createL1a');
+  assert.equal(typeof w.caps.onRows, 'function', '服务必须把 onRows 传给 createL1b（Task 7 已定为不传就抛，漏接=静默吞榜）');
+  w.adv(1000); w.fire();                       // 先敲一拍 L0，让假时钟走到 1000（ring 只收严格递增的 t）
+  const before = w.events.length;
+  w.caps.onPoint({ metric: 'netDown', t: w.clock(), v: 2 * 1024 * 1024 });
+  const s = w.svc.snapshot();
+  assert.equal(s.series.netDown.at(-1).v, 2 * 1024 * 1024, 'L1a 的点必须落进 netDown ring（字节/秒原值，不做 /8）');
+  assert.equal(s.latest.netDown, 2 * 1024 * 1024, 'latest.netDown 与 ring 同口径，界面自己换算 MB/s');
+  assert.equal(w.events.length, before + 1, '写点成功必须 emit');
+  assert.equal(w.events.at(-1).type, 'metrics');
+  assert.equal(w.events.at(-1).key, 'netDown');
+  // 非 JSON 行不许静默（Task 7 下游契约）：走 (null, line) 分支必须在 snapshot 里留痕
+  w.caps.onRows(null, 'Write-Error : 表达式或语句中包含意外的标记');
+  assert.notEqual(w.svc.snapshot().proc.note, '', '非 JSON 行要留下可见的因由，不能只丢');
+  // 非 JSON 轮**没有**可信的轮次时间戳：`proc.t` 只在解析成功时写。界面按 `proc.t` 判新鲜度，
+  // 把它折成 0 或留着上一轮的值都会让"多久没出数"这个数算错。
+  assert.equal(w.svc.snapshot().proc.t, null, '整轮非 JSON 时 proc.t 必须是 null，不是 0 也不是残值');
+  // 台账 Task 5 下游契约②：核数变了要复位 cpu 基线，否则 `computeCpuPct` 在两次样本核数不等时返回 NaN
+  // ⇒ 曲线**成片**丢点（每拍都丢）。两条一起断，才挡住"每拍都 reset"这个反向的错。
+  const r0 = w.resets();
+  w.adv(1000); w.fire();
+  assert.equal(w.resets(), r0, '核数没变不许复位');
+  w.setCores(4);
+  w.adv(1000); w.fire();
+  assert.equal(w.resets(), r0 + 1, '核数变化必须调 l0.reset()');
 });
 
 check('svc-2 档位切 5s / 暂停：源状态与 cadence 同步变，并 emit sources', () => {
@@ -2505,35 +2567,56 @@ check('svc-3 脏点不写 ring，只进 dropped 计数（一个假点会被读�
   const w = fakeWorld({ l0: (i) => (i === 1 ? { t: 0, cpu: NaN, mem: 50, diskFree: 1, diskTotal: 2 } : undefined) });
   w.svc.start();
   const before = w.svc.snapshot().dropped.bad;
-  // 手工推两拍：第一拍正常、第二拍 NaN
-  w.fire(); w.fire();
-  assert.ok(w.svc.snapshot().dropped.bad >= before, 'NaN 点必须计数');
+  // 手工推两拍：第一拍正常、第二拍 cpu 是 NaN
+  w.fire(2);
+  // **必须 `+ 1` 而不是 `>= before`**：原样写 `>=` 时 `before` 是 0，断言永真，
+  // 预检变异取证 —— 把实现里的 `droppedBad` 计数整段删掉，原样用例照样 PASS（空断言）。
+  assert.equal(w.svc.snapshot().dropped.bad, before + 1, 'NaN 点必须计数一次，且只计那一个指标');
+  assert.ok(w.svc.snapshot().series.cpu.length <= 1, '脏点不许写进 cpu ring');
 });
 
-check('svc-4 L1b 默认关；只有「开 + 页面可见」才启动，不可见时停掉', async () => {
+await checkAsync('svc-4 L1b 默认关；只有「开 + 页面可见」才启动，不可见时停采并清残值', async () => {
   const w = fakeWorld({ prefs: { collect: { cadence: '1s' }, sources: { l0: true, l1a: true, l1b: true } } });
   w.svc.start();
-  assert.ok(!w.started.includes('l1b'), '默认不可见时不起 L1b（640ms/次 的代价不能白付）');
+  assert.ok(!w.started.includes('l1b'), '默认不可见时不起 L1b（实测单轮 1.6–1.9s 的代价不能白付）');
   await w.svc.setVisible(true);
   assert.ok(w.started.includes('l1b'), '可见 + 开关为真 才起');
+  // Task 7 的 I-1 在编排层的镜像：`latest()` 现在 disable 就返 null，服务侧的 proc.rows 也必须跟着清，
+  // 否则界面拿着"已停源的上一轮进程榜"画实时卡片 —— 这是最坏的一种静默。
+  w.caps.onRows({ t: 5, rows: [{ pid: 1, name: 'a.exe', ws: 1024, cpuPct: 1 }] });
+  assert.equal(w.svc.snapshot().proc.rows.length, 1);
+  assert.equal(w.svc.snapshot().proc.t, 5, '成功轮的 t 必须透到 snapshot().proc.t（Task 7 §Produces 点名的字段）');
   await w.svc.setVisible(false);
   assert.ok(w.stopped.includes('l1b'), '页面切走要停采');
+  assert.deepEqual(w.svc.snapshot().proc.rows, [], '停采必须清进程榜残值');
+  assert.equal(w.svc.snapshot().proc.t, null, '残值清理要连 t 一起清，否则界面拿到"带新鲜时间戳的空榜"或反过来');
+  assert.ok(w.events.some((e) => e.type === 'proc' && e.rows.length === 0), '清空也要推 proc 事件，否则 SSE 侧留着旧榜');
 });
 
-check('svc-5 L1a 不受可见性影响（成本实测 <1%），但网络计数器名缺失时 state 为 unavailable', async () => {
+await checkAsync('svc-5 supervisor 终态原样透传进 sources，且 L1a 不随页面可见性停采', async () => {
   const w = fakeWorld({ supState: 'exited-max' });
   w.svc.start();
   await w.svc.setVisible(true);
   const row = w.svc.snapshot().sources.find((r) => r.key === 'l1a');
   assert.equal(row.state, 'exited-max', 'supervisor 的终态要原样透传，界面按四类分支给文案');
+  // 用例标题原本写"网络计数器名缺失时 state 为 unavailable"，但体内断的是 exited-max，
+  // 而 `unavailable` 这个态在本文件里从来没有实现会置它（Task 6 的 l1a 只经 supervisor 置态）——
+  // 标题改成断言的真实口径。计数器名缺失的真机文案归 Task 21（台账：typeperf 以 exit=4026531842 退出且错误走 stdout）。
+  await w.svc.setVisible(false);
+  assert.ok(!w.stopped.includes('l1a'), 'L1a 成本实测 <1%，不随可见性起停（只有 L1b 受闸门）');
+  assert.ok(w.stopped.includes('l1b'), '同一动作里 L1b 必须被停');
 });
 
-check('svc-6 snapshot 的点位数上限 = keepMinutes×60（1s 档）', () => {
+check('svc-6 snapshot 的点位数上限 = keepMinutes×60+1（1s 档，含边界一拍）', () => {
   const w = fakeWorld({ prefs: { collect: { cadence: '1s', keepMinutes: 5 } } });
   w.svc.start();
   for (let i = 0; i < 400; i++) { w.adv(1000); w.fire(); }
+  assert.ok(w.reads() >= 400, `400 次 fire 必须真的采了 400 拍（读到 ${w.reads()} 次）—— 这条钉住 fire() 是"重复敲同一个活着的定时器"，不是消耗句柄`);
   const s = w.svc.snapshot();
-  assert.ok(s.series.cpu.length <= 301, `5min 窗 + 一拍缓冲，上限 301，实得 ${s.series.cpu.length}`);
+  // **断精确值而不是 `<= 301`**：`<=` 在 windowMs/maxPoints 被改成天文数字时照样绿（预检变异取证：
+  // 把 ring 的 windowMs 改 1e12、maxPoints 改 1e9，原样用例仍 PASS —— 因为 fire() 只跑了一拍，环里只有 1 个点）。
+  // 5min 窗 + `maxPoints = keepMinutes*60 + 1` ⇒ 400 拍里只剩最后 301 个（窗底含边界保留）。
+  assert.equal(s.series.cpu.length, 301, `5min 窗 @1s 上限 301，实得 ${s.series.cpu.length}`);
   assert.equal(s.keepMinutes, 5);
 });
 
@@ -2541,20 +2624,35 @@ check('svc-7 宿主无 timer 时退 setInterval，并在 snapshot.timerBackend �
   const w = fakeWorld({ noTimer: true });
   w.svc.start();
   assert.equal(w.svc.snapshot().timerBackend, 'setInterval');
+  assert.equal(w.si.length, 1, `回退分支必须真的挂上一个 setInterval（实得 ${w.si.length} 个）`);
+  assert.equal(w.timers.length, 0, '宿主给了 null 就不许再走 ctx.interval 那条路');
   w.svc.dispose();
-  assert.ok(w.timers.every((x) => x.done !== false), '退 setInterval 必须显式 stop，否则留野定时器');
+  // 原来这条断 `w.timers.every(...)`，但 noTimer 分支下 `timers` 恒是空数组，`.every()` 真空通过
+  // —— 预检变异取证：删掉实现里的 `globalThis.clearInterval(l0Handle.h)`，原样用例照样 PASS。
+  // 现在打桩真的 setInterval/clearInterval（fakeWorld 里装、本条末尾还原），断**那个句柄**被置死。
+  assert.ok(w.si.every((h) => h.live === false), '退 setInterval 必须显式 clearInterval，否则留野定时器');
+  w.restore();
 });
 
-check('svc-8 dispose：停 L0 定时器、停所有子进程、清 ring；重复调用不抛', async () => {
+await checkAsync('svc-8 dispose：停 L0 定时器、停所有子进程、清 ring；重复调用不抛', async () => {
   const w = fakeWorld();
   w.svc.start();
+  w.adv(1000); w.fire();
+  assert.ok(w.svc.snapshot().series.cpu.length >= 1, '前置条件：ring 里得先有点，否则下面"清 ring"那条是空的');
   w.svc.dispose();
   w.svc.dispose();
   assert.ok(w.stopped.includes('l1a'));
   assert.ok(w.sup.supDisposed, 'supervisor 要 dispose');
+  assert.equal(w.svc.snapshot().series.cpu.length, 0, 'dispose 要清 ring（标题主张，原来没有断言承重）');
+  assert.deepEqual(w.svc.snapshot().proc.rows, [], 'dispose 也要清进程榜');
+  // 真机串跑实测：dispose 后 sources 是 `l0:on,l1a:off,l1b:off` —— l0 那行按「开关+档位」算，
+  // 而 dispose 只清了定时器。这一条把它钉成 off，否则界面/日志会以为主进程还在采样。
+  const l0row = w.svc.snapshot().sources.find((r) => r.key === 'l0');
+  assert.equal(l0row.state, 'off', 'dispose 后 l0 行不许再报 on');
+  assert.match(l0row.detail, /dispose/, 'detail 要说清是 dispose 停的，不是用户把档位调成暂停');
 });
 
-check('svc-9 setSource(key,on) 改开关会立即起/停对应源', async () => {
+await checkAsync('svc-9 setSource(key,on) 改开关会立即起/停对应源', async () => {
   const w = fakeWorld({ prefs: { collect: { cadence: '1s' }, sources: { l0: true, l1a: false, l1b: false } } });
   w.svc.start();
   assert.ok(!w.started.includes('l1a'), '配置里 l1a=false 就不该起');
@@ -2609,8 +2707,35 @@ Expected: `ERR_MODULE_NOT_FOUND` 指向 `lib/collect/service.js`。
 - `setVisible(v)` / `setSource(key, on)` 是 async（内部要 await `sup.stop`）。
 - `onEvent(cb)` 返回注销函数；事件写在这里，**不要**在 service 里 import api.js（单向依赖：api 订阅 service）。
 - 每一拍 L0 之后跑 `sup.tick()`（心跳巡检），并把 `sourceRows()` 变化 emit 成 `sources` 事件 —— 只在内容变化时 emit（对比 `JSON.stringify`），避免 1s 推一屏重复状态。
+- ring 的两个上界都要真承重：`windowMs = keepMinutes * 60 * 1000`，**`maxPoints = keepMinutes * 60 + 1`**（+1 是窗底含边界保留的那一拍，`ring.js` 的裁剪是 `t < floor` 才丢），且 `createRing` 必须收服务的 `now`，否则假时钟下永不裁剪。svc-6 断的是**精确 301**，不是 `<=`。
+- **核数热插拔/改频要复位基线**（台账 Task 5 下游契约②）：`computeCpuPct` 在两次样本核数不等时返回 NaN ⇒ 连续丢点。每拍 L0 前比对 `osMod.cpus().length` 与上一次的缓存值，不等就调 `l0.reset()` 并 `logger.warn` 记一行。
+- **进程榜残值（Task 7 I-1 在编排层的镜像）**：`procRows` 是服务自己的状态，不是 `l1b.latest()` 的别名。凡 l1b 被停下的路径（`setVisible(false)` / `setSource('l1b',false)` / `stop()` / `dispose()`）都必须 `procRows = []`、`procNote = ''`、**`procT = null`**，并 emit `{type:'proc', rows: [], note:'', t: null}` —— 只清本地不推事件，SSE 侧的卡片会继续挂着已停源的旧榜。`procT` 只在 `onRows(parsed, line)` 解析成功时取 `parsed.t`（PowerShell 侧 UTC）；非 JSON 轮**不**更新它，也不清空它（上一轮仍是"最后一次成功的轮"，靠 `t` 让界面自己判陈旧）。
+- **`dispose()` 之后 `sources` 里 `l0` 那一行不许再报 `on`。** 取证：真机串跑（Step 5）里 `dispose()` 后 `snapshot().sources` 是 `l0:on,l1a:off,l1b:off` —— 因为 l0 那行的 `state` 是按「开关 + 档位」算的，而 `dispose()` 只 `clearL0()`，没动开关。界面/日志读到这一行会以为主进程定时器还活着，这正是要拦的"与代码不符的陈述"。修法：加一个 `disposed` 标志，`dispose()` 置真、`start()` 置假，`sourceRows()` 里 l0 行按 `disposed ? 'off' : …` 判，`detail` 写「服务已 dispose」。l1a/l1b 两行不用管 —— 它们的状态来自 supervisor，源真停了自然变 off。
+- `onPoint`/`onRows` 是**构造时**由服务传给 `makeL1a` / `makeL1b` 的出口（Task 7 已把 `createL1b` 改成不传 `onRows` 就抛，所以漏接是启动即炸，不是跑起来静默吞榜）。`onPoint` 收到未登记的 `metric` 时 `logger.warn` 并丢弃，**不许**新建 ring。
+- `snapshot()` 里 `latest.*` 是**原值**（字节/秒、GB、百分数各按各自口径），换算文案归界面；`sources` 每次现取（supervisor 的 `state()` 很便宜），`l0` 那一行的 `state` 由开关 + 档位算，不来自 supervisor。
 
-svc-1 里的 `l1a-enable` 事件是测试替身的产物：`makeL1a` 收到 `{ onPoint }` 后把它回吐给测试，测试断言服务确实把出口接上了。`fakeWorld` 里用 `s.start('l1a')` 记录 started，所以断言 `w.started.includes('l1a')` 与 `w.events` 里存在 `l1a-enable` 是两件事 —— 若嫌绕，把 svc-1 的两条断言合并成一条 `assert.ok(w.started.includes('l1a') && l1a)`；**不许**为了过测试而删掉 `onPoint` 接线。
+预检取证（这一段是计划自审 + 候选实现实跑写进来的，实现者不必再推）：⑥段最初在候选实现上是 `47/48` —— svc-1 断的 `l1a-enable` 事件在 `fakeWorld` 里**没有任何代码会产生**（工厂收到的 `onPoint` 被当返回对象属性回吐，`events` 又没暴露给工厂），属于硬失败而非空断言。随后一轮**变异电池**（每次只摘实现里一处，跑全量，还原，`cmp` 校字节）又挖出四类问题，全部已在本 Step 的用例文本里修好，**不许**为了让实现过得把断言改回去：
+
+| 变异（摘掉实现里的哪一处） | 修前 | 修后红在 |
+|---|---|---|
+| M1 `makeL1a({sup, onPoint})` 不传 `onPoint` | 已红 | svc-1 |
+| M2 脏点在进 ring 前 `continue` 掉（`dropped.bad` 永不涨） | 已红 | svc-3 |
+| M3 只把 `maxPoints` 放大到天文数字 | **全绿** | 仍全绿 —— 见下方"双 knob 遮蔽" |
+| M4 只把 `windowMs` 放大到 `1e12` | **全绿** | 仍全绿 —— 同上 |
+| M3+M4 两条**同时**改 | 未测过 | svc-6 红（`series.cpu.length` 不再是 301） |
+| M5 回退分支漏 `globalThis.clearInterval` | 已红（原为全绿，因 `timers` 恒空） | svc-7 |
+| M6 `setVisible(false)` 少 `clearProc()` | **全绿** | svc-4 |
+| M7 `dispose()` 少 `buildRings()` | **全绿** | svc-8 |
+| M8 每拍都 `l0.reset()` | 已红 | svc-1 / svc-3 / svc-6 |
+| M9 核数变化不 `reset()` | 已红 | svc-1 |
+| N1 成功轮不记 `proc.t` | — | svc-4 |
+| N2 停采只清 rows 不清 `proc.t` | — | svc-4 |
+| N3 非 JSON 轮也写一个 `proc.t` | — | svc-1 |
+| N4 `dispose()` 不置 `disposed` 标志（l0 行仍报 `on`） | — | svc-8 |
+
+**M6/M7 为什么原本逃逸 —— 这是 harness 级的坑，不是本任务独有：** 那两条用例写成了 `check('…', async () => {…})`。`check()` 是同步 `try/catch`，拿到的是挂起中的 Promise：第一个 `await` 之前一条断言都没跑完，就先记了 PASS；后面的断言失败变成无人 catch 的 rejection。改成 `await checkAsync(...)` 后两处变异各红一条。**本文件 ①~⑤ 段全是同步用例，不受影响。**
+
+**双 knob 遮蔽（M3/M4）是 ring 的固有性质，不是用例缺陷：** `createRing` 同时按 `windowMs` 和 `maxPoints` 裁，`keepMinutes×60+1` 这个条数上限与 `keepMinutes` 这个时间窗互为备份，单改其一时另一个仍在生效。svc-6 因此**只能**在两条同时失效时才红 —— 它已经用「断精确值 301 而不是 `<= 301`」把可断的部分钉死了，这里如实记下这个上界，别让后来的实现者以为还有更强的断言可加。
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -2619,19 +2744,96 @@ Expected: `48/48 通过`（①4 ②5 ③11 ④10 ⑤8 ⑥10），退出码 0。
 
 - [ ] **Step 5: 真机串跑（唯一一次真链路验证）**
 
-Run：
-```bash
-node --input-type=module -e "
-const {createSupervisor}=await import('./lib/collect/supervisor.js');
-const {createL0}=await import('./lib/collect/l0-node.js');
-const {createL1a}=await import('./lib/collect/l1a-typeperf.js');
-const {createCollectService}=await import('./lib/collect/service.js');
-const svc=createCollectService({getPrefs:()=>({collect:{cadence:'1s',keepMinutes:5},sources:{l0:true,l1a:true,l1b:true}}),getIntervalFn:()=>null,makeSupervisor:createSupervisor,makeL0:createL0,makeL1a:createL1a,osMod:(await import('node:os')).default});
+**写法约定：** 这段脚本必须落成文件 `tmp/e2e-svc.mjs` 再 `node tmp/e2e-svc.mjs` 跑。**不要**用 `node --input-type=module -e "…"` 内联：本机 bash 会吃掉 `\\` 转义，且内联版**漏了 `makeL1b: createL1b`**（原稿只传了 `makeL0` / `makeL1a`），进程榜那条腿根本不接，`snapshot().proc.rows` 恒空 —— 串跑就等于没验。`tmp/` 已在 `.gitignore` 里，脚本不进提交。
+
+脚本全文（相对路径按 `tmp/` 下一层写，实测跑通）：
+
+```js
+// tmp/e2e-svc.mjs —— Task 8 真机串跑：L0/L1a/L1b + supervisor 全装配。
+const { createSupervisor } = await import('../lib/collect/supervisor.js');
+const { createL0 } = await import('../lib/collect/l0-node.js');
+const { createL1a } = await import('../lib/collect/l1a-typeperf.js');
+const { createL1b } = await import('../lib/collect/l1b-powershell.js');
+const { createCollectService } = await import('../lib/collect/service.js');
+const osMod = (await import('node:os')).default;
+
+const logs = [];
+const logger = {
+  info: (...a) => console.log('[info]', ...a),
+  warn: (...a) => logs.push('warn: ' + a.map((x) => String(x?.message ?? x)).join(' ')),
+};
+
+const svc = createCollectService({
+  getPrefs: () => ({ collect: { cadence: '1s', keepMinutes: 5 }, sources: { l0: true, l1a: true, l1b: true } }),
+  getIntervalFn: () => null,
+  logger,
+  makeSupervisor: createSupervisor,
+  makeL0: createL0,
+  makeL1a: createL1a,
+  makeL1b: createL1b,
+  osMod,
+});
+
+const events = { metrics: 0, proc: 0, sources: 0, other: 0 };
+svc.onEvent((e) => {
+  if (e.type === 'metrics') events.metrics += 1;
+  else if (e.type === 'proc') events.proc += 1;
+  else if (e.type === 'sources') events.sources += 1;
+  else events.other += 1;
+});
+
 svc.start();
 await svc.setVisible(true);
-setTimeout(()=>{const s=svc.snapshot();console.log('cpu点数',s.series.cpu.length,'mem最新',s.latest.mem?.toFixed?.(1),'盘可用%',s.latest.diskFreePct?.toFixed?.(1),'net点数',s.series.netDown.length,'源',s.sources.map(r=>r.key+':'+r.state).join(','),'丢弃',JSON.stringify(s.dropped),'进程榜行数',s.proc.rows.length);svc.dispose();},9000);"
+
+await new Promise((r) => setTimeout(r, 12000));
+
+const s = svc.snapshot();
+console.log('cpu点数', s.series.cpu.length,
+  '| mem最新', s.latest.mem?.toFixed?.(1),
+  '| 盘可用%', s.series.diskFreePct.at(-1)?.v?.toFixed?.(1),
+  '| net点数', s.series.netDown.length,
+  '| net最新B/s', s.latest.netDown?.toFixed?.(1),
+  '| 源', s.sources.map((r) => `${r.key}:${r.state}`).join(','),
+  '| 丢弃', JSON.stringify(s.dropped),
+  '| 进程榜行数', s.proc.rows.length,
+  '| proc.state', s.proc.state,
+  '| proc.t', s.proc.t,
+  '| note', JSON.stringify(s.proc.note.slice(0, 60)));
+console.log('事件计数', JSON.stringify(events), '| timerBackend', s.timerBackend);
+for (const r of s.sources) console.log('  源明细', r.key, r.state, '|', r.detail, '| restarts', r.restarts, '| pid', r.pid, '| stderr', JSON.stringify((r.stderrTail || '').slice(-80)));
+console.log('warn日志条数', logs.length, logs.slice(0, 5).join(' ;; '));
+
+await svc.setVisible(false);
+svc.dispose();
+console.log('dispose 后 sources', svc.snapshot().sources.map((r) => `${r.key}:${r.state}`).join(','));
+console.log('dispose 后进程榜行数', svc.snapshot().proc.rows.length, '| note', JSON.stringify(svc.snapshot().proc.note));
+process.exit(0);
 ```
-Expected: `cpu点数 >= 6`、`net点数 >= 3`、`源` 含 `l0:on,l1a:on,l1b:on`（l1b 依赖 Task 7 Step 5 的结论，若 CPU 列被降级则这里 state 仍 on 但 `proc.note` 有说明）、`进程榜行数 >= 100`。任何一项不达标**先查 stderrTail 再改代码**，不许放宽期望值。
+
+Run: `node tmp/e2e-svc.mjs`
+
+Expected（**这是候选实现在本机连跑 5 组的实测区间，不是猜的**）：
+
+| 打印项 | 实测 5 组 | 判定线 |
+|---|---|---|
+| `cpu点数` | 9 / 10 / 10 / 10 / 10 | `>= 9`（12 s @1s 档 ≈ 11 拍，扣首拍无基线） |
+| `mem最新` | 74.3–74.9 | 只要 `0<v<100`（数值随负载动，不是判定项） |
+| `盘可用%` | 33.8（五组同值） | 只要 `0<v<100` |
+| `net点数` | 10（五组同值） | `>= 8` |
+| `net最新B/s` | 2.0e4–1.8e5 | 不判定（空闲流量） |
+| `源` | `l0:on,l1a:on,l1b:on` | 三行必须全 `on` |
+| `丢弃` | `{"stale":0,"bad":1}` ×4、`{"stale":0,"bad":2}` ×1 | `stale === 0` 且 `bad <= 2`。`bad` 的来源是**首拍 `computeCpuPct` 没有前一次样本**（返回 NaN，percent ring 判脏），这是设计行为不是缺陷；再多就是真丢点了 |
+| `进程榜行数` | 374 / 374 / 375 / 375 / 380 | `>= 350`（Task 7 实测满榜 369–392，`MAX_ROWS` 之前） |
+| `proc.t` | 例如 `1790514527706` | 非 `null`，且 `abs(Date.now() - proc.t) < 8000`（一轮 ≈ 4.4–4.9 s） |
+| `note` | `""` | 空串。非空说明降级或截断，先读它再改代码 |
+| `事件计数` | `metrics 51–52`、`proc 2–3`、`sources 4` | `proc >= 1`（真收到过榜）、`other === 0` |
+| `timerBackend` | `setInterval` | 必须是它（本脚本传 `getIntervalFn: () => null`） |
+| `warn日志条数` | 0 | 必须 0（有 warn 说明某一轮走了非 JSON 分支） |
+| `dispose 后 sources` | `l0:off,l1a:off,l1b:off` | **l0 必须是 off**（Step 3 的 `disposed` 标志；此前实测报 `l0:on` 而定时器已经清了） |
+| `dispose 后进程榜行数` | 0 | 必须 0（残值清理） |
+
+任何一项不达标**先查 `源明细` 里的 `stderrTail` / `detail` 再改代码**，不许放宽判定线。`l1b` 那一行 `state` 仍为 `on` 但 `note` 有说明，是 Task 7 Step 5 降级分支的形态；本机已裁定 `withCpu=true` 不降级（稳态周期 4.37–4.91 s < 预算 5 s），所以这里 `note` 应当为空。
+
 提交信息草稿：`feat(sysops): 采集分层编排（档位 / 可见性 / 脏点闸门）`
 
 ---
@@ -3664,7 +3866,7 @@ await checkAsync('cln-10 riskOf：浏览器/IM 缓存标 mid 并说明会被锁�
   assert.ok(SC.riskOf({ id: 'edge-cache', kind: '缓存' }).why.length > 0);
 });
 
-check('cln-真机-1 真遍历 %TEMP%：至少跑通不抛，walked>0', async () => {
+await checkAsync('cln-真机-1 真遍历 %TEMP%：至少跑通不抛，walked>0', async () => {
   const fs = await import('node:fs');
   const os = await import('node:os');
   const path = await import('node:path');
@@ -4992,7 +5194,7 @@ await checkAsync('sv-6 归一化一致：三条通路的行都能喂给同一张
   assert.equal(norm.size, null, '未知大小保持 null，界面显示「—」而不是 0 B');
 });
 
-check('sv-7 空 query 拒（不发请求也不遍历）', async () => {
+await checkAsync('sv-7 空 query 拒（不发请求也不遍历）', async () => {
   const w = svWorld(READY);
   const r = await w.svc.search({ q: '   ' });
   assert.equal(r.error, 'EMPTY_QUERY');
@@ -5400,7 +5602,7 @@ check('hc-3 全能力齐：mark 之后三项 true，另两项恒 false 且带「
   assert.equal(value.routePrefix, '/sysops');
 });
 
-check('hc-4 无 storageDomain：加载不抛、写 prefs 返回 501、能力行有中文原因', async () => {
+await checkAsync('hc-4 无 storageDomain：加载不抛、写 prefs 返回 501、能力行有中文原因', async () => {
   const w = makeHost({ noStorage: true });
   HOST.apply(w.ctx, {});
   const rows = w.injectTable().find((r) => r.name === '__SYSOPS__').value.capabilities;
@@ -5621,7 +5823,7 @@ check('hx-5 注入载荷里 routePrefix 与 client 约定同源，且不含任�
   assert.ok(!/C:\\\\Users\\\\|gongj/i.test(s), '注入载荷带了本机私有路径/用户名：' + s.slice(0, 200));
 });
 
-check('hx-6 cadence 写接口 → 落到 prefs 且 collect 收到（一次点击两处都动）', async () => {
+await checkAsync('hx-6 cadence 写接口 → 落到 prefs 且 collect 收到（一次点击两处都动）', async () => {
   const w = makeHost();
   HOST.apply(w.ctx, {});
   const r = await callRoute(w, 'POST', '/sysops/api/collect/cadence', { cadence: '5s' });
@@ -5858,7 +6060,7 @@ check('cf-6 四页签 label 与已确认原型逐字一致', () => {
   assert.deepEqual(tabs, ['资源监控', 'C 盘清理', '文件搜索', '设置']);
 });
 
-check('cf-7 consumeSse：跨 chunk 的半帧不炸、注释帧跳过、坏 JSON 只跳过该帧', async () => {
+await checkAsync('cf-7 consumeSse：跨 chunk 的半帧不炸、注释帧跳过、坏 JSON 只跳过该帧', async () => {
   const frames = [];
   const enc = new TextEncoder();
   const body = {
@@ -5873,7 +6075,7 @@ check('cf-7 consumeSse：跨 chunk 的半帧不炸、注释帧跳过、坏 JSON 
   assert.equal(frames.length, 2, '注释帧与坏帧不该产出：' + JSON.stringify(frames));
 });
 
-check('cf-8 api()：GET 走查询串、POST 走 JSON，路径一律以 routePrefix 开头', async () => {
+await checkAsync('cf-8 api()：GET 走查询串、POST 走 JSON，路径一律以 routePrefix 开头', async () => {
   const seen = [];
   globalThis.fetch = async (u, init = {}) => { seen.push([u, init.method ?? 'GET']); return { ok: true, status: 200, json: async () => ({ ok: true, data: {} }), headers: { get: () => 'application/json' } }; };
   await CLIENT.__test.api('snapshot');
@@ -5883,7 +6085,7 @@ check('cf-8 api()：GET 走查询串、POST 走 JSON，路径一律以 routePref
   assert.ok(seen.every(([u]) => u.startsWith('/sysops/api/')), JSON.stringify(seen));
 });
 
-check('cf-9 请求失败必须变成可见状态：api() 抛错时返回 error 对象而不是静默', async () => {
+await checkAsync('cf-9 请求失败必须变成可见状态：api() 抛错时返回 error 对象而不是静默', async () => {
   globalThis.fetch = async () => ({ ok: false, status: 501, json: async () => ({ ok: false, error: { code: 'PREFS_UNAVAILABLE', message: '没有 storageDomain' } }) });
   const r = await CLIENT.__test.api('prefs');
   assert.equal(r.ok, false);
