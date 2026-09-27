@@ -283,7 +283,12 @@ function alertWorld(over = {}) {
   const hitStore = over.noStore ? null : {
     available: true,
     append: async (h) => { if (over.storeFails) throw new Error('disk full'); appended.push(h); return h; },
-    list: async ({ limit } = {}) => appended.slice(-limit).reverse(),
+    // `listFails` 造的是"宿主给了 storageDomain（available 仍 true），但记录域 open() 失败"这条真实降级路：
+    // 抛的必须是带 code 的 RECORDS_UNAVAILABLE —— 形状照 `lib/alerts/store.js:66-81`，钉的就是 service 那层收口。
+    list: async ({ limit } = {}) => {
+      if (over.listFails) { const e = new Error('告警记录域 open 失败'); e.code = 'RECORDS_UNAVAILABLE'; throw e; }
+      return appended.slice(-limit).reverse();
+    },
   };
   const svc = createAlertService({
     collect,
@@ -307,11 +312,14 @@ await checkAsync('alert-1 CPU 连续 3 次越线 → emit alert 且落库一次'
   w.emitPoint('cpu', 90); w.emitPoint('cpu', 91);
   assert.equal(w.events.filter((e) => e.type === 'alert').length, 0, '两次不够，别提前报');
   w.emitPoint('cpu', 92);
+  const t3 = w.t(); // 第三个采样点的时间（假世界的约定 1：每点自带 1s 推进，此处 = 3000）
   await w.tick(); // record 的尾巴（append 之后）是异步的，不 settle 就数不清几次
   const hit = w.events.find((e) => e.type === 'alert').hit;
   assert.equal(hit.ruleId, 'r1');
   assert.equal(w.appended.length, 1);
   assert.equal(w.events.filter((e) => e.type === 'alert').length, 1, '一次命中只能有一条 alert');
+  assert.equal(w.appended[0], hit, '落库的对象必须就是判定返回的那个 hit，service 不许半路换成别的形状');
+  assert.equal(w.appended[0].t, t3, '落库时间取第三个采样点的 t（触发时刻），不是 now');
 });
 
 await checkAsync('alert-2 冷却内再越线不重复报（时间线会被同一次尖峰刷屏）', async () => {
@@ -395,6 +403,53 @@ await checkAsync('alert-10 dispose 退订：之后的采样点不再产生任何
   w.emitPoint('cpu', 92);
   assert.equal(w.appended.length, 0, 'dispose 后必须退订');
   assert.equal(w.svc.unread(), 0);
+});
+
+await checkAsync('alert-11 一个监听器抛错不许影响别的监听器与落库', async () => {
+  const w = alertWorld();
+  const got = [];
+  // 抛错的那个注册在前、正常的在后：无逐监听器隔离时它一甩手，`alert` 收不到、
+  // record 的尾巴（落库 + 降级事件）也整段跑不到，只剩 unreadCount +1 —— 那正是评审 I-1 的现场。
+  w.svc.onEvent(() => { throw new Error('SSE 写失败'); });
+  w.svc.onEvent((e) => got.push(e));
+  w.emitPoint('cpu', 90); w.emitPoint('cpu', 91); w.emitPoint('cpu', 92);
+  await w.tick();
+  assert.equal(got.filter((e) => e.type === 'alert').length, 1, '后面的监听器必须照样收到 alert');
+  assert.equal(w.appended.length, 1, '监听器抛错不许打断落库（时间线是事实，不是通知的副产品）');
+  assert.equal(w.svc.unread(), 1, '未读计数只加一次，不因隔离多算或漏算');
+  assert.ok(w.events.some((e) => e.type === 'log' && /SSE 写失败/.test(e.msg)),
+    '被甩出的监听器必须留痕（spec §4.7 禁的是不留痕的静默 catch）');
+});
+
+await checkAsync('alert-12 proc 冷却：进程榜连发多轮只落一条', async () => {
+  const w = alertWorld({ alertPrefs: { procCpu: { value: 60, consecutive: 1, cooldownSec: 600, enabled: true } } });
+  w.emitProc([{ pid: 1, name: 'render.exe', ws: 1, cpuPct: 88 }]);
+  w.adv(1000); // 真机上 l1b 每 1.6–1.9s 出一轮：这一秒的推进就是"冷却 600s 之内"
+  w.emitProc([{ pid: 1, name: 'render.exe', ws: 1, cpuPct: 95 }]);
+  await w.tick();
+  // 这条钉的是 `evaluateProc(..., lastHitAt.get(rule.id))` 那个入参：漏传一次时间线就被同一个进程每秒刷满、蓝点无界增长。
+  assert.equal(w.appended.length, 1, `冷却 600s 内两轮进程榜只该落一条，实得 ${w.appended.length}`);
+  assert.equal(w.events.filter((e) => e.type === 'alert').length, 1);
+  assert.equal(w.svc.unread(), 1);
+});
+
+await checkAsync('alert-13 hits() 可用分支原样透传 list 的顺序与 limit', async () => {
+  const w = alertWorld();
+  w.emitPoint('cpu', 90); w.emitPoint('cpu', 91); w.emitPoint('cpu', 92); // r1
+  w.emitPoint('mem', 99);                                                 // r2
+  w.emitPoint('diskFreePct', 10);                                         // r3
+  await w.tick();
+  assert.equal(w.appended.length, 3, '三条规则各命中一次，才有"顺序"可钉');
+  const r = await w.svc.hits({ limit: 2 });
+  assert.equal(r.error, null, '可用分支读成功时 error 必须是 null');
+  assert.equal(r.rows.length, 2, 'limit 必须原样交给 store（假 store 吞掉 limit 就返回 3 条）');
+  assert.equal(r.rows[0], w.appended[2], '行对象与顺序原样透传：倒序是 store 的契约，service 不重排不拷贝');
+  assert.equal(r.rows[1], w.appended[1]);
+  // 同上，available=true 但 list() 抛错（域 open 失败）也必须落成 {rows,error,code} 而不是 rejection。
+  const bad = alertWorld({ listFails: true });
+  assert.deepEqual(await bad.svc.hits({ limit: 5 }),
+    { rows: [], error: '告警记录域 open 失败', code: 'RECORDS_UNAVAILABLE' },
+    'Task 18 按 e.code 分支（store.js:18），把 rejection 甩上去就是重试风暴打死宿主');
 });
 
 console.log(`\n  ${passed}/${passed + failed} 通过`);
