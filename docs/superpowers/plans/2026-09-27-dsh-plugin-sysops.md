@@ -5261,7 +5261,7 @@ export function createCaps({ logger } = {}) {
    }, 'sysops:lifecycle');
    ```
    `hc-6` 断言的就是这里：退回的 `setInterval` 句柄必须被 `collect.dispose()` 清掉。
-9. `ctx.on('webserver/index-inject', ...)` 推 `{ kind:'global', name: GLOBAL_KEY, value }`，`value` 含 `panelId/label/panelOrder/routePrefix/api: ROUTE_PREFIX + '/api'`、`capabilities: caps.read()`、`capabilityRows: caps.rows()`、`cadences: COLLECT_CADENCE`、`sourceKeys: SOURCE_KEYS`、`defaults`（`{ procIntervalSec, procMaxRows, keepMinutes, searchPort }` —— `searchPort` 必须在里面，Task 23 的 `probeHint` 端口号吃 `cfg().defaults.searchPort`，漏了它就是界面写死 3417 的假象）、`redlines`（`BRANCH_IDS` 里 `b-system-dir/b-recycle-bin/b-program-files/b-registry` 四条对应的中文说明，设置页红线 notice 直接吃它，**不再在 client.js 里抄一份**）、`searchAdvice`（`ADVICE` 三条，搜索页引导卡吃它）。
+9. `ctx.on('webserver/index-inject', ...)` 推 `{ kind:'global', name: GLOBAL_KEY, value }`，`value` 含 `panelId/label/panelOrder/routePrefix/api: ROUTE_PREFIX + '/api'`、`capabilities: caps.read()`、`capabilityRows: caps.rows()`、`cadences: COLLECT_CADENCE`、`sourceKeys: SOURCE_KEYS`、`defaults`（`{ procIntervalSec, procMaxRows, keepMinutes, searchPort, quarantineDir }` —— `searchPort` 与 `quarantineDir` 必须在里面：前者是 Task 23 `probeHint` 的端口号来源，漏了就是界面写死 3417 的假象；后者取 Task 14 `createQuarantine` 的**内置默认绝对路径**（宿主展开 `%LOCALAPPDATA%` 后给值），因为 prefs 的 schema 明令拒绝未展开的 `%...%` 形式（`prefq-1`），用户没设过时 prefs 里就是 `undefined`，界面没有这个回落就会渲染出字面量 `undefined`）、`redlines`（`BRANCH_IDS` 里 `b-system-dir/b-recycle-bin/b-program-files/b-registry` 四条对应的中文说明，设置页红线 notice 直接吃它，**不再在 client.js 里抄一份**）、`searchAdvice`（`ADVICE` 三条，搜索页引导卡吃它）。
 10. 常驻子进程与"不代装软件"的红线：这里**只 spawn `typeperf` / `powershell`**，绝不 spawn 安装器；`everything` 只走 HTTP 与 `execFile('es.exe')`。文件头注释写明。
 
 - [ ] **Step 4: 跑测试确认通过**
@@ -5473,7 +5473,7 @@ export function clientPayload(over = {}) {
     ],
     cadences: ['1s', '5s', 'paused'],
     sourceKeys: ['l0', 'l1a', 'l1b', 'l2'],
-    defaults: { procIntervalSec: 3, procMaxRows: 400, keepMinutes: 30, searchPort: 3417 },
+    defaults: { procIntervalSec: 3, procMaxRows: 400, keepMinutes: 30, searchPort: 3417, quarantineDir: 'C:\\Users\\gongj\\AppData\\Local\\dsh-plugin-sysops\\quarantine' },
     redlines: [],
     searchAdvice: [],
     ...over,
@@ -6092,7 +6092,7 @@ Expected: ⑤段全红（`__test.clean` 未导出），①~④段仍 `51/51` 绿
 - `planRows(plan, sel)` 的 `accText` 用 `fmtAge(now - atime)`（Task 20），`riskPill` 三态：`guardDenied → '已拒绝'`、`riskLevel==='mid' → riskWhy`、否则 `'无'`；`guardDenied.why` 原样显示（文案来自宿主 `check()` 的 `why`，**页面不自己造句**）。
 - `selTotals` 的可选集合定义：`!guardDenied && sel.has(id)`；`risky`/`rejected` 计数用来渲染 `pg2-5`/`pg2-6` 的说明文字。`selectAllIds(plan)` = 未拒 + `riskLevel==='low'` 的 id 列表（与原型 `btnSelAll` 同规则），并让「全选已跳过 N 项标风险的（应用正在运行）」这句话由 `risky` 驱动。
 - `applyBody` 是**唯一**构造执行请求的地方，签名 `applyBody(planId, ids, mode)`；`mode` 只能取宿主 `MODES` 三值（Task 15），页面不引入第四种。注释写死理由：路径永远来自宿主侧快照，前端连路径都不发（spec §3.3）。
-- `quarantineText(prefs)` 直接渲染 `prefs.clean.quarantineDir` 与 `keepDays`。**这里收口计划期发现的口径冲突**：原型 `.dsh-quarantine\2026-09-27\` 是演示串，运行时的权威值来自 prefs（Task 3 的 `expandPath` 解析 `%LOCALAPPDATA%\dsh-plugin-sysops\quarantine`）。Task 25 回写 spec §8 未决项时把这条记为已定。
+- `quarantineText(prefs)` 直接渲染 `prefs.clean.quarantineDir` 与 `keepDays`；**prefs 没设过时回落到 `cfg().defaults.quarantineDir`**（Task 19 载荷里宿主展开好的绝对路径），两条都没有才渲染「尚未设置暂存目录」—— 一律不许渲染出字面量 `undefined`（`optionalString` 与 `prefq-1` 的语义决定了"空"在服务端就是 `undefined`，不是 `''`）。**这里收口计划期发现的口径冲突**：原型 `.dsh-quarantine\2026-09-27\` 是演示串，运行时的权威值来自 prefs（Task 3 的 `expandPath` 解析 `%LOCALAPPDATA%\dsh-plugin-sysops\quarantine`）。Task 25 回写 spec §8 未决项时把这条记为已定。
 - 按钮禁用必须带原因：`sel.size === 0 → 「勾选至少一项」`、`caps.storageDomain === false → 「配置只读：宿主未提供 storageDomain」` 且两个写按钮 `disabled`。
 - 所有错误渲染在触发它的那张卡内部（`.so-notice-red` / `.so-notice-amber`），**无浮层**（cf-12 与 `pg2-13` 双钉）。
 
@@ -6437,6 +6437,7 @@ Expected: ⑦段全红（`__test.settings` 未导出），①~⑥段仍 `77/77` 
 - `ruleStateText(v)`：`null` → 「本机尚未写入清理规则，当前只用内置库」；`[]` → 「本机规则已全部清空」；数组 → 「本机规则 N 条」。三态分开是 spec §3.2 的硬要求（`null` ≠ `[]`）。
 - 表单控件全部自研：档位/after 用 `.so-seg`，数值输入用 `<input class="so-input">` + 提交时 `clamp`（钳制范围与 Task 19 的 `resolveConfig`、Task 3 的 schema 区间一致，**界面钳一次是为了不出现"填 9999 保存成功但实际跑 120"的错觉**，宿主仍要再钳一次）。`pg4-*` 不测交互（桩 React 不持久化状态），钳制的真断言在 `test/prefs.test.mjs`（Task 3）。
 - 搜索通路两字段（`pg4-8`）的**取值来源分两层，别混**：当前生效值读 `prefs.search.port` / `prefs.search.esPath`（用户设过的，Task 3 已把这两键收进 schema），占位与回落读 `cfg().defaults.searchPort`（Task 19 载荷）。保存走 `patchBody({ search: { port, esPath } })`。
+- **`esPath` 输入框的 value 必须写 `prefs.search.esPath ?? ''`**：`optionalString` 把空串归一成 `undefined`（"不留空壳字段"），服务端 normalize 后这个键很可能是 `undefined` 而不是 `''`；直接塞进受控 input 会渲染出字面量 `undefined`，用户清空一次路径就变成了字符串 `"undefined"`。
 
 - [ ] **Step 4: 跑测试确认通过**
 
