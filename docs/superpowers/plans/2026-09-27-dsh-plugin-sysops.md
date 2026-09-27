@@ -1795,6 +1795,41 @@ check('tp-9 COUNTER_ARGS / 窗口参数是常量，界面文案要用它们而�
   assert.equal(L1A.WINDOW_SAMPLES, 30);
   assert.equal(L1A.INTERVAL_SEC, 1);
 });
+
+check('tp-10 l1a 门面：onData 收 Buffer、解码一次、下游抛错不外抛、disable 清表头', () => {
+  // createL1a 是 l1a 唯一有副作用的部分，没有用例就等于"与代码不符的陈述"。
+  const started = [];
+  const stops = [];
+  const sup = {
+    start: (key, spec) => started.push({ key, spec }),
+    stop: (k) => stops.push(k),
+    state: () => ({ state: 'on' }),
+  };
+  const pts = [];
+  const a = L1A.createL1a({
+    sup,
+    onPoint: (p) => {
+      if (p.metric === 'netUp' && p.v === 131074.5) throw new Error('boom-downstream');
+      pts.push(p);
+    },
+  });
+  a.enable();
+  assert.equal(started[0].key, 'l1a');
+  assert.equal(started[0].spec.rolling, true);
+  assert.deepEqual(started[0].spec.args.slice(-4), ['-sc', '30', '-si', '1']);
+  const feed = (s) => started[0].spec.onData(Buffer.from(s, 'latin1'));
+  feed(FIX[0]);
+  feed(FIX[3]);            // netDown 已入列，netUp 那一点抛错 —— 必须被吞下，不外抛
+  assert.deepEqual(pts.map((p) => p.metric), ['netDown']);
+  assert.equal(pts[0].v, 1048577.5);
+  feed(FIX[1]);            // 抛错之后的下一行仍要出数，不能整条流哑掉
+  assert.deepEqual(pts.map((p) => p.metric), ['netDown', 'netDown', 'netUp']);
+  assert.equal(a.state().state, 'on');
+  a.disable();
+  assert.deepEqual(stops, ['l1a']);
+  feed(FIX[1]);            // disable 后表头必须已清空：不许拿旧 index 去解新列布局
+  assert.equal(pts.length, 3);
+});
 ```
 
 - [ ] **Step 3: 跑测试确认失败**
@@ -1919,10 +1954,16 @@ export function decodePd(buf) {
 
 > `createL1a.onData` 收到的是 Buffer 完整行（Task 5 在**字节**上框行，见 Ruling-29 ⑥），所以解码必须写在这一层：`const line = decodePd(raw)`，之后 `parseHeader` / `parseSampleLine` 才拿到单行字符串。反过来在监督者里 `toString` 会把 GBK 尾字节变成乱码并把乱码推给 Task 7 的 UTF-8 消费方。
 
+评审返工加四条（tp-10 钉住前两条，后两条靠既有口径）：
+1. **`onData` 体必须包 try/catch**：`onPoint` 是调用方给的回调，它抛错会**同步冒出** child stdout 的 `data` 处理器 —— 真机就是 uncaughtException 带崩宿主，而且同一 chunk 里后面的完整行会被丢掉（监督者的 while 被打断）。吞下时把因由留在 l1a 一侧可读（`lastError` 计数或字段，`state()` 里带出去给 Task 8）。
+2. **`disable()` 里 `headers = null`**：不清就会在"新表头解析失败"时拿旧 index 去解新列布局，出静音的错值。
+3. **`HEADER_PATH_RE` 的实例组用贪婪 `\((.*)\)\\`**：`[^)]*` 遇到实例名里有 `)`（如 `Intel(R) Ethernet Connection (7) I219-V`）会整张表头解析成 null ⇒ 采集静默 0 点。本机 PDH 把 `()` 折成 `[]`，所以这是防御别的机器的；同时"连续若干行都没认出表头"要把因由挤进 `detail`，别只报"重启达上限"。
+4. **`""` 空列不许当 0**：`Number('')` 是 0，会画出一个假谷底（tp-6 反对的正是这个）。计入前先判非空。
+
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `node test/collect.test.mjs`
-Expected: `29/29 通过`（①4 ②5 ③11 ④9），退出码 0。
+Expected: `30/30 通过`（①4 ②5 ③11 ④10），退出码 0。
 
 - [ ] **Step 5b: 变异自查（断言强度取证）**
 
@@ -1932,6 +1973,9 @@ Expected: `29/29 通过`（①4 ②5 ③11 ④9），退出码 0。
 3. 把 `if (!Number.isFinite(n)) continue;` 换成"当成 0 计入"：`if (!Number.isFinite(n)) { sums[c.metric] = (sums[c.metric] ?? 0) + 0; seen += 1; continue; }` → tp-6 必须红。
    （注意别只改 `sums[...] + (Number.isFinite(n) ? n : 0)` 那一处 —— 前面已经 `continue` 掉了，那种改法是**空变异**，预检实测它 9/9 全绿。）
 三条都咬红才算这一步过；任何一条不红，说明断言没承重，先补断言再往下走。预检实测读数：变异 1 → tp-7 红；变异 2 → tp-8 红；变异 3 → tp-6 红。
+再加两条针对返工项的变异（tp-10 必须各咬红一次）：
+4. 去掉 `onData` 的 try/catch → tp-10 必须红（`onPoint` 抛错冒出 `data` 处理器 = 真机 uncaughtException 带崩宿主）。
+5. `disable()` 里去掉 `headers = null` → tp-10 最后一条必须红（旧 index 解新列布局 = 静音错值）。
 
 - [ ] **Step 6: 写探针脚本 `scripts/probe-collect.mjs`**
 
@@ -2213,7 +2257,7 @@ export function createL1b({ sup, onRows, intervalSec = INTERVAL_SEC, maxRows = M
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `node test/collect.test.mjs`
-Expected: `36/36 通过`（①4 ②5 ③11 ④9 ⑤7）。
+Expected: `37/37 通过`（①4 ②5 ③11 ④10 ⑤7）。
 
 - [ ] **Step 5: 真机端到端（含 CPU 列的代价判定）**
 
@@ -2428,7 +2472,7 @@ svc-1 里的 `l1a-enable` 事件是测试替身的产物：`makeL1a` 收到 `{ o
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `node test/collect.test.mjs`
-Expected: `46/46 通过`（①4 ②5 ③11 ④9 ⑤7 ⑥10），退出码 0。
+Expected: `47/47 通过`（①4 ②5 ③11 ④10 ⑤7 ⑥10），退出码 0。
 
 - [ ] **Step 5: 真机串跑（唯一一次真链路验证）**
 
@@ -6589,7 +6633,7 @@ SKIP_LOCAL=1 node test/search.test.mjs
 Expected：
 - `plugin.test.mjs` `90/90`（①15 rt ②8 hx ③12 cf ④16 pg1 ⑤14 pg2 ⑥12 pg3 ⑦13 pg4）
 - `host-compat.test.mjs` `8/8`（hc-1..hc-8）
-- `collect.test.mjs` `46/46`、`alerts.test.mjs` `28/28`、`clean.test.mjs` `46/46`（含 1 条真机）、`search.test.mjs` `26/26`、`prefs.test.mjs` `23/23`（①3 ②4 ③6 ④10）、`guard.test.mjs` `19/19`（另需打印「拒绝断言 61 条 / 分支命中 16/16」，见 Step 2）
+- `collect.test.mjs` `47/47`、`alerts.test.mjs` `28/28`、`clean.test.mjs` `46/46`（含 1 条真机）、`search.test.mjs` `26/26`、`prefs.test.mjs` `23/23`（①3 ②4 ③6 ④10）、`guard.test.mjs` `19/19`（另需打印「拒绝断言 61 条 / 分支命中 16/16」，见 Step 2）
 - `SKIP_LOCAL=1` 两行：`clean` → `45/45 + 1 SKIP`，`search` → Everything 相关真机用例 SKIP、walk 通路仍实跑
 - **任何一条 FAIL 都不算过**；出现"用例静默通过"（断言对象为空数组的 `.some()`）要按 Step 3 的变异法回查。
 
