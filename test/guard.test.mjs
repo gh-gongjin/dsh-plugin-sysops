@@ -68,7 +68,8 @@ check('guard-01 系统目录：C:\\Windows 三种写法都拒', () => {
   deny('c:\\windows\\Temp', 'b-system-dir');
   // 受保护范围扩到任意盘：异盘小写形（非变体）也必须是 b-system-dir
   deny('D:\\windows\\x', 'b-system-dir');
-  // 只能由 { drive: null, segs: ['Windows', 'System32'] } 命中的形态（异盘根下无 C 盘 Windows）
+  // 异盘 System32 由根 `Windows`（drive: null）兜住，与上一条同源
+  // （原先另有一条 Windows\System32 规则，被根规则完全覆盖后已在 fd42b26 删除）
   deny('D:\\Windows\\System32\\drivers\\x', 'b-system-dir');
 });
 check('guard-02 回收站：$Recycle.Bin 与其内层目录都拒', () => {
@@ -185,6 +186,11 @@ check('guard-17 正常路径必须放行（防过度收紧）', () => {
   allow('C:\\Users\\gongj\\AppData\\Local\\npm-cache\\_cacache', { mode: 'glob' });
   allow('C:\\Users\\gongj\\AppData\\Local\\pip\\Cache\\*', { mode: 'glob' });
   allow('C:\\Users\\gongj\\AppData\\Roaming\\DingTalk\\*\\log', { mode: 'glob' });
+  // `%` 在 Windows 文件名里合法：URL 编码残留与百分比名不得被未闭合变量支误伤
+  allow('C:\\Users\\gongj\\Downloads\\my%20file.zip');
+  allow('C:\\Users\\gongj\\Downloads\\100%.jpg');
+  allow('C:\\Users\\gongj\\Desktop\\A%B\\notes.md');
+  allow('C:\\Users\\gongj\\AppData\\Local\\Microsoft\\Windows\\INetCache\\Http\\100%-cn3-x.com_-0\\page.dat');
 });
 check('guard-18 分支清单 100% 覆盖（spec §5 验收门禁 2）', () => {
   // 直接读台账，不再另造一份探针清单：另造就会和上面的用例漂移（历史上就漏过 glob 一条）。
