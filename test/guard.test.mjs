@@ -66,11 +66,17 @@ check('guard-01 系统目录：C:\\Windows 三种写法都拒', () => {
   deny('C:\\Windows\\win.ini', 'b-system-dir');
   deny('C:\\Windows', 'b-system-dir');
   deny('c:\\windows\\Temp', 'b-system-dir');
+  // 受保护范围扩到任意盘：异盘小写形（非变体）也必须是 b-system-dir
+  deny('D:\\windows\\x', 'b-system-dir');
+  // 只能由 { drive: null, segs: ['Windows', 'System32'] } 命中的形态（异盘根下无 C 盘 Windows）
+  deny('D:\\Windows\\System32\\drivers\\x', 'b-system-dir');
 });
 check('guard-02 回收站：$Recycle.Bin 与其内层目录都拒', () => {
   deny('C:\\$Recycle.Bin', 'b-recycle-bin');
   deny('C:\\$Recycle.Bin\\S-1-5-21-100', 'b-recycle-bin');
   deny('C:\\Recycler', 'b-recycle-bin');
+  // 异盘卷根同样有回收站：删了就真没了，没有「还原」
+  deny('D:\\$Recycle.Bin\\S-1-5-21-1\\x', 'b-recycle-bin');
 });
 check('guard-03 Program Files：含 (x86) 与子层都拒', () => {
   deny('C:\\Program Files\\App', 'b-program-files');
@@ -106,6 +112,8 @@ check('guard-09 .. 逃逸到受保护区', () => {
   deny('C:\\Users\\gongj\\AppData\\..\\..\\Windows\\x', 'b-parent-escape');
   deny('C:\\Users\\gongj\\..\\..\\$Recycle.Bin\\x', 'b-parent-escape');
   deny('..', 'b-parent-escape');
+  // drive-relative 写法：预检切出的 token 是 `C:..`，只有解析后的段检查能拦住
+  deny('C:..\\Windows\\x', 'b-parent-escape');
 });
 check('guard-10 junction 逃逸：raw 干净但 real 落进受保护区', () => {
   deny('C:\\Users\\gongj\\link\\win.ini', 'b-junction-escape',
@@ -114,11 +122,15 @@ check('guard-10 junction 逃逸：raw 干净但 real 落进受保护区', () => 
     { real: 'C:\\Program Files\\x\\a' });
   deny('C:\\Users\\gongj\\link\\b', 'b-junction-escape',
     { real: 'C:\\$RECYCLE.BIN\\S-1-5-21-1\\b' });
+  // fail-closed：real 键存在但不是有效非空字符串 → 无法确认落点，拒绝
+  deny('C:\\Users\\gongj\\link\\c', 'b-junction-escape', { real: null });
 });
 check('guard-11 未展开的 %VAR%', () => {
   deny('%LOCALAPPDATA%\\Temp', 'b-unexpanded-var');
   deny('C:\\Users\\%USERNAME%\\AppData\\Local\\Temp', 'b-unexpanded-var');
   deny('C:\\Windows\\%SystemRoot%\\x', 'b-unexpanded-var');
+  // 未闭合的 %变量引用：展开位置不明，同样不可控
+  deny('C:\\Users\\gongj\\Desktop\\%USERNAME', 'b-unexpanded-var');
 });
 check('guard-12 省略盘符 / 相对路径 / 只到盘根', () => {
   deny('Users\\gongj\\AppData\\Local\\Temp', 'b-no-drive');
@@ -138,6 +150,7 @@ check('guard-14 操作白名单：属主 / ACL / 注册表 / 结束进程一律�
     const r = checkOperation(op);
     assert.equal(r.allow, false, `操作 ${op} 应被拒绝`);
     assert.equal(r.branch, 'b-operation-denied');
+    assert.ok(r.why.length > 0, `操作 ${op} 拒绝必须有原因文案`);
     seenBranches.set('b-operation-denied', seenBranches.get('b-operation-denied') + 1);
     denyAssertions += 1;
   };
@@ -150,12 +163,20 @@ check('guard-15 注册表形态路径直接拒（不靠 checkOperation 兜）', 
   deny('HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion', 'b-registry');
   deny('HKEY_CURRENT_USER\\Software\\x', 'b-registry');
   deny('REG:HKCU\\Software\\x', 'b-registry');
+  // 注册表形态嵌在段里（串首不是根键）：归因必须是 b-registry，不能退化成 b-no-drive
+  deny('Computer\\HKEY_LOCAL_MACHINE\\SOFTWARE\\x', 'b-registry');
+  deny('Registry::HKEY_LOCAL_MACHINE\\Software\\x', 'b-registry');
 });
 check('guard-16 非法输入：非字符串 / 空串 / 超长', () => {
   deny('', 'b-bad-input');
   deny(123, 'b-bad-input');
   deny(null, 'b-bad-input');
   deny('C:\\' + 'x'.repeat(32768), 'b-bad-input');
+  // 系统边界：opts 传 null / 缺省不得抛 TypeError（默认参数只对 undefined 生效）
+  assert.equal(Guard.check('C:\\Users\\gongj\\AppData\\Local\\Temp', null).allow, true,
+    'opts=null 应正常判定为放行');
+  assert.equal(Guard.check('C:\\Windows\\win.ini').branch, 'b-system-dir',
+    'opts 缺省应正常判定');
 });
 check('guard-17 正常路径必须放行（防过度收紧）', () => {
   allow('C:\\Users\\gongj\\AppData\\Local\\Temp');
