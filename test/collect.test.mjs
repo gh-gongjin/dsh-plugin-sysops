@@ -452,5 +452,98 @@ check('tp-10 l1a 门面：onData 收 Buffer、解码一次、下游抛错不外�
   assert.equal(a.state().noHeaderRuns, 1);   // 阈值是 5，这里未到，只验计数本身在走
 });
 
+/* ⑤段：PowerShell 常驻进程榜 */
+const L1B = await import('../lib/collect/l1b-powershell.js');
+const osMod = await import('node:os');   // 顶层 await：check() 的回调是同步的，`await` 写在体内不会生效
+
+const oneRow = (over = {}) => JSON.stringify({
+  t: 1760000000000,
+  rows: [{ id: 4, n: 'svchost.exe', ws: 1024 ** 2, cpu: 12.5 }, { id: 7, n: 'chrome.exe', ws: 512 * 1024 ** 2 / 1024, cpu: 0 }, ...[over.extra].filter(Boolean)],
+});
+
+check('ps-1 buildLoopScript：常驻 while、UTF-8 前置、条数上限、采样间隔都在脚本里写死', () => {
+  const s = L1B.buildLoopScript({ intervalSec: 3, maxRows: 400, withCpu: true });
+  assert.match(s, /\$OutputEncoding=\[Console\]::OutputEncoding=\[Text\.Encoding\]::UTF8/, '不设 UTF-8，中文进程名会变问号');
+  // 预检真机读数：语句只用空格拼接 ⇒ powershell exit=1、stdout 0 字节（"表达式或语句中包含意外的标记"）。
+  // 这两条把"能跑"钉进用例，而不是留给 Step 5 的肉眼。
+  assert.match(s, /::UTF8;/, '语句之间必须有分号');
+  assert.doesNotMatch(s, /Write-Output \$/, '$? 是布尔不是那行 JSON');
+  assert.match(s, /while\(\$true\)/);
+  assert.match(s, /Start-Sleep -Seconds 3/);
+  assert.match(s, /Select-Object -First 400/);
+  assert.match(s, /ConvertTo-Json -Compress/);
+  assert.match(s, /PercentProcessorTime/, 'withCpu=true 必须取 CPU');
+});
+
+check('ps-2 withCpu=false 时不查 Perf 表（CPU 列实测超预算时的降级分支）', () => {
+  const s = L1B.buildLoopScript({ intervalSec: 3, maxRows: 400, withCpu: false });
+  assert.doesNotMatch(s, /PercentProcessorTime/);
+  assert.match(s, /WorkingSetSize/);
+});
+
+check('ps-3 parseProcLine 归一化：id→pid、n→name、ws→字节、cpu→百分数（按核数均摊）', () => {
+  const r = L1B.parseProcLine(oneRow(), { procCount: 8 });
+  assert.equal(r.t, 1760000000000);
+  assert.equal(r.rows.length, 2);
+  assert.deepEqual({ ...r.rows[0] }, { pid: 4, name: 'svchost.exe', ws: 1024 ** 2, cpuPct: 1.5625 });
+});
+
+check('ps-4 CPU 缺列（withCpu=false 或系统未给）时 cpuPct 为 null，不是 0', () => {
+  const text = JSON.stringify({ t: 1, rows: [{ id: 9, n: 'a.exe', ws: 10 }] });
+  const r = L1B.parseProcLine(text, { procCount: 8 });
+  assert.equal(r.rows[0].cpuPct, null);
+  assert.equal(r.rows[0].ws, 10);
+  // 真机第一轮 391 行里就有 2 行是 `"cpu":null`（进程刚建、还没进 Perf 表）。
+  // `Number(null) === 0`，所以这一种必须单独钉：显式的"没测到"不许被折成 0%。
+  const n = L1B.parseProcLine(JSON.stringify({ t: 1, rows: [{ id: 9, n: 'a.exe', ws: 10, cpu: null }] }), { procCount: 8 });
+  assert.equal(n.rows[0].cpuPct, null);
+});
+
+check('ps-5 非 JSON 行（PowerShell 的告警、进度条、空行）返回 null 而不是抛', () => {
+  assert.equal(L1B.parseProcLine('Write-Error : 找不到驱动', { procCount: 8 }), null);
+  assert.equal(L1B.parseProcLine('', { procCount: 8 }), null);
+  assert.equal(L1B.parseProcLine('{"rows":"不是数组"}', { procCount: 8 }), null);
+});
+
+check('ps-6 单行超长（实测 391 进程 / 行 21018 字节）不影响解析；rows 超过 maxRows 截断并计数', () => {
+  const rows = Array.from({ length: 600 }, (_, i) => ({ id: i + 1, n: 'p' + i, ws: 1024, cpu: 0 }));
+  const r = L1B.parseProcLine(JSON.stringify({ t: 5, rows }), { procCount: 8, maxRows: 400 });
+  assert.equal(r.rows.length, 400);
+  assert.equal(r.truncated, 200);
+});
+
+check('ps-7 默认参数与实测一致：sleep 3s，但实际周期 4.6–4.9s ⇒ 心跳基准另算', () => {
+  assert.equal(L1B.INTERVAL_SEC, 3);
+  assert.equal(L1B.MAX_ROWS, 400);
+});
+
+/* 预检裁定：⑤段新增且只新增这一条（台账 Ruling-38）—— createL1b 是 l1b 唯一有副作用的部分，
+   而预检实测"喂 Buffer 时每一行都判成非 JSON"，没有门面对象就等于把这条静默断流留在交付里。 */
+check('ps-8 l1b 门面：onData 收 Buffer、UTF-8 解码一次、非 JSON 行走 onRows(null, line) 不静默', () => {
+  const started = [], stops = [];
+  const sup = {
+    start: (key, spec) => started.push({ key, spec }),
+    stop: (k) => { stops.push(k); return { stopped: true }; },
+    state: () => ({ state: 'on' }),
+  };
+  const got = [];
+  const b = L1B.createL1b({ sup, onRows: (parsed, line) => got.push(parsed ? 'rows' : 'noise') });
+  b.enable();
+  assert.equal(started[0].key, 'l1b');
+  assert.deepEqual(started[0].spec.args.slice(0, 3), ['-NoProfile', '-NonInteractive', '-Command']);
+  assert.equal(started[0].spec.intervalMs, 5000, '心跳按实际周期（sleep 3s + 干活 1.6–1.9s）算，不是 sleep 秒数');
+  const feed = (s) => started[0].spec.onData(Buffer.from(s, 'utf8'));
+  // 中文进程名过 UTF-8：不加 UTF-8 前置时真机是 GBK 字节（实测 b9a8bdf8），加了才是这里的 UTF-8
+  feed(JSON.stringify({ t: 1760000000000, rows: [{ id: 4, n: '龚进.exe', ws: 1024, cpu: 8 }] }));
+  assert.deepEqual(got, ['rows']);
+  assert.equal(b.latest().rows[0].name, '龚进.exe');
+  assert.equal(b.latest().rows[0].cpuPct, 8 / osMod.cpus().length);   // 均摊口径，核数跟随本机而不是写死 8
+  feed('Write-Error : 找不到驱动');                                 // 非 JSON 行必须走 (null, line) 分支，不许静默 return
+  assert.deepEqual(got, ['rows', 'noise']);
+  assert.equal(b.state().state, 'on');
+  b.disable();
+  assert.deepEqual(stops, ['l1b']);
+});
+
 console.log(`\n  ${passed}/${passed + failed} 通过`);
 process.exit(failed ? 1 : 0);
