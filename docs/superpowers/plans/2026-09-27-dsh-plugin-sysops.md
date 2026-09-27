@@ -150,7 +150,7 @@ async function checkAsync(name, fn) {
 
 **Interfaces:**
 - Consumes: 无
-- Produces: `lib/kv-schema.js` 导出 `makeSchema` `requiredString` `optionalString` `requiredInt` `optionalInt` `requiredNumber` `optionalNumber` `optionalBool` `requiredBool` `requiredEnum` `optionalEnum` `arrayOfItem` `arrayOf` `record` `domainTable` `defineDomain` `UNIT_NAME_RE` —— 与参照实现同名同签名。
+- Produces: `lib/kv-schema.js` 导出 `makeSchema` `requiredString` `optionalString` `nullableString` `requiredInt` `optionalInt` `requiredNumber` `optionalNumber` `optionalBool` `requiredBool` `requiredEnum` `optionalEnum` `arrayOfItem` `arrayOf` `record` `domainTable` `defineDomain` `UNIT_NAME_RE` —— **共 18 个**，与参照实现逐字节同源、同名同签名。（本段原先漏列 `nullableString` 并写"16 个"，是照旧快照数的；Task 1 执行时实测参照文件 250 行 18 导出，"逐字节复制"是更硬的约束，故以现值为准 —— 见台账 Ruling-8。）
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -158,7 +158,7 @@ async function checkAsync(name, fn) {
 
 ```js
 /* ①段：kv-schema 底座 */
-const { defineDomain, domainTable, record, requiredString, optionalInt, UNIT_NAME_RE } =
+const { defineDomain, domainTable, record, requiredString, optionalInt, optionalString, UNIT_NAME_RE } =
   await import('../lib/kv-schema.js');
 
 check('schema-1 record 丢弃未声明字段（确定性优先）', () => {
@@ -177,7 +177,9 @@ check('schema-3 defineDomain 挡下非法 domain 名 / 表名 / 接受 null 的 
     /domain 名/);
   assert.throws(() => defineDomain({ name: 'sysops_prefs', version: 1, tables: { 'Bad-Table': domainTable(record({})) } }),
     /表名/);
-  assert.throws(() => defineDomain({ name: 'sysops_prefs', version: 1, tables: { t: domainTable(record({})) }, global: { schema: record({}) } }),
+  // 「接受 null 的 global」必须用一个真能吞下 null 的 schema：record({}) 连 null 都不收（抛「记录 必须是对象」），
+  // 守卫永远不会被触发，那条断言就成了假断言。optionalString 才把 null 归一成 undefined。
+  assert.throws(() => defineDomain({ name: 'sysops_prefs', version: 1, tables: { t: domainTable(record({})) }, global: { schema: optionalString('g') } }),
     /不能接受 null/);
 });
 
@@ -241,8 +243,8 @@ Expected: `3/3 通过`，退出码 0。
 - [ ] **Step 5: 留档**
 
 Run: `node -e "import('./lib/kv-schema.js').then(m=>console.log(Object.keys(m).length))"`
-Expected: 打印导出个数（应为 16），把数字贴进任务汇报。
-（无 git：本任务不提交；提交信息草稿 `feat(sysops): 包骨架与 kv-schema 底座`）
+Expected: 打印导出个数（**18**，与上面 Produces 清单逐一对得上；少一个说明复制漏了或多打了），把数字贴进任务汇报。
+收尾提交（按上文「关于 commit 步骤」）：`git add package.json cordis.yml lib/kv-schema.js test/prefs.test.mjs`，提交信息 `feat(sysops): 包骨架与 kv-schema 底座`。
 
 ---
 
