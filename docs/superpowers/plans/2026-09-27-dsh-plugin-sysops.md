@@ -922,7 +922,7 @@ Run: `SKIP_LOCAL=1 node test/prefs.test.mjs`（确认无真机用例被误跳）
 **Interfaces:**
 - Consumes: 无（只用 `node:os` / `node:fs`，且可注入替换）
 - Produces:
-  - `createRing({ windowMs = 1_800_000, maxPoints = 1800, now = Date.now })` → `{ push(point) → 'ok'|'stale'|'bad', series(from?, to?) → [{t,v}], latest() → {t,v}|null, stats() → {points, droppedStale, droppedBad}, clear() }`
+  - `createRing({ windowMs = 1_800_000, maxPoints = 1800, percent = false, now = Date.now })` → `{ push(point) → 'ok'|'stale'|'bad', series(from?, to?) → [{t,v}], latest() → {t,v}|null, stats() → {points, droppedStale, droppedBad}, clear() }`（`percent: true` 时值域限 0~100，供 cpu/mem 用；字节类指标不传）
   - `computeCpuPct(prev, cur) → number`（0~100，无 prev 时返回 `NaN`）
   - `computeMemPct(total, free) → number`
   - `createL0({ osMod = os, fsMod = fs, drive = 'C:', now = Date.now })` → `{ read() → {t, cpu, mem, diskFree, diskTotal}, reset() }`（`diskFree` / `diskTotal` 为**字节**；`cpu` / `mem` 为 0~100 百分数）
@@ -940,14 +940,17 @@ const clock = () => { let t = 0; return { now: () => t, advance: (ms) => { t += 
 check('ring-1 时间窗与条数双上限，先到先裁', () => {
   const c = clock();
   const r = createRing({ windowMs: 1000, maxPoints: 3, now: c.now });
-  for (let i = 0; i < 3; i++) { c.advance(100); r.push({ t: c.now, v: i }); }
+  // `t` 必须是**数值**：`c.now` 是函数引用，`Number.isFinite(point.t)` 会把它判成脏点，
+  // 三条上限里的那条"乱序/脏值丢弃"会让本例一个点都存不进去。
+  for (let i = 0; i < 3; i++) { c.advance(100); r.push({ t: c.now(), v: i }); }
   assert.equal(r.series().length, 3);
   c.advance(100);
-  r.push({ t: c.now, v: 9 });          // 第 4 点：条数上限裁掉最老
+  r.push({ t: c.now(), v: 9 });          // 第 4 点：条数上限裁掉最老
   assert.equal(r.series()[0].v, 1);
   c.advance(5000);
-  r.push({ t: c.now, v: 10 });          // 时间窗外全部过期
-  assert.deepEqual(r.series(), [{ t: 5600, v: 10 }]);
+  r.push({ t: c.now(), v: 10 });          // 时间窗外全部过期
+  // 时间线：100/200/300 → 400 → 5400。末次 now() 是 5400，不是 5600。
+  assert.deepEqual(r.series(), [{ t: 5400, v: 10 }]);
 });
 
 check('ring-2 乱序点丢弃并计数（一个倒着走的点会把曲线拉出假尖峰）', () => {
@@ -982,12 +985,16 @@ const { computeCpuPct, computeMemPct, createL0 } = await import('../lib/collect/
 const cpu = (user, idle) => ({ times: { user, nice: 0, sys: 0, idle, irq: 0 } });
 
 check('l0-1 CPU 用差值算，不是瞬时值', () => {
-  const pct = computeCpuPct([cpu(10, 90)], [cpu(30, 70)]);   // 20 忙 / 20 闲 → 50%
+  // 两次样本的**总 ticks 必须增长**：`(10,90)→(30,70)` 总量恒定 100，`totalDelta` 是 0，
+  // 那是"CPU 计数器没动"的脏状态（NaN），不是 50%。这里让总增量 40、忙增量 20。
+  const pct = computeCpuPct([cpu(10, 90)], [cpu(30, 110)]);   // 忙 +20 / 总 +40 → 50%
   assert.equal(pct, 50);
 });
 
 check('l0-2 多核平均；无上一次样本时返回 NaN（ring 会丢并计数）', () => {
-  assert.equal(computeCpuPct([cpu(10, 90), cpu(50, 50)], [cpu(30, 70), cpu(70, 30)]), 60);
+  // 核 1：忙 +30 / 总 +40 = 75%；核 2：忙 +30 / 总 +60 = 50%。
+  // 按总 ticks 加权是 60/100 = 60%，百分比算术平均是 62.5% —— 断 60 才能钉住"加权"口径。
+  assert.equal(computeCpuPct([cpu(10, 90), cpu(50, 50)], [cpu(40, 100), cpu(80, 80)]), 60);
   assert.ok(Number.isNaN(computeCpuPct(null, [cpu(1, 1)])));
   assert.ok(Number.isNaN(computeCpuPct([cpu(10, 90)], [cpu(10, 90)])), '忙闲增量都为 0 时是 0/0，必须当脏值');
 });
@@ -1000,7 +1007,9 @@ check('l0-3 内存占用率', () => {
 check('l0-4 read() 交出字节口径的磁盘与百分数口径的 cpu/mem', () => {
   let n = 0;
   const osMod = {
-    cpus: () => (n++ === 0 ? [cpu(10, 90)] : [cpu(20, 80)]),
+    // 第二次样本总 ticks 从 100 涨到 120、idle 不涨 → 满负荷 100%。
+    // 原先写的 `(20,80)` 总量仍是 100，落到 `totalDelta <= 0` 分支变 NaN。
+    cpus: () => (n++ === 0 ? [cpu(10, 90)] : [cpu(30, 90)]),
     totalmem: () => 16 * 1024 ** 3,
     freemem: () => 8 * 1024 ** 3,
   };
