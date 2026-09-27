@@ -2448,9 +2448,9 @@ Expected 与决策规则（预检实测已把这些数字钉死，记进汇报�
 - Produces:
   - `createCollectService({ getPrefs, logger, now, getIntervalFn, makeSupervisor, makeL0, makeL1a, makeL1b, osMod })` → 
     `{ start(), stop(), setCadence(v), setSource(key, on), setVisible(v), snapshot(), sourceRows(), procRows(), onEvent(cb) → unsub, dispose() }`
-  - `snapshot() → { cadence, keepMinutes, timerBackend, series: {cpu, mem, diskFreePct, netDown, netUp}, latest: {cpu, mem, diskFreeGb, diskTotalGb, netDown, netUp, t}, sources: [row], proc: {rows, state, note, t}, dropped: {stale, bad} }`。**`proc.t` 是 Task 7 §Produces 点名要透传的字段**（PowerShell 侧那一轮的 UTC ms，界面/告警用它算新鲜度）：成功解析一轮才写，其余时刻为 `null` —— 不写它，Task 7 的 I-1 修法（`latest()` 只交当前轮）在编排层就没有落点。
+  - `snapshot() → { cadence, keepMinutes, timerBackend, series: {cpu, mem, diskFreePct, netDown, netUp}, latest: {cpu, mem, diskFreeGb, diskTotalGb, netDown, netUp, t}, sources: [row], proc: {rows, state, note, t}, dropped: {stale, bad} }`。**`proc.t` 是 Task 7 §Produces 点名要透传的字段**（PowerShell 侧那一轮的 UTC ms，界面/告警用它算新鲜度）：成功解析一轮才写，其余时刻为 `null` —— 不写它，Task 7 的 I-1 修法（`latest()` 只交当前轮）在编排层就没有落点。`timerBackend` 的取值是 `'ctx.interval' | 'setInterval' | null`，**没挂表的时候是 `null`**（暂停 / dispose / 从未 start），界面按 null 显示"未运行"，不许报一个没发生过的后端。`proc.rows` 与 `procRows()` 返回的是**服务内部数组本体**（不复制，一轮 ~380 行不便宜）：调用方要排序/截取必须先 `slice()` —— 走 HTTP/SSE 出去的本来就是序列化副本，只有服务端内部调用（Task 18/21）需要守这条，原地 `sort()` 会改到服务状态。
   - `sourceRow = { key, label, state: 'on'|'off'|'starting'|'stalled'|'crashed'|'exited-max'|'unavailable', detail, restarts, pid, stderrTail }`
-  - `onEvent` 的事件：`{type:'metrics', key, point}` / `{type:'sources', rows}` / `{type:'proc', rows}`
+  - `onEvent` 的事件：`{type:'metrics', key, point}` / `{type:'sources', rows}` / `{type:'proc', rows, note, t}`。**`proc` 事件带全三件**（与 Step 3 的残值契约同口径：停采时推 `{rows:[], note:'', t:null}`）—— 原先这里只写 `rows`，与 Step 3 自相矛盾（评审 M-5）；Task 18 序列化成 SSE 时按这一行写文档，别拿窄口径当契约。
 
 - [ ] **Step 1: 写失败的测试（假采样器 + 假时钟 + 假 supervisor）**
 
@@ -2466,9 +2466,17 @@ function fakeWorld(over = {}) {
   const stopped = [];
   const l0Reads = [];
   const caps = {};                    // 服务传给工厂的出口（onPoint / onRows）落在这里，用例才有东西可断
+  const warns = [];                   // logger.warn 的落点：svc-8 要断"rejection 被就地接住且留了痕"，空桩就看不见
   let coreCount = over.cores ?? 8;    // svc-1 要在跑的过程中改核数（热插拔基线复位那条契约）
   let resetCount = 0;
-  const intervalFn = (fn, ms) => { const h = { fn, ms, done: false }; timers.push(h); return h; };
+  // 宿主文档口径：`ctx.interval(fn, ms)` 返回的是 **disposer 函数**
+  // （`dsh-plugin-stock-analysis/docs/host-capabilities.md:244-251`；参照实现
+  // `dsh-plugin-stock-analysis/lib/monitor/service.js:393` 也是把返回值直接当停止函数存成 `stopFn`）。
+  // 原样桩返回的是可变句柄对象、服务靠 `h.done = true` 停 —— 那等于往函数对象上挂一个没人读的
+  // property：真宿主的定时器照敲，暂停/切档/dispose 全都停不下来。桩改成
+  // 「返回 disposer，disposer 被调用才置 done」，"服务有没有真的调用 disposer" 才是用例能断的事实
+  // （Task 8 评审变异 C7：摘掉停止调用，原样 48 条照样全绿）。
+  const intervalFn = (fn, ms) => { const h = { fn, ms, done: false }; timers.push(h); return () => { h.done = true; }; };
   // svc-7 走的是 `globalThis.setInterval` 回退分支。**不打桩真的话，`w.timers` 恒是空数组**
   // —— 预检变异取证：把实现里的 `globalThis.clearInterval(l0Handle.h)` 整行删掉，原样用例仍 PASS（空断言）。
   const realSI = globalThis.setInterval, realCI = globalThis.clearInterval;
@@ -2490,7 +2498,8 @@ function fakeWorld(over = {}) {
   };
   const svc = createCollectService({
     getPrefs: () => over.prefs ?? { collect: { cadence: '1s', keepMinutes: 30 }, sources: { l0: true, l1a: true, l1b: false } },
-    logger: { warn() {}, info() {} },
+    // warns 落盘：svc-8 要断"dispose 里 disable 的 rejection 被就地接住**且留了痕**"，空桩看不见接住动作。
+    logger: { warn: (...a) => { warns.push(a.map((x) => String(x?.message ?? x)).join(' ')); }, info() {} },
     now: () => t,
     getIntervalFn: () => (over.noTimer ? null : intervalFn),
     osMod: { cpus: () => Array.from({ length: coreCount }, () => 0) },
@@ -2509,7 +2518,7 @@ function fakeWorld(over = {}) {
   // fire 是"重复敲同一个活着定时器"，不是"消耗一个定时器"：`h.done` 只由服务在 clearL0 时置。
   // 预检取证：原样 `h.done = true; h.fn();` 时 svc-6 的 400 次循环实际只跑了一拍（第 2 次起 find 不到句柄），
   // 而把 windowMs/maxPoints 改成 1e12/1e9 那条仍 PASS —— 断言完全空转。
-  return { svc, caps, si, t: () => t, clock: () => t, reads: () => l0Reads.length, resets: () => resetCount, setCores: (n) => { coreCount = n; },
+  return { svc, caps, si, warns, t: () => t, clock: () => t, reads: () => l0Reads.length, resets: () => resetCount, setCores: (n) => { coreCount = n; },
     adv: (ms) => { t += ms; }, events, started, stopped, timers, sup,
     fire: (n = 1) => { const h = timers.find((x) => !x.done); if (!h) return; for (let i = 0; i < n; i++) h.fn(); },
     restore: () => { globalThis.setInterval = realSI; globalThis.clearInterval = realCI; } };
@@ -2548,6 +2557,11 @@ check('svc-1 start 后 L0 按档位跑，L1a/L1b 的出口被接上且点真的�
   w.setCores(4);
   w.adv(1000); w.fire();
   assert.equal(w.resets(), r0 + 1, '核数变化必须调 l0.reset()');
+  // sources 只在**内容变了**时推（Task 18 的 SSE 靠这条减负，否则 1s 推一屏同样的三行）。
+  // 到这里 l0 的档位/窗口、l1a/l1b 的 supervisor 状态全程没变过 ⇒ 除了 start() 那一屏，一条都不许多推。
+  // 评审变异 C8：摘掉 `refreshSources()` 的去重提前 return，48 条全绿 —— 这个承诺原先无人承重。
+  assert.equal(w.events.filter((e) => e.type === 'sources').length, 1,
+    `状态没变时每拍 refreshSources 不许重复推 sources（实得 ${w.events.filter((e) => e.type === 'sources').length} 屏，只有 start 该推 1 屏）`);
 });
 
 check('svc-2 档位切 5s / 暂停：源状态与 cadence 同步变，并 emit sources', () => {
@@ -2555,10 +2569,14 @@ check('svc-2 档位切 5s / 暂停：源状态与 cadence 同步变，并 emit s
   w.svc.start();
   w.svc.setCadence('5s');
   assert.equal(w.svc.snapshot().cadence, '5s');
+  // 切档时旧定时器必须被**停掉**，不是只在服务这边换个引用：宿主句柄是 disposer 函数
+  // （`docs/host-capabilities.md:244`），不调它就没有任何动作发生 ⇒ 新旧两拍一起敲。
+  assert.ok(w.timers[0].done, 'setCadence 必须调用宿主句柄的 disposer，否则旧定时器还在敲（会出现双档并跑）');
   w.svc.setCadence('暂停');
   const s = w.svc.snapshot();
   assert.equal(s.cadence, '暂停');
   assert.equal(s.sources.find((r) => r.key === 'l0').state, 'off');
+  assert.equal(s.timerBackend, null, '暂停=没挂任何表，不许继续报上一个后端（参照实现 stop() 就把它置回 null）');
   assert.ok(w.events.some((e) => e.type === 'sources'), '切档必须有 sources 事件（界面要立刻改文案）');
   assert.throws(() => w.svc.setCadence('2s'), /cadence/);
 });
@@ -2635,7 +2653,11 @@ check('svc-7 宿主无 timer 时退 setInterval，并在 snapshot.timerBackend �
 });
 
 await checkAsync('svc-8 dispose：停 L0 定时器、停所有子进程、清 ring；重复调用不抛', async () => {
-  const w = fakeWorld();
+  // l1b 开关这里**必须为真**：残值/闸门那几条断的是"迟到的 setVisible 会把 l1b 复活"，
+  // 而 setVisible 只在「开关 + 可见」两个条件都成立时才动 l1b —— 用默认 prefs（l1b:false）
+  // 的话那条闸门删掉也没人看得见（fix round 变异取证：C10b 摘掉 setVisible 闸门照样 48/48 全绿）。
+  // start() 时 visible 仍是 false，所以 l1b 并没有被起，`started` 的增量仍然只归 dispose 后的复活路径。
+  const w = fakeWorld({ prefs: { collect: { cadence: '1s', keepMinutes: 30 }, sources: { l0: true, l1a: true, l1b: true } } });
   w.svc.start();
   w.adv(1000); w.fire();
   assert.ok(w.svc.snapshot().series.cpu.length >= 1, '前置条件：ring 里得先有点，否则下面"清 ring"那条是空的');
@@ -2650,6 +2672,40 @@ await checkAsync('svc-8 dispose：停 L0 定时器、停所有子进程、清 ri
   const l0row = w.svc.snapshot().sources.find((r) => r.key === 'l0');
   assert.equal(l0row.state, 'off', 'dispose 后 l0 行不许再报 on');
   assert.match(l0row.detail, /dispose/, 'detail 要说清是 dispose 停的，不是用户把档位调成暂停');
+  // dispose 走的是 push 通道那半：Task 18 的 SSE 只按事件更新采集源条、不轮询 snapshot，
+  // dispose 不补推一屏，订阅者手里的 l0 行就永远停在 on —— 正是上面那条 off 想拦的假陈述，只是换了通道。
+  const lastSrc = w.events.filter((e) => e.type === 'sources').at(-1);
+  assert.equal(lastSrc?.rows?.find((r) => r.key === 'l0')?.state, 'off',
+    'dispose 末尾必须 refreshSources()：事件通道的终态也要是 off');
+  assert.ok(w.timers.every((h) => h.done), 'dispose 必须调用宿主句柄的 disposer（不调就停不下来）');
+  assert.equal(w.svc.snapshot().timerBackend, null, 'dispose 后不许继续报上一个定时器后端');
+  // dispose 会重建 ring、清进程榜，磁盘那两格取自 lastSample 而不是 ring ⇒ 不清就是"半新半旧"的快照
+  assert.equal(w.svc.snapshot().latest.diskFreeGb, null, 'dispose 后 latest.diskFreeGb 不许留旧账（与"不报旧账"一致）');
+  assert.equal(w.svc.snapshot().latest.diskTotalGb, null, '同上，diskTotalGb 也是 lastSample 的残值');
+  // dispose 之后一条**迟到的** visibility POST / 开关写入（页面切换与卸载竞态，Task 18 完全可能送慢一拍）
+  // 会把已 dispose 的服务背后的子进程再拉起来：界面说服务已死、系统里却多一个活的采集进程。
+  const startedN = w.started.length;
+  await w.svc.setVisible(true);
+  await w.svc.setSource('l1a', true);
+  w.svc.setCadence('5s');
+  assert.equal(w.started.length, startedN, 'dispose 后 setVisible/setSource 不许复活子进程');
+  assert.equal(w.timers.length, 1, 'dispose 后 setCadence 不许重挂定时器（重挂了 l0 行仍报 off，就是自相矛盾）');
+  // dispose 里 `disable()` 的 rejection 必须**就地接住**：裸 `try { l1a.disable() } catch` 抓不到 promise
+  // 拒绝，而 Node ≥15 默认 `--unhandled-rejections=throw` 会直接**打死宿主进程** —— Task 19 就是把 dispose
+  // 挂在插件卸载钩子上。默认桩的 `stop` 永不 reject，所以摘掉 `.catch` 也全绿（fix round 变异 C11 取证），
+  // 这里现场换一个会 reject 的 `sup.stop` 再 dispose 一拍。装探针这件事本身也让 Node 不再当场杀进程，
+  // 于是断言看得见"有没有被甩出来"，而不是整轮测试直接崩。
+  const thrown = [];
+  const probe = (reason) => thrown.push(reason);
+  process.on('unhandledRejection', probe);
+  w.sup.stop = async () => { throw new Error('模拟杀进程失败'); };
+  w.svc.dispose();
+  await new Promise((r) => setTimeout(r, 0));   // rejection 在微任务检查点上报，必须让出一拍才收得到
+  process.off('unhandledRejection', probe);
+  assert.deepEqual(thrown.map((e) => String(e?.message ?? e)), [],
+    `dispose 不许把 disable 的 rejection 甩给宿主（甩出来 ${thrown.length} 条）`);
+  assert.ok(w.warns.some((m) => /dispose 停 l1a 抛错/.test(m)) && w.warns.some((m) => /dispose 停 l1b 抛错/.test(m)),
+    `接住的两条都要留痕，实得 warn：${JSON.stringify(w.warns)}`);
 });
 
 await checkAsync('svc-9 setSource(key,on) 改开关会立即起/停对应源', async () => {
@@ -2702,7 +2758,18 @@ Expected: `ERR_MODULE_NOT_FOUND` 指向 `lib/collect/service.js`。
 
 - 内部状态：`const rings = { cpu: createRing({percent:true}), mem: ..., diskFreePct: ..., netDown: createRing({}), netUp: ... }`。`diskFreePct` 由 L0 的字节换算：`(diskFree / diskTotal) * 100`；字节原值另存在 `latest`（不进 ring）。
 - `netDown/netUp` 由 L1a 的 `onPoint({metric,t,v})` 写入对应 ring，`v` 是**字节/秒**；界面换算 MB/s = `v / 1e6`（原型里的 `/8` 是按 bit 演示的假数据，Task 21 统一改文案）。
-- L0 定时：`intervalFn ?? setInterval` 二选一，句柄存 `l0Timer`，`setCadence` 与 `dispose` 都要显式清；`timerBackend` 取 `'ctx.interval' | 'setInterval'` 并如实进 snapshot。
+- L0 定时：`intervalFn ?? setInterval` 二选一，`setCadence` 与 `dispose` 都要显式清；`timerBackend` 取 `'ctx.interval' | 'setInterval' | null` 并如实进 snapshot。
+  - **宿主句柄形状（Task 8 评审 M-1 的实底，别照字面往句柄上挂属性）**：`ctx.interval(cb, ms)` 返回的是 **disposer 函数**（依据：同宿主参照实现 `dsh-plugin-stock-analysis/lib/monitor/service.js:393` 把返回值存成 `stopFn`、`stop()` 里 `stopFn()`；文档 `dsh-plugin-stock-analysis/docs/host-capabilities.md:244-251` 写明「返回 disposer」）。所以 `armL0()` 要归一化成一个停止函数存着：
+    ```js
+    // 存 stop 而不是存宿主返回值：清表这个动作必须真的发生一次，
+    // 而不是往一个函数对象上挂没人读的 property（那样暂停/切档/dispose 全都停不下来）。
+    const h = intervalFn(() => tickL0(), ms);
+    const stop = typeof h === 'function' ? h : (h && typeof h.dispose === 'function' ? () => h.dispose() : null);
+    if (!stop) logger.warn('[collect] 宿主 ctx.interval 没返回可停的句柄（要 disposer 函数或 .dispose()），本档定时器不受本服务控制');
+    l0Handle = { kind: 'ctx', stop };
+    ```
+    `clearL0()` 的 ctx 分支就是 `l0Handle.stop?.()`。**不许**写 `l0Handle.h.done = true`。退路分支不变（`globalThis.clearInterval(h)`，svc-7 已断）。
+  - `timerBackend` 初值是 `null`，`clearL0()` 里也置回 `null` —— 没挂表的时候报一个没发生过的后端就是假陈述（参照实现 `monitor/service.js:416` 同款）。svc-2（暂停档）与 svc-8（dispose 后）各断一条。
 - 采样节拍表：`CADENCE_MS = { '1s': 1000, '5s': 5000 }`，`'暂停'` 不在表内 → 停定时器。`COLLECT_CADENCE` 的中文"暂停"是界面文案，服务内部用 `'paused'`，**两者之间要有 `cadenceToKey()` / `cadenceToLabel()` 一对换算**（spec §1.1 决策 7 的档位语义与 §3.2 的存储值都用 `COLLECT_CADENCE` 的字面量，Task 3 已定为 `'1s'|'5s'|'paused'`）。测试里 `setCadence('暂停')` 必须等价于 `'paused'`（界面直接送中文过来），换算函数入口处做 `const key = v === '暂停' ? 'paused' : v`，非法值抛错（svc-2 已断言）。
 - `setVisible(v)` / `setSource(key, on)` 是 async（内部要 await `sup.stop`）。
 - `onEvent(cb)` 返回注销函数；事件写在这里，**不要**在 service 里 import api.js（单向依赖：api 订阅 service）。
@@ -2711,6 +2778,27 @@ Expected: `ERR_MODULE_NOT_FOUND` 指向 `lib/collect/service.js`。
 - **核数热插拔/改频要复位基线**（台账 Task 5 下游契约②）：`computeCpuPct` 在两次样本核数不等时返回 NaN ⇒ 连续丢点。每拍 L0 前比对 `osMod.cpus().length` 与上一次的缓存值，不等就调 `l0.reset()` 并 `logger.warn` 记一行。
 - **进程榜残值（Task 7 I-1 在编排层的镜像）**：`procRows` 是服务自己的状态，不是 `l1b.latest()` 的别名。凡 l1b 被停下的路径（`setVisible(false)` / `setSource('l1b',false)` / `stop()` / `dispose()`）都必须 `procRows = []`、`procNote = ''`、**`procT = null`**，并 emit `{type:'proc', rows: [], note:'', t: null}` —— 只清本地不推事件，SSE 侧的卡片会继续挂着已停源的旧榜。`procT` 只在 `onRows(parsed, line)` 解析成功时取 `parsed.t`（PowerShell 侧 UTC）；非 JSON 轮**不**更新它，也不清空它（上一轮仍是"最后一次成功的轮"，靠 `t` 让界面自己判陈旧）。
 - **`dispose()` 之后 `sources` 里 `l0` 那一行不许再报 `on`。** 取证：真机串跑（Step 5）里 `dispose()` 后 `snapshot().sources` 是 `l0:on,l1a:off,l1b:off` —— 因为 l0 那行的 `state` 是按「开关 + 档位」算的，而 `dispose()` 只 `clearL0()`，没动开关。界面/日志读到这一行会以为主进程定时器还活着，这正是要拦的"与代码不符的陈述"。修法：加一个 `disposed` 标志，`dispose()` 置真、`start()` 置假，`sourceRows()` 里 l0 行按 `disposed ? 'off' : …` 判，`detail` 写「服务已 dispose」。l1a/l1b 两行不用管 —— 它们的状态来自 supervisor，源真停了自然变 off。
+- **`dispose()` 的三条收口（Task 8 评审 Imp-1/2/3，三条都是 svc-8 现在承重的路径）**：
+  1. **`disable()` 的 rejection 必须就地接住，`dispose()` 的签名保持同步。** `lib/collect/service.js` 里 `stop()` / `setSource()` / `setVisible()` 三处都是 `await … disable()` + `catch`，只有 `dispose()` 写成同步 `try { l1a.disable(); } catch` —— 而 disable 是 promise 语义（supervisor 桩就是 async），`try` 抓不到 rejection。评审最小复现（把 `sup.stop` 做成 `async () => { throw }` 并挂 `process.on('unhandledRejection')` 探针）实测打出 **2 条 UNHANDLED_REJECTION**；Node ≥15 默认 `--unhandled-rejections=throw` 会**终结宿主进程**，而 Task 19 就是把 dispose 挂在插件卸载钩子上。当下 `supervisor.stop` 恰好是同步函数所以炸不响，不能作为依据。
+     ```js
+     // 同步签名（Task 19 的卸载钩子不必 await）+ 两种错误形状都接住：
+     function disableQuietly(key, src) {
+       try {
+         const p = src.disable();
+         if (p && typeof p.catch === 'function') {
+           p.catch((e) => logger.warn(`[collect] dispose 停 ${key} 抛错：`, e?.message ?? e));
+         }
+       } catch (e) { logger.warn(`[collect] dispose 停 ${key} 抛错：`, e?.message ?? e); }
+     }
+     ```
+  2. **末尾补 `refreshSources()`。** `dispose()` 里没有它（`stop()` 里有），于是 push 通道永远停在 dispose 前的旧状态：Task 18 的 SSE 只按 `sources` 事件更新采集源条、不轮询 `snapshot()`，订阅者手里的 l0 行就停在 `on` —— 和上一条 `disposed` 标志要拦的是同一句假陈述，只是换了通道。svc-8 断「最后一条 `sources` 事件的 l0 行是 off」。
+  3. **`disposed` 闸门要覆盖 `setCadence` / `setSource` / `setVisible` 三个入口**，不是评审提的两个。判据是"入口能不能造成**已死服务**的副作用"：`setVisible(true)`/`setSource(key,true)` 会 `enable()` 复活子进程，`setCadence` 会重挂定时器（而 l0 行因 `disposed` 仍报 off ⇒ 界面说停了、背后在跑，正是 self-contradiction）。三个入口开头一律：
+     ```js
+     if (disposed) { logger.warn(`[collect] 服务已 dispose，忽略 ${调用名}`); return; }   // async 的两个 return 就是 resolve(undefined)
+     ```
+     `start()` 仍然把 `disposed` 置假并正常工作（任务书认可"重新 start = 复活"），闸门只拦 start 之外的三个入口。svc-8 用 `w.started.length` 与 `w.timers.length` 两条钉住。
+  4. 顺手收：`dispose()` 里 `lastSample = null`（否则 `latest.diskFreeGb/diskTotalGb` 留着旧账，而 ring 已重建、`latest.t` 已是 null —— 半新半旧的快照最难查），以及 `timerBackend` 随 `clearL0()` 置回 `null`。
+- **`procT` 要过 `Number.isFinite` 闸门**：`onRows` 是对外接缝，`Number(parsed.t)` 出 NaN 会伪装成"非 null 的 t"，界面按它算"多久没出数"就永远算错。写 `procT = Number.isFinite(Number(parsed.t)) ? Number(parsed.t) : null`。（现栈不可达 —— Task 7 的 `parseProcLine` 已保证 finite，这里是接缝防御，不是补 bug。）
 - `onPoint`/`onRows` 是**构造时**由服务传给 `makeL1a` / `makeL1b` 的出口（Task 7 已把 `createL1b` 改成不传 `onRows` 就抛，所以漏接是启动即炸，不是跑起来静默吞榜）。`onPoint` 收到未登记的 `metric` 时 `logger.warn` 并丢弃，**不许**新建 ring。
 - `snapshot()` 里 `latest.*` 是**原值**（字节/秒、GB、百分数各按各自口径），换算文案归界面；`sources` 每次现取（supervisor 的 `state()` 很便宜），`l0` 那一行的 `state` 由开关 + 档位算，不来自 supervisor。
 
@@ -2732,10 +2820,21 @@ Expected: `ERR_MODULE_NOT_FOUND` 指向 `lib/collect/service.js`。
 | N2 停采只清 rows 不清 `proc.t` | — | svc-4 |
 | N3 非 JSON 轮也写一个 `proc.t` | — | svc-1 |
 | N4 `dispose()` 不置 `disposed` 标志（l0 行仍报 `on`） | — | svc-8 |
+| C7 `clearL0()` 的 ctx 分支不调宿主 disposer（只往句柄上挂 `done`） | **全绿**（Task 8 独立评审实跑，48/48） | svc-2 / svc-8（fix round 新断；桩同时改成"返回 disposer"） |
+| C8 `refreshSources()` 去掉 `lastSourceJson` 去重 | **全绿**（同上） | svc-1（fix round 新断 `sources` 恰好 1 屏） |
+| C9 `dispose()` 末尾不 `refreshSources()` | — | svc-8（断最后一条 `sources` 事件的 l0 行是 off） |
+| C10 `setCadence` / `setSource` / `setVisible` 不判 `disposed` | — | svc-8（断 `started.length` 不增、`timers.length` 恒 1）。**注意 svc-8 的 prefs 里 l1b 必须为真**，否则 `setVisible` 那条闸门摘掉照样全绿（fix round 变异 C10b 第一轮实测） |
+| C11 `dispose()` 里 disable 的 rejection 没人接 | **全绿**（Task 8 独立评审实跑） | svc-8 的 `unhandledRejection` 探针（现场把 `sup.stop` 换成会 reject 的实现再 dispose 一拍）。原先 `fakeWorld` 的桩永不 reject，所以这条抓不到；评审的最小复现（`sup.stop = async () => { throw }` + 进程级探针）实测甩出 2 条 |
 
 **M6/M7 为什么原本逃逸 —— 这是 harness 级的坑，不是本任务独有：** 那两条用例写成了 `check('…', async () => {…})`。`check()` 是同步 `try/catch`，拿到的是挂起中的 Promise：第一个 `await` 之前一条断言都没跑完，就先记了 PASS；后面的断言失败变成无人 catch 的 rejection。改成 `await checkAsync(...)` 后两处变异各红一条。**本文件 ①~⑤ 段全是同步用例，不受影响。**
 
 **双 knob 遮蔽（M3/M4）是 ring 的固有性质，不是用例缺陷：** `createRing` 同时按 `windowMs` 和 `maxPoints` 裁，`keepMinutes×60+1` 这个条数上限与 `keepMinutes` 这个时间窗互为备份，单改其一时另一个仍在生效。svc-6 因此**只能**在两条同时失效时才红 —— 它已经用「断精确值 301 而不是 `<= 301`」把可断的部分钉死了，这里如实记下这个上界，别让后来的实现者以为还有更强的断言可加。
+
+**fix round 1 的取证（2026-09-27，控制器在仓库外沙箱实跑，实现者照此实现即可，不必重推）：**
+- 新 ⑥段 打在已交付的实现（`db2b360`）上是 **46/48**，红在 svc-2（`timerBackend` 应为 null、旧句柄的 disposer 必须被调）与 svc-8（dispose 的终态屏 / 闸门 / 残值 / rejection 探针）—— 先红后绿这一步已经具备，**不许**为了让旧实现过而回退断言。
+- 候选实现（上面 Step 3 的八处修法）在同一份新 ⑥段 上 **48/48 通过**。
+- fix round 的变异电池 8 条**全部有用例承重**（每轮 `cmp` 校字节动过、跑完还原并 `cmp` 校一致）：C7 不调 disposer → svc-2/svc-8 红；C8 失去重 → svc-1 红；C9 dispose 不补推 → svc-8 红；C10a `setCadence` 无闸门 → svc-8 红；C10b `setVisible` 无闸门 → svc-8 红（**前提**是该用例 prefs 里 l1b 为真，第一轮取证时 prefs 用默认值，这条摘掉照样 48/48 全绿）；C11 rejection 没人接 → svc-8 红；C12 不清 `lastSample` → svc-8 红；C13 `clearL0` 不置 `timerBackend = null` → svc-2/svc-8 红。
+- 真机串跑（`node tmp/e2e-svc.mjs`，12 s，真起 typeperf + powershell）判定线全达标，`dispose 推了几屏 sources 1`、`最后一屏 l0 off`、`dispose 后 timerBackend null`、`dispose 后 latest.diskFreeGb null`、`dispose 后再 setVisible(true) 的 l1b off`，`warn日志条数 0`，跑完 `tasklist` 无 typeperf 残留、无本任务派生的 powershell 残留。
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -2775,10 +2874,11 @@ const svc = createCollectService({
 });
 
 const events = { metrics: 0, proc: 0, sources: 0, other: 0 };
+let lastSources = null;
 svc.onEvent((e) => {
   if (e.type === 'metrics') events.metrics += 1;
   else if (e.type === 'proc') events.proc += 1;
-  else if (e.type === 'sources') events.sources += 1;
+  else if (e.type === 'sources') { events.sources += 1; lastSources = e.rows; }
   else events.other += 1;
 });
 
@@ -2799,14 +2899,23 @@ console.log('cpu点数', s.series.cpu.length,
   '| proc.state', s.proc.state,
   '| proc.t', s.proc.t,
   '| note', JSON.stringify(s.proc.note.slice(0, 60)));
-console.log('事件计数', JSON.stringify(events), '| timerBackend', s.timerBackend);
+console.log('事件计数', JSON.stringify(events), '| timerBackend', s.timerBackend,
+  '| proc.t 距今 ms', s.proc.t === null ? 'null' : Math.round(Date.now() - s.proc.t));
 for (const r of s.sources) console.log('  源明细', r.key, r.state, '|', r.detail, '| restarts', r.restarts, '| pid', r.pid, '| stderr', JSON.stringify((r.stderrTail || '').slice(-80)));
 console.log('warn日志条数', logs.length, logs.slice(0, 5).join(' ;; '));
 
 await svc.setVisible(false);
+const evBefore = { ...events };   // 取样点必须在 dispose 前一行：setVisible(false) 自己也会推一屏，混进来就没法断"dispose 推了几屏"
 svc.dispose();
 console.log('dispose 后 sources', svc.snapshot().sources.map((r) => `${r.key}:${r.state}`).join(','));
 console.log('dispose 后进程榜行数', svc.snapshot().proc.rows.length, '| note', JSON.stringify(svc.snapshot().proc.note));
+// dispose 的通道收口三条（Step 3 的 Imp-1/2/3）：事件终态、未挂表、迟到请求不复活
+console.log('dispose 推了几屏 sources', events.sources - evBefore.sources,
+  '| 最后一屏 l0', lastSources?.find((r) => r.key === 'l0')?.state,
+  '| dispose 后 timerBackend', svc.snapshot().timerBackend,
+  '| dispose 后 latest.diskFreeGb', svc.snapshot().latest.diskFreeGb);
+await svc.setVisible(true);                       // 模拟一条比卸载晚到的 visibility POST
+console.log('dispose 后再 setVisible(true) 的 l1b', svc.snapshot().sources.find((r) => r.key === 'l1b').state);
 process.exit(0);
 ```
 
@@ -2824,13 +2933,20 @@ Expected（**这是候选实现在本机连跑 5 组的实测区间，不是猜�
 | `源` | `l0:on,l1a:on,l1b:on` | 三行必须全 `on` |
 | `丢弃` | `{"stale":0,"bad":1}` ×4、`{"stale":0,"bad":2}` ×1 | `stale === 0` 且 `bad <= 2`。`bad` 的来源是**首拍 `computeCpuPct` 没有前一次样本**（返回 NaN，percent ring 判脏），这是设计行为不是缺陷；再多就是真丢点了 |
 | `进程榜行数` | 374 / 374 / 375 / 375 / 380 | `>= 350`（Task 7 实测满榜 369–392，`MAX_ROWS` 之前） |
-| `proc.t` | 例如 `1790514527706` | 非 `null`，且 `abs(Date.now() - proc.t) < 8000`（一轮 ≈ 4.4–4.9 s） |
+| `proc.t` / `proc.t 距今 ms` | 例如 `1790516791685` / `1406` | `proc.t` 非 `null`，且距今 `< 8000`（一轮 ≈ 4.4–4.9 s，脚本直接打印差值） |
 | `note` | `""` | 空串。非空说明降级或截断，先读它再改代码 |
 | `事件计数` | `metrics 51–52`、`proc 2–3`、`sources 4` | `proc >= 1`（真收到过榜）、`other === 0` |
 | `timerBackend` | `setInterval` | 必须是它（本脚本传 `getIntervalFn: () => null`） |
 | `warn日志条数` | 0 | 必须 0（有 warn 说明某一轮走了非 JSON 分支） |
 | `dispose 后 sources` | `l0:off,l1a:off,l1b:off` | **l0 必须是 off**（Step 3 的 `disposed` 标志；此前实测报 `l0:on` 而定时器已经清了） |
 | `dispose 后进程榜行数` | 0 | 必须 0（残值清理） |
+| `dispose 推了几屏 sources` | 1（fix round 真机 2 组都是 1；取样点必须先移到 `setVisible(false)` 之后 —— 放错位置会把"关 l1b"那一屏算进来，实测读到 2） | 必须 `1`（Imp-2：dispose 末尾补 `refreshSources()`，on→off 内容变了就必推）。`0` 就是 SSE 侧永远停在 on |
+| `最后一屏 l0` | `off` | 必须 `off`（push 通道的终态） |
+| `dispose 后 timerBackend` | `null` | 必须 `null`（没挂表还报 `setInterval` 就是报一个没发生过的后端） |
+| `dispose 后 latest.diskFreeGb` | `null` | 必须 `null`（`lastSample` 也要清，半新半旧的快照最难查） |
+| `dispose 后再 setVisible(true) 的 l1b` | `off` | 必须 `off`（Imp-3 闸门：迟到的可见性请求不许把已 dispose 的服务背后的 powershell 再拉起来） |
+
+**后五行是评审 fix round 新加的打印**，读数是 2026-09-27 在候选实现（含 Imp-1/2/3 + M-1~M-4 修法）上真机重跑得到的；前十四行的 5 组区间来自 fix round 之前的同一脚本，`proc.t 距今 ms` 那一列 fix round 实测 1019 ms。
 
 任何一项不达标**先查 `源明细` 里的 `stderrTail` / `detail` 再改代码**，不许放宽判定线。`l1b` 那一行 `state` 仍为 `on` 但 `note` 有说明，是 Task 7 Step 5 降级分支的形态；本机已裁定 `withCpu=true` 不降级（稳态周期 4.37–4.91 s < 预算 5 s），所以这里 `note` 应当为空。
 
