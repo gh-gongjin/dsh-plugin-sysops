@@ -118,36 +118,7 @@ check('prefs-4 clean_rules：本机新增规则的形状，glob 必填、拒绝�
 /* ③段：store 行为（内存桩） */
 const { createPrefStore, PREFS_ERROR } = await import('../lib/prefs/store.js');
 
-function createMemoryFacility() {
-  const opened = new Map();
-  const disk = new Map(); // 关域再开，数据要还在 —— 桩每次重建空表会把这条测成假的
-  return {
-    async open(spec) {
-      if (opened.has(spec.name)) throw new Error('already-open');
-      let tables = disk.get(spec.name);
-      if (!tables) {
-        tables = new Map(Object.keys(spec.tables).map((n) => [n, new Map()]));
-        disk.set(spec.name, tables);
-      }
-      const domain = {
-        close() { opened.delete(spec.name); },
-        table(name) {
-          const store = tables.get(name);
-          if (!store) throw new Error(`未知表 ${name}`);
-          return {
-            get: (key) => store.get(key),
-            keys: () => [...store.keys()][Symbol.iterator](),
-            entries: () => [...store.entries()][Symbol.iterator](),
-            put: async (key, value) => { store.set(key, spec.tables[name].valueSchema.parse(value)); },
-            delete: async (key) => { store.delete(key); },
-          };
-        },
-      };
-      opened.set(spec.name, domain);
-      return domain;
-    },
-  };
-}
+import { createMemoryFacility } from './_helpers.mjs';
 
 const fresh = (over = {}) => {
   // 判键在不在，不判值：`fresh({ facility: undefined })` 要的就是"宿主没有 storageDomain"，
