@@ -1198,7 +1198,7 @@ Expected: 打印本机四个数（参照：spec §1.2 记的 214.7G 总 / 71.9G 
 - Consumes: `child_process.spawn`（生产）、`taskkill`（kill 路径）
 - Produces:
   - `SUP_STATE = { OFF:'off', STARTING:'starting', ON:'on', STALLED:'stalled', CRASHED:'crashed', EXITED_MAX:'exited-max' }`
-  - `BACKOFF_MS = [1000, 2000, 4000, 8000, 30000]`、`MAX_RESTARTS = 5`
+  - `BACKOFF_MS = [1000, 2000, 4000, 8000, 30000]`、`MAX_RESTARTS = 5`、`KILL_ARGS(pid) → string[]`、`defaultKill(pid)`
   - `createSupervisor({ spawnFn, killFn, now, setTimeoutFn, clearTimeoutFn, heartbeatFactor = 3, onChange, logger })` → `{ start(key, spec), stop(key), tick(), state(key), status(), keys(), dispose() }`
   - `start` 的 `spec = { label, cmd, args, intervalMs, rolling?, minWindowMs?, onData(lineBuf) }` —— **`onData` 收到的是"完整一行"的 `Buffer`**（跨 stdout 块拼接、行尾 `\r\n` 已去掉）；**监督者不猜编码**，解码归消费方（Task 6 的 `decodePd(buf)` 用 GBK，Task 7 的 powershell 输出用 UTF-8）
   - Task 6 / 7 / 8 只通过 `start/stop/status/tick` 与子进程打交道，**不各自写重启逻辑**。
@@ -1257,7 +1257,6 @@ check('sup-1 start 进 starting，首块 stdout 后转 on 并刷心跳', () => {
   const s = h.sup.state('l1a');
   assert.equal(s.state, SUP_STATE.ON);
   assert.equal(s.pid, 1000);
-  assert.ok(s.lastTick >= 0);
   // 行框定与"交出 Buffer"是 Task 6 的全部前提：typeperf 一行会被拆到多个 stdout 块里，
   // 而 GBK 只能在**字节**上还原 —— 这里若先 toString('latin1')，下游就再也解不出中文计数器名。
   h.lastKid().c.stdout.emit('data', Buffer.from('ab'));
@@ -1265,9 +1264,15 @@ check('sup-1 start 进 starting，首块 stdout 后转 on 并刷心跳', () => {
   h.lastKid().c.stdout.emit('data', Buffer.from('cd\r\nef'));
   assert.equal(Buffer.isBuffer(lines[1]), true, 'onData 必须交出 Buffer，不许在监督者里解码');
   assert.equal(lines[1].toString('latin1'), 'abcd', '跨块要拼成完整一行，并去掉行尾 \\r\\n');
+  // 心跳刷点：假时钟起点就是 0，`lastTick >= 0` 是永真式；推进时钟再吐一块才真断得动。
+  // 这一块只送来一个换行 —— 顺带钉住"上一块剩下的 `ef` 要等到行边界才被交出"。
+  h.adv(1500);
+  h.lastKid().c.stdout.emit('data', Buffer.from('\n'));
+  assert.equal(h.sup.state('l1a').lastTick, 1500, '每块 stdout 都要刷 lastTick，否则心跳会误杀');
+  assert.deepEqual(lines.map((b) => b.toString('latin1')), ['x', 'abcd', 'ef'], '交出顺序与内容要一路可追');
 });
 
-check('sup-2 非主动退出按 1/2/4/8/30s 退避，第 6 次失败进 exited-max 且不再自动重启', () => {
+check('sup-2 非主动退出每次都进 crashed 并排一次重启，第 6 次失败进 exited-max 且不再自动重启（退避时长序列由 sup-3 断）', () => {
   const h = harness();
   h.sup.start('l1b', { label: '进程', cmd: 'powershell', args: [], intervalMs: 3000, onData() {} });
   for (let i = 0; i < MAX_RESTARTS; i += 1) {
@@ -1643,7 +1648,7 @@ export function createSupervisor(options = {}) {
     },
     state(key) {
       const rec = reg.get(key);
-      return rec ? snapshot(rec) : { key, label: key, state: SUP_STATE.OFF, restarts: 0, pid: null, lastTick: 0, stderrTail: '', detail: '未开启' };
+      return rec ? snapshot(rec) : { key, label: key, state: SUP_STATE.OFF, restarts: 0, shortWindows: 0, pid: null, lastTick: 0, stderrTail: '', detail: '未开启' };
     },
     status() {
       return [...reg.keys()].map((k) => snapshot(reg.get(k)));
