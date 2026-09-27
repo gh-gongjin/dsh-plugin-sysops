@@ -191,6 +191,11 @@ check('guard-17 正常路径必须放行（防过度收紧）', () => {
   allow('C:\\Users\\gongj\\Downloads\\100%.jpg');
   allow('C:\\Users\\gongj\\Desktop\\A%B\\notes.md');
   allow('C:\\Users\\gongj\\AppData\\Local\\Microsoft\\Windows\\INetCache\\Http\\100%-cn3-x.com_-0\\page.dat');
+  // 段首 `%` 后接数字 / 单个字母：既不是闭合 %VAR%，也不是未闭合变量引用，必须放行。
+  // 这两条钉住 UNCLOSED_VAR_RE 的「字母 × 2」字符集要求 —— 有人把它放宽成 `%[A-Za-z0-9]`
+  // 或 `%[^\\/]` 时，上面四条全绿而真实误拒会复发，只有这两条会变红。
+  allow('C:\\Users\\gongj\\Downloads\\%20file.zip');
+  allow('C:\\Users\\gongj\\Downloads\\%A.txt');
 });
 check('guard-18 分支清单 100% 覆盖（spec §5 验收门禁 2）', () => {
   // 直接读台账，不再另造一份探针清单：另造就会和上面的用例漂移（历史上就漏过 glob 一条）。
