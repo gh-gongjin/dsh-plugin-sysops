@@ -1,0 +1,19 @@
+{
+  "name": "dsh-plugin-sysops",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "DSH 系统运维插件：本机实时监控、两段式 C 盘清理、全盘文件搜索。只读采集 + 显式确认删除，不结束进程、不碰系统目录。",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": { "default": "./client.js" },
+    "./package.json": "./package.json"
+  },
+  "files": ["index.js", "lib", "client.js", "cordis.yml", "README.md", "LICENSE"],
+  "keywords": ["dsh", "dsh-plugin", "sysops", "monitor", "disk-clean", "windows"],
+  "license": "MIT",
+  "dsh": {
+    "bundle": { "patch": "cordis.yml" },
+    "client": { "platform": "web", "immediately": true }
+  }
+}
