@@ -2,10 +2,31 @@ import assert from 'node:assert/strict';
 
 let passed = 0;
 let failed = 0;
+const skip = process.env.SKIP_LOCAL === '1';
 
 function check(name, fn) {
+  if (skip && /真机/.test(name)) {
+    console.log(`  SKIP  ${name}`);
+    return;
+  }
   try {
     fn();
+    passed += 1;
+    console.log(`  PASS  ${name}`);
+  } catch (error) {
+    failed += 1;
+    console.log(`  FAIL  ${name}`);
+    console.log(`        ${error.message.split('\n')[0]}`);
+  }
+}
+
+async function checkAsync(name, fn) {
+  if (skip && /真机/.test(name)) {
+    console.log(`  SKIP  ${name}`);
+    return;
+  }
+  try {
+    await fn();
     passed += 1;
     console.log(`  PASS  ${name}`);
   } catch (error) {
