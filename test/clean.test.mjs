@@ -196,13 +196,15 @@ await checkAsync('cln-7 stop() 中途收手：stopped=true，已发现的部分�
   let ticks = 0;
   const res = await w.sc.scan([rule()], { every: () => { ticks += 1; if (ticks === 52) w.sc.stop(); } });
   assert.equal(res.stopped, true);
-  assert.ok(res.items.length < 50, '真停住了，不是跑完才标 stopped');
   // F-1：收手时子树没排空的候选不得带着半截 size/count/newest 进清单；已定稿的部分照样交回去。
+  // 顺序有意为之：专属断言排在泛化的 items.length 之前，否则 W3（删掉 pending 判据）的红点
+  // 会被 `length < 50` 顺手接住，pending 判据就从来没有在红态下自证过（复评测试强度评估）。
   assert.equal(
     res.items.some((i) => i.path === 'C:/Users/gongj/AppData/Local/Temp/d'),
     false,
     '中途收手时仍在栈里的候选不作样本',
   );
+  assert.ok(res.items.length < 50, '真停住了，不是跑完才标 stopped');
   assert.equal(
     res.skipped.some((s) => s.code === 'INCOMPLETE' && s.dir === 'C:/Users/gongj/AppData/Local/Temp/d'),
     true,
@@ -222,6 +224,91 @@ await checkAsync('cln-7 stop() 中途收手：stopped=true，已发现的部分�
     false,
     `走完了就不该有不完整记录：${JSON.stringify(full.skipped)}`,
   );
+});
+
+await checkAsync('cln-7c 收手/触顶打断候选自己那一层的兄弟条目：半截视图一律不作样本（复评 F-R1）', async () => {
+  // d 是**只装文件**的第一层目录：它的 pending 在出栈那一格就销回 0，此后正在遍历的目录里
+  // 再没有节点压在栈上。收手若落在它的兄弟条目中间，旧判据（partial || pending>0）两头都不沾
+  // ⇒ 半截 size/count/newest 无标记进 items（复评 F-R1 案例 A/B，Task 15 递归删会带走没看见的文件）。
+  const D = 'C:/Users/gongj/AppData/Local/Temp/d';
+  const mk = (freshLast) => [
+    { path: 'C:/Users/gongj/AppData/Local/Temp', dir: true },
+    { path: 'C:/Users/gongj/AppData/Local/Temp/f0.log', size: 10, atimeMs: ago(9), mtimeMs: ago(9) },
+    { path: D, dir: true },
+    { path: `${D}/a.bin`, size: 10, atimeMs: ago(9), mtimeMs: ago(9) },
+    { path: `${D}/z.bin`, size: 999, atimeMs: ago(freshLast ? 1 : 9), mtimeMs: ago(freshLast ? 1 : 9) },
+  ];
+  // 每条目一次 every 回调：f0.log 第 1 次、d 入栈第 2 次、d 出栈后 a.bin 第 3 次。
+  // 在第 3 次收手 ⇒ a.bin 已累加（count>0，所以定稿循环不会因 count<1 先跳过它），z.bin 从未被访问。
+  const TICK = 3;
+
+  const runStop = async (freshLast) => {
+    const w = world(mk(freshLast));
+    let ticks = 0;
+    return w.sc.scan([rule()], { every: () => { ticks += 1; if (ticks === TICK) w.sc.stop(); } });
+  };
+  const stopped = await runStop(true);
+  assert.equal(stopped.stopped, true, '收手桩本身要生效');
+  assert.equal(stopped.items.some((i) => i.path === D), false, '打断在自己目录中间的候选不作样本');
+  assert.equal(
+    stopped.skipped.some((s) => s.code === 'INCOMPLETE' && s.dir === D),
+    true,
+    `被拦下要留下指向该条的记录：${JSON.stringify(stopped.skipped)}`,
+  );
+  // 已走完的部分照样交回去（拦这一条不能把整次扫描判废）。
+  assert.equal(stopped.items.some((i) => i.path === 'C:/Users/gongj/AppData/Local/Temp/f0.log'), true);
+
+  // 取证方向 1（危害对照）：同一棵树走完 ⇒ d 本来**不该**进清单（z.bin 是昨天的，被 newest 抓到）。
+  // 所以上面那条 item 不是"少报一条"，而是把完整遍历本会拒绝的目录报成了可删 —— F-1 的原始形状。
+  const walkedFull = await world(mk(true)).sc.scan([rule()]);
+  assert.equal(walkedFull.items.some((i) => i.path === D), false, '对照：走完时这条因含新文件而不进清单');
+  assert.equal(walkedFull.skipped.some((s) => s.code === 'INCOMPLETE'), false);
+
+  // 取证方向 2（防空证）：同一棵树、把 z.bin 也改成够老、并且不收手 ⇒ d 正常进清单且零 INCOMPLETE。
+  // 缺这一格就分不清"拦下它"是判据起作用还是夹具本来就不报目录。
+  const reportable = await world(mk(false)).sc.scan([rule()]);
+  assert.equal(reportable.items.some((i) => i.path === D), true, '对照：整条都够老且走完时这条该进清单');
+  assert.equal(reportable.skipped.some((s) => s.code === 'INCOMPLETE'), false);
+  // 收手发生在「自己那一层」才是本用例的靶子：不打断时这条树必须能进清单（上面两格合起来钉死）。
+  const stoppedOnOld = await runStop(false);
+  assert.equal(stoppedOnOld.items.some((i) => i.path === D), false, '即使整条都够老，没走完就不报（保守方向）');
+
+  // 另一条收手来源（maxEntries 触顶）走的是同一个 break：规则目录自身也计数
+  // ⇒ walked 依次为 1(规则目录)、2(f0.log)、3(d)、4(a.bin)，上限设 4 就正好打断在 a.bin 之后。
+  const truncatedRun = await world(mk(true), { scanner: { maxEntries: 4 } }).sc.scan([rule()]);
+  assert.equal(truncatedRun.truncated, true, '上限桩本身要生效');
+  assert.equal(truncatedRun.items.some((i) => i.path === D), false, '触顶打断同一格时同样不作样本');
+  assert.equal(
+    truncatedRun.skipped.some((s) => s.code === 'INCOMPLETE' && s.dir === D),
+    true,
+    `触顶拦下也要留记录：${JSON.stringify(truncatedRun.skipped)}`,
+  );
+
+  // pending 判据的专属证人：收手发生在**进度回调**里（`emit` 在 `:253` 的检查之后才跑），
+  // 于是候选自己那一层是「正常走完」的、break 补标轮不到它，只有栈里那个没弹出的子目录（pending=1）
+  // 说明它没走完 —— 删掉 `|| pending > 0` 只有这一格会红（变异 W3），所以它不是摆设。
+  const PD = 'C:/Users/gongj/AppData/Local/Temp/p';
+  const pTree = [
+    { path: 'C:/Users/gongj/AppData/Local/Temp', dir: true },
+    { path: PD, dir: true },
+    { path: `${PD}/a.bin`, size: 10, atimeMs: ago(9), mtimeMs: ago(9) },
+    { path: `${PD}/sub`, dir: true },
+    { path: `${PD}/sub/x.bin`, size: 10, atimeMs: ago(9), mtimeMs: ago(9) },
+  ];
+  let emits = 0;
+  const wp = world(pTree, { scanner: { progressIntervalMs: 0, onProgress: () => { emits += 1; if (emits === 3) wp.sc.stop(); } } });
+  const pend = await wp.sc.scan([rule()]);
+  assert.equal(pend.stopped, true, '进度回调里的收手要生效');
+  assert.equal(pend.items.some((i) => i.path === PD), false, '自己目录走完、但子目录还压在栈里的候选不作样本');
+  assert.equal(
+    pend.skipped.some((s) => s.code === 'INCOMPLETE' && s.dir === PD),
+    true,
+    `栈账拦下也要留记录：${JSON.stringify(pend.skipped)}`,
+  );
+  // 同一棵树不收手 ⇒ p 整条都够老、正常进清单（否则上面两句又是空证）。
+  const pendFull = await world(pTree).sc.scan([rule()]);
+  assert.equal(pendFull.items.some((i) => i.path === PD), true, '对照：走完时这条该进清单');
+  assert.equal(pendFull.skipped.some((s) => s.code === 'INCOMPLETE'), false);
 });
 
 await checkAsync('cln-8 onProgress 按时间片节流（1s 推 60 帧会把 SSE 挤爆）', async () => {
