@@ -318,5 +318,13 @@ await checkAsync('rules-10 存储不可用时 error 有值、activeRules 只剩�
   assert.equal(w.store.error, RULE_ERROR.STORE_UNAVAILABLE);
 });
 
+await checkAsync('rules-11 用户规则不许占用内置 id（撞名会拆成两个寻址空间：toggle 关内置、清单里却留着同 id 的用户条目）', async () => {
+  const w = ruleWorld();
+  const builtinId = CR.BUILTIN_RULES[0].id;
+  // 只换 id，glob 仍是合法的 pnpm store —— 红必须归因到撞名检查，不能是 guard 先拒
+  await assert.rejects(() => w.store.add(userRule({ id: builtinId })), (e) => e.code === RULE_ERROR.BAD_RULE);
+  assert.equal((await w.store.userRules()).some((r) => r.id === builtinId), false, '撞名的用户规则不能落库');
+});
+
 console.log(`\n  ${passed}/${passed + failed} 通过`);
 process.exit(failed ? 1 : 0);
