@@ -2958,7 +2958,7 @@ Expected（**这是候选实现在本机连跑 5 组的实测区间，不是猜�
 
 **Files:**
 - Create: `lib/alerts/rules.js`
-- Create: `lib/alerts/spec.js`
+- Create: `lib/alerts/spec.js`（Task 13 起已 `git mv` 为 `lib/records/spec.js` —— 本任务原文按当时路径照写，重跑本任务时 import 用改名后的路径）
 - Create: `lib/alerts/store.js`
 - Create: `test/_helpers.mjs`（把 `test/prefs.test.mjs:121-150` 的 `createMemoryFacility` **原样搬过来**并 `export`；那是全仓库唯一的内存桩，两处共用只能有一处真相）
 - Modify: `test/prefs.test.mjs`（删掉本地定义，改成 `import { createMemoryFacility } from './_helpers.mjs';`。**用例条数与断言一字不动**：搬完 `prefs 13/13` 必须照旧绿，`grep -c "^check(\|^await checkAsync(" test/prefs.test.mjs` 的数字不许变）
