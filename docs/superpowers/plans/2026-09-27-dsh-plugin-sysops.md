@@ -2108,11 +2108,11 @@ Expected: 点数 `>= 3`，`metric` 里 `netDown` 与 `netUp` 都有，`v` 是正
 **Interfaces:**
 - Consumes: `supervisor.start/stop/state`。**`onData` 收到的是 Buffer 完整行**（Task 5 Ruling-29 ⑥ 的交付契约），解码归本任务：powershell 的 stdout 在脚本里设了 `[Console]::OutputEncoding=UTF8` 之后是 **UTF-8**（实测前置缺失时是 GBK），所以本文件自己导出 `decodeOut(buf)`，**不得复用 l1a 的 `decodePd`（GBK）**；stderr 恒是 GBK，要给用户看原文时由 Task 8 决定怎么解。
 - Produces:
-  - `buildLoopScript({ intervalSec, maxRows, withCpu }) → string`（**语句间用 `;` 分隔**，见下面 Step 5 的真机读数）
-  - `parseProcLine(text, { procCount, maxRows }) → { t, rows: [{pid, name, ws, cpuPct}], truncated? } | null`（`cpuPct` 已按核数均摊；缺列**或值为 `null`** 时为 `null` 而不是 `0`，Task 9 的 `evaluateProc` 吃的就是这个键）
+  - `buildLoopScript({ intervalSec, withCpu }) → string`（**语句间用 `;` 分隔**，见下面 Step 5 的真机读数。**不在脚本里裁条数** —— 评审 M-1 的裁定见 Step 3 注：`Get-CimInstance` 不排序，`-First 400` 取的是"任意 400 个"而不是"内存最大的 400 个"，裁条数归解析层）
+  - `parseProcLine(text, { procCount, maxRows }) → { t, rows: [{pid, name, ws, cpuPct}], truncated? } | null`（`cpuPct` 已按核数均摊；缺列**或值为 `null`** 时为 `null` 而不是 `0`，Task 9 的 `evaluateProc` 吃的就是这个键。`pid` 取不到数值时为 `null` 而不是 `0` —— 评审 M-2：`|| 0` 会把畸形 pid 折成 0，和真机恒在的 `System Idle Process`（pid 0）撞主键）
   - `decodeOut(buf) → string`（UTF-8；与 `decodePd` 分开的理由写在文件注释里）
   - `INTERVAL_SEC = 3`、`MAX_ROWS = 400`
-  - `createL1b({ sup, onRows, intervalSec?, maxRows? })` → `{ enable(), disable(), state(), latest() }`
+  - `createL1b({ sup, onRows, intervalSec?, maxRows? })` → `{ enable(), disable(), state(), latest() }`。**`onRows` 是必填**（不是函数就抛，评审 M-3：`onRows?.()` 的可选链会在装配漏传时把整条进程榜静默吞掉）；`enable()` 与 `disable()` 都要把 `latest()` 的缓存清成 `null`（评审 Important-1：源已停或本轮只出了非 JSON 行时，`latest()` 还留着上一轮的残值，消费方无从分辨）。Task 8 必须把 `latest().t` 透到 `snapshot().proc.t`，界面与告警用它判新鲜度。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -2126,8 +2126,8 @@ const oneRow = (over = {}) => JSON.stringify({
   rows: [{ id: 4, n: 'svchost.exe', ws: 1024 ** 2, cpu: 12.5 }, { id: 7, n: 'chrome.exe', ws: 512 * 1024 ** 2 / 1024, cpu: 0 }, ...[over.extra].filter(Boolean)],
 });
 
-check('ps-1 buildLoopScript：常驻 while、UTF-8 前置、条数上限、采样间隔都在脚本里写死', () => {
-  const s = L1B.buildLoopScript({ intervalSec: 3, maxRows: 400, withCpu: true });
+check('ps-1 buildLoopScript：常驻 while、UTF-8 前置、采样间隔在脚本里写死、不预裁条数', () => {
+  const s = L1B.buildLoopScript({ intervalSec: 3, withCpu: true });
   assert.match(s, /\$OutputEncoding=\[Console\]::OutputEncoding=\[Text\.Encoding\]::UTF8/, '不设 UTF-8，中文进程名会变问号');
   // 预检真机读数：语句只用空格拼接 ⇒ powershell exit=1、stdout 0 字节（"表达式或语句中包含意外的标记"）。
   // 这两条把"能跑"钉进用例，而不是留给 Step 5 的肉眼。
@@ -2135,13 +2135,16 @@ check('ps-1 buildLoopScript：常驻 while、UTF-8 前置、条数上限、采�
   assert.doesNotMatch(s, /Write-Output \$/, '$? 是布尔不是那行 JSON');
   assert.match(s, /while\(\$true\)/);
   assert.match(s, /Start-Sleep -Seconds 3/);
-  assert.match(s, /Select-Object -First 400/);
+  // 评审 M-1 的裁定：`Get-CimInstance Win32_Process` 不排序，脚本里 `-First 400` 取到的是"任意 400 个"，
+  // 而 `parseProcLine` 的 truncated 又恒为 0（源已裁）⇒ 进程数 >400 的机器上"内存最大的那些"会无声消失。
+  // 裁条数只在解析层做，脚本必须如实把全量吐出来。
+  assert.doesNotMatch(s, /Select-Object\s+-First/, '条数上限归解析层，不许在脚本里预裁');
   assert.match(s, /ConvertTo-Json -Compress/);
   assert.match(s, /PercentProcessorTime/, 'withCpu=true 必须取 CPU');
 });
 
 check('ps-2 withCpu=false 时不查 Perf 表（CPU 列实测超预算时的降级分支）', () => {
-  const s = L1B.buildLoopScript({ intervalSec: 3, maxRows: 400, withCpu: false });
+  const s = L1B.buildLoopScript({ intervalSec: 3, withCpu: false });
   assert.doesNotMatch(s, /PercentProcessorTime/);
   assert.match(s, /WorkingSetSize/);
 });
@@ -2151,6 +2154,11 @@ check('ps-3 parseProcLine 归一化：id→pid、n→name、ws→字节、cpu→
   assert.equal(r.t, 1760000000000);
   assert.equal(r.rows.length, 2);
   assert.deepEqual({ ...r.rows[0] }, { pid: 4, name: 'svchost.exe', ws: 1024 ** 2, cpuPct: 1.5625 });
+  // 评审 M-2：`Number(x) || 0` 会把取不到的 pid 折成 0，而真机恒有 pid 0 的 System Idle Process
+  // （且它的 cpuPct 是聚合值）—— 两者撞主键会让界面把"缺 pid"的行当成 Idle。缺就是 null。
+  const bad = L1B.parseProcLine(JSON.stringify({ t: 1, rows: [{ id: 'x', n: 'a.exe', ws: 5 }] }), { procCount: 8 });
+  assert.equal(bad.rows[0].pid, null);
+  assert.equal(bad.rows[0].ws, 5);
 });
 
 check('ps-4 CPU 缺列（withCpu=false 或系统未给）时 cpuPct 为 null，不是 0', () => {
@@ -2170,11 +2178,18 @@ check('ps-5 非 JSON 行（PowerShell 的告警、进度条、空行）返回 nu
   assert.equal(L1B.parseProcLine('{"rows":"不是数组"}', { procCount: 8 }), null);
 });
 
-check('ps-6 单行超长（实测 391 进程 / 行 21018 字节）不影响解析；rows 超过 maxRows 截断并计数', () => {
+check('ps-6 单行超长（实测 391 进程 / 行 21018 字节）不影响解析；超上限时按 ws 降序留前 maxRows 并计数', () => {
   const rows = Array.from({ length: 600 }, (_, i) => ({ id: i + 1, n: 'p' + i, ws: 1024, cpu: 0 }));
   const r = L1B.parseProcLine(JSON.stringify({ t: 5, rows }), { procCount: 8, maxRows: 400 });
   assert.equal(r.rows.length, 400);
   assert.equal(r.truncated, 200);
+  // 评审 M-1 的第二半：CIM 不排序，"前 400 个"是任意 400 个，界面要的是内存最大的 400 个。
+  // 造一组 ws 递增的：截断后必须留下最大的那些（ws 从 600*1024 往下数 400 个），而不是枚举顺序的前 400。
+  const rise = Array.from({ length: 600 }, (_, i) => ({ id: i + 1, n: 'p' + i, ws: (i + 1) * 1024, cpu: 0 }));
+  const t = L1B.parseProcLine(JSON.stringify({ t: 6, rows: rise }), { procCount: 8, maxRows: 400 });
+  assert.equal(t.rows[0].ws, 600 * 1024, '截断要保留内存最大的一批');
+  assert.equal(t.rows.at(-1).ws, 201 * 1024);
+  assert.equal(t.truncated, 200);
 });
 
 check('ps-7 默认参数与实测一致：sleep 3s，但实际周期 4.6–4.9s ⇒ 心跳基准另算', () => {
@@ -2206,8 +2221,17 @@ check('ps-8 l1b 门面：onData 收 Buffer、UTF-8 解码一次、非 JSON 行�
   feed('Write-Error : 找不到驱动');                                 // 非 JSON 行必须走 (null, line) 分支，不许静默 return
   assert.deepEqual(got, ['rows', 'noise']);
   assert.equal(b.state().state, 'on');
+  // 评审 Important-1：残值。源停了或新一轮还没出数时，latest() 不能再把上一轮的 rows 冒充"当前"。
   b.disable();
   assert.deepEqual(stops, ['l1b']);
+  assert.equal(b.latest(), null, 'disable 必须清缓存：否则界面拿着已停源的旧进程榜当实时');
+  feed(JSON.stringify({ t: 1760000000001, rows: [{ id: 5, n: 'x.exe', ws: 10, cpu: 1 }] }));  // 把缓存重新灌满，好让下一条断言真的承重
+  b.enable();
+  assert.equal(b.latest(), null, 'enable 之后、首轮到达之前同样不许留旧值');
+  // 评审 M-3 的落点（按 Ruling-16 折进本条，不新开 check）：装配漏传 onRows 时，实现里的
+  // `onRows?.()` 会把整条进程榜静默吞掉 —— 所以构造入口就要抛，而不是等数据流走空。
+  assert.throws(() => L1B.createL1b({ sup }), /onRows/);
+  assert.throws(() => L1B.createL1b({ sup, onRows: 1 }), /onRows/);
 });
 ```
 
@@ -2222,13 +2246,15 @@ Expected: `ERR_MODULE_NOT_FOUND` 指向 `lib/collect/l1b-powershell.js`。
 /**
  * L1b —— 进程榜。常驻 PowerShell 循环，每轮输出一行 JSON。
  *
- * 实测（派单前预检复跑，见台账 Ruling-37；计划期修正 #3 的旧数字已过期）：
- *  - 首行 1792–2246ms（三次连跑），不是 1192ms；
- *  - `Start-Sleep 3` + 单轮干活 1.6–1.9s ⇒ **实际周期 4.6–4.9s**，所以心跳基准不能按 3s 算；
- *  - 391–392 进程 / 行 21017–21018 字节（不是 385 / 17.7KB）；
+ * 实测（三组读数的并集：派单前预检 Ruling-37、实现者一轮、评审一轮；计划期修正 #3 的旧数字已过期）：
+ *  - 首行 1777–2246ms（热态连跑），**冷启动单点量到过 3774ms** ⇒ 降级判定按稳态周期，不按单次首行；
+ *  - `Start-Sleep 3` + 单轮干活 1.6–1.9s ⇒ **实际周期 4.37–4.91s**，所以心跳基准不能按 3s 算；
+ *  - 370–392 进程 / 行 19968–21842 字节、无 BOM（不是旧记录的 385 / 17.7KB，也别把区间端点当常量用）；
  *  - `taskkill /PID /T /F` 收得掉；stdout 在加 UTF-8 前置后是 UTF-8（不加是 GBK，实测 `b9a8bdf8`），stderr 恒是 GBK。
  * 默认**不开**、由页面可见性驱动（spec §1.2 的结论）。
  */
+import os from 'node:os';   // createL1b 里算均摊核数要用（收口那条说的就是它）
+
 export const INTERVAL_SEC = 3;
 export const MAX_ROWS = 400;
 
@@ -2237,7 +2263,7 @@ export const MAX_ROWS = 400;
  * `exit=1`、stdout 0 字节、stderr（GBK）"表达式或语句中包含意外的标记"$cores=[Environment]::ProcessorCount""
  * —— 整条采集链路一个字节都不出，而单元测试全绿（测试只正则匹配脚本字符串，不断言 PowerShell 语义）。
  */
-export function buildLoopScript({ intervalSec = INTERVAL_SEC, maxRows = MAX_ROWS, withCpu = true } = {}) {
+export function buildLoopScript({ intervalSec = INTERVAL_SEC, withCpu = true } = {}) {
   // Perf 表提供每进程 CPU 占用（Win32_Process 没有这一列）；关掉时走 withCpu=false 的降级形态
   const cpuMap = withCpu
     ? '$cpu=@{};Get-CimInstance Win32_PerfFormattedData_PerfProc_Process|ForEach-Object{if($null -ne $_.IDProcess){$cpu[[uint32]$_.IDProcess]=$_.PercentProcessorTime}};'
@@ -2245,7 +2271,10 @@ export function buildLoopScript({ intervalSec = INTERVAL_SEC, maxRows = MAX_ROWS
   return '$OutputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8;'
     + 'while($true){'
     + cpuMap
-    + `$rows=@(Get-CimInstance Win32_Process|Select-Object -First ${maxRows}|ForEach-Object{[pscustomobject]@{id=$_.ProcessId;n=$_.Name;ws=$_.WorkingSetSize;cpu=if($cpu.ContainsKey([uint32]$_.ProcessId)){$cpu[[uint32]$_.ProcessId]}else{$null}}});`
+    // 评审 M-1：这里**不加** `Select-Object -First N`。CIM 不排序，脚本里预裁得到的是"任意 N 个"，
+    // 而且解析层的 truncated 会恒为 0（源已被裁平）⇒ 进程数 >400 的机器上内存最大的那批无声消失。
+    // 条数上限与截断计数都归 parseProcLine。
+    + `$rows=@(Get-CimInstance Win32_Process|ForEach-Object{[pscustomobject]@{id=$_.ProcessId;n=$_.Name;ws=$_.WorkingSetSize;cpu=if($cpu.ContainsKey([uint32]$_.ProcessId)){$cpu[[uint32]$_.ProcessId]}else{$null}}});`
     // 先算 $rows 再单独组装输出：`$?` 是布尔不是那行 JSON，`$rows=@(...), @{...}|ConvertTo-Json` 是把两个对象塞数组过管道
     + '@{t=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds();rows=$rows}|ConvertTo-Json -Compress | Write-Output;'
     + `Start-Sleep -Seconds ${intervalSec}}`;
@@ -2261,22 +2290,27 @@ export function parseProcLine(text, { procCount = 1, maxRows = Infinity } = {}) 
   }
   if (!obj || !Array.isArray(obj.rows) || !Number.isFinite(Number(obj.t))) return null;
   const cores = Number.isFinite(procCount) && procCount > 0 ? procCount : 1;
-  let truncated = 0;
-  const rows = obj.rows.slice(0, maxRows).map((r) => {
+  const mapped = obj.rows.map((r) => {
     // 判缺列必须显式认 `null`：真机第一轮 391 行里就有 2 行是 `"cpu":null`（新进程还没进 Perf 表），
     // 而 `Number(null) === 0` —— 不认掉就会把"没测到"折成 0%，Task 9 的 evaluateProc 吃的正是这个键。
     const cell = r?.cpu;
     const raw = cell === null || cell === undefined || cell === '' ? NaN : Number(cell);
+    const id = Number(r?.id);
     return {
-      pid: Number(r?.id) || 0,
+      // 评审 M-2：取不到就是 null。`|| 0` 会把畸形 pid 折成 0，而真机恒有 pid 0 的 System Idle Process
+      // （它的 cpuPct 还是 `_Total`/`Idle` 覆盖出来的聚合值）—— 撞在主键上界面就会把缺 pid 的行当 Idle 摆。
+      pid: Number.isFinite(id) ? id : null,
       name: typeof r?.n === 'string' ? r.n : '',
       ws: Number(r?.ws) || 0,
       // PercentProcessorTime 是"所有核合计"口径（可 >100），按核数均摊成单核百分比；缺列为 null 而不是 0
       cpuPct: Number.isFinite(raw) ? raw / cores : null,
     };
   });
-  if (obj.rows.length > maxRows) truncated = obj.rows.length - maxRows;
-  return truncated ? { t: Number(obj.t), rows, truncated } : { t: Number(obj.t), rows };
+  // 评审 M-1：只有**真的超上限**时才排序（按 ws 降序保留最大的一批）。不超上限就不动顺序 ——
+  // ps-3 断言的是"原样带出"，界面（Task 21）自己排；这里排序只是为了别让截断丢掉榜尾。
+  const overLimit = mapped.length > maxRows;
+  const rows = overLimit ? [...mapped].sort((a, b) => b.ws - a.ws).slice(0, maxRows) : mapped;
+  return overLimit ? { t: Number(obj.t), rows, truncated: mapped.length - maxRows } : { t: Number(obj.t), rows };
 }
 
 /** powershell 的 stdout 解码入口。**不要复用 `decodePd`**（那个是给 typeperf 的 GBK 用的）。 */
@@ -2286,14 +2320,18 @@ export function decodeOut(buf) {
 }
 
 export function createL1b({ sup, onRows, intervalSec = INTERVAL_SEC, maxRows = MAX_ROWS }) {
+  // 评审 M-3：装配漏传 onRows 时，下面那两处 `onRows?.()` 会变成 no-op —— 整条进程榜采到了、
+  // 解出来了、也存进 latest() 了，但一个订阅者都收不到，且没有任何报错。构造入口就抛。
+  if (typeof onRows !== 'function') throw new Error('createL1b 必须传 onRows(parsed, line)，否则进程榜数据全丢且无声');
   let last = null;
   return {
     enable() {
+      last = null; // 评审 Important-1：新一轮开始前的旧值不算"当前"
       sup.start('l1b', {
         label: '进程榜（PowerShell 常驻）',
         cmd: 'powershell',
-        args: ['-NoProfile', '-NonInteractive', '-Command', buildLoopScript({ intervalSec, maxRows, withCpu: true })],
-        // 心跳基准按**实际周期**算，不是 sleep 秒数：实测 `Start-Sleep 3` + 单轮干活 1.6–1.9s ⇒ 4.6–4.9s 一行。
+        args: ['-NoProfile', '-NonInteractive', '-Command', buildLoopScript({ intervalSec, withCpu: true })],
+        // 心跳基准按**实际周期**算，不是 sleep 秒数：实测 `Start-Sleep 3` + 单轮干活 1.6–1.9s ⇒ 4.37–4.91s 一行。
         // 监督者的判定是 `3 × intervalMs` 无数据 ⇒ stalled，取 5000 ⇒ 15s，余量 3 倍多。
         intervalMs: (intervalSec + 2) * 1000,
         onData: (raw) => {
@@ -2301,23 +2339,27 @@ export function createL1b({ sup, onRows, intervalSec = INTERVAL_SEC, maxRows = M
           // `typeof text !== 'string'` ⇒ **每一行**都判成"非 JSON"，进程榜永远空且不报错。
           const line = decodeOut(raw);
           const parsed = parseProcLine(line, { procCount: os.cpus().length, maxRows });
-          if (!parsed) { onRows?.(null, line); return; }
+          if (!parsed) { onRows(null, line); return; }
           last = parsed;
-          onRows?.(parsed, line);
+          onRows(parsed, line);
         },
       });
     },
-    disable: () => sup.stop('l1b'),
+    disable() {
+      last = null; // 评审 Important-1：源已停，界面拿上一轮残值画"实时进程榜"是最坏的一种静默
+      return sup.stop('l1b');
+    },
     state: () => sup.state('l1b'),
     latest: () => last,
   };
 }
 ```
 
-实现时的三处收口（写完立刻处理，否则 Step 4/5 必红）：
+实现时的四处收口（写完立刻处理，否则 Step 4/5 必红）：
 - ~~`Write-Output $?` 是错的~~ —— 上面那版已经改对了，但**别改回去**：`$?` 是布尔；`$rows=@(...), @{...}|ConvertTo-Json` 是把两个对象塞进数组再过管道。测试只正则匹配脚本字符串、不断言 PowerShell 语义，所以**必须靠 Step 5 的真机跑**兜：真机原样跑旧版读数 `exit=1 / stdout 0 字节`。
 - `createL1b` 用了 `os.cpus()`，文件顶部要 `import os from 'node:os';`。
-- 别在 `parseProcLine` 里"顺手"过滤 `pid===0` 或 `System Idle Process`：真机 `Win32_PerfFormattedData_PerfProc_Process` 里 `IDProcess=0` 有**两个**实例（`_Total` 与 `Idle`，哈希表后写覆盖先写），所以 pid 0 那行的 cpu 是聚合值（实测 1442–1560）。这不是采集层的判断，界面/告警侧（Task 9 / Task 21）才决定怎么摆它 —— 采集层只负责如实带出来并在注释里写明这条不可信读数。
+- 别在 `parseProcLine` 里"顺手"过滤 `pid===0` 或 `System Idle Process`：真机 `Win32_PerfFormattedData_PerfProc_Process` 里 `IDProcess=0` 有**两个**实例（`_Total` 与 `Idle`，哈希表后写覆盖先写），所以 pid 0 那行的 cpu 是聚合值（实测 1442–1560，均摊后每轮 93–98%）。这不是采集层的判断，界面/告警侧（Task 9 / Task 21）才决定怎么摆它 —— 采集层只负责如实带出来并在注释里写明这条不可信读数。
+- `buildLoopScript` 的参数表里**没有** `maxRows` 了（裁条数移到解析层）；既有测试 ps-1/ps-2 里那两处 `maxRows: 400` 是多余的键，一并删掉，别留着误导后来人以为脚本会裁。
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -2335,6 +2377,14 @@ Expected: `38/38 通过`（①4 ②5 ③11 ④10 ⑤8），退出码 0。旁路 
    （预检踩过的坑：这一条的 perl 匹配式要写成 `onRows\?\.\(null, line\)` —— 源码里是可选链 `onRows?.`，漏了 `?` 会**一字都没改**却报"7/8 通过"，是空变异。每轮变异前先 `diff` 一下确认字节真的动了。）
 五条都咬红才算过；某条不红就是断言没承重，先补断言再往下走。预检实测读数：变异 1 → ps-1 红；变异 2 → ps-4 红；变异 3/4/5 → ps-8 红（各 7/8）。
 
+**fix round 1 追加五条落点（评审 M-1 / M-2 / M-3 / Important-1）。控制器已在仓库外把它们拆成六处改动逐个变异跑过（编号 1–6，对应下面 6–10 的六个改动点）：基线 38/38，1→ps-1、2→ps-4、3→ps-6、4/5/6→ps-8，每次 `37/38`，还原 `cmp` 字节一致：**
+6. 在脚本里把 `Select-Object -First 400` 加回去（`Get-CimInstance Win32_Process|Select-Object -First 400|ForEach-Object`）→ **ps-1 必须红**（`doesNotMatch /Select-Object\s+-First/`）。
+7. `pid: Number.isFinite(id) ? id : null` 改回 `pid: Number(r?.id) || 0` → **ps-3 必须红**（畸形 id 那两条：`pid` 变 0）。
+8. 截断分支的排序摘掉：`overLimit ? mapped.slice(0, maxRows) : mapped` → **ps-6 必须红**（`rows[0].ws` 不再是最大的那条）。
+9. 残值清理任一处摘掉：`enable()` 里的 `last = null` 或 `disable()` 里的 `last = null` 改成 `void 0` → **ps-8 必须红**（对应那一条 `latest() === null`）。
+10. 构造守卫摘掉（删掉 `if (typeof onRows !== 'function') throw …`）→ **ps-8 必须红**（两条 `assert.throws` 都不抛了）。
+   注意 9 和 10 都落在 ps-8：这正常 —— ps-8 是唯一碰门面副作用的一条，别为了"每个变异红不同用例"去拆用例。
+
 - [ ] **Step 5: 真机端到端（含 CPU 列的代价判定）**
 
 写成临时文件 `tmp/e2e-l1b.mjs` 再跑（**不要用 `node -e "…"`**：本机 bash 的双引号会吃掉反斜杠，预检就是这么误判过一次"计数器名不存在"），跑完删除：
@@ -2347,7 +2397,7 @@ console.log('script len', buildLoopScript({}).length);
 const sup = createSupervisor({});
 const rows = [], t0 = Date.now();
 const a = createL1b({ sup, onRows: (p) => {
-  if (p) rows.push({ n: p.rows.length, first: Date.now() - t0, cpuNull: p.rows.filter((r) => r.cpuPct === null).length, top: p.rows.slice(0, 3).map((r) => [r.name, r.cpuPct]) });
+  if (p) rows.push({ n: p.rows.length, first: Date.now() - t0, truncated: p.truncated ?? 0, cpuNull: p.rows.filter((r) => r.cpuPct === null).length, top: p.rows.slice(0, 3).map((r) => [r.name, r.cpuPct]) });
   else rows.push('非JSON行');
 } });
 a.enable();
@@ -2362,7 +2412,9 @@ setTimeout(async () => {
 
 Run: `node tmp/e2e-l1b.mjs`
 Expected 与决策规则（预检实测已把这些数字钉死，记进汇报，不要含糊过去）：
-- 20s 内 **轮数 ≥ 4**（实测周期 4.6–4.9s ⇒ 20s 应有 4 轮），每轮 `n` 在 300~420、首行 `first` 在 **1800–2300ms**。
+- `script len` 应为 **574**（去掉 `-First` 后从 599 缩短；仍打印 `含 -First？ false`）。
+- 20s 内 **轮数 ≥ 4**（实测周期 4.37–4.91s ⇒ 20s 应有 4 轮），每轮 `n` 在 300~420、首行 `first` 在 **1800–2300ms**、`truncated` 本机恒为 **0**（本机 370–392 进程 < 400；若这里出现 >0 说明裁条数被挪回了脚本或 `MAX_ROWS` 被改小）。
+- **降级判定按稳态周期，不按单次冷启动首行**（控制器裁定，台账 Ruling-41）：实现者一轮冷启动量到过 3774ms 首行，但同机热态复跑 2090/2108/1798ms、评审两轮 1872/1777ms ⇒ 单点冷启动不构成降级理由。**只有稳态周期 > `intervalSec + 2`（即 5s）连续两轮**才把 `enable()` 里的 `withCpu` 改为 `false`，并在界面进程榜卡片上写「CPU 列在本机实测使单轮耗时 X ms（预算 Y ms），已降级为仅内存列」，同时把告警规则 `procCpu` 置为依赖不满足（Task 9 的 `dependencyGated` 会用到）。开/关 CPU 列的实测差值 ≈1.0s/轮（4.37–4.75s vs 3.4–3.7s），仍在 5s 预算内。
 - `cpuNull` 允许 > 0（真机第一轮实测 2 行），但必须是 `null` 而不是 0 —— 若这里出现 `cpuPct === 0` 且原值是 `null`，Step 4b 变异 2 一定没跑到位。
 - 若轮数 < 4 或首行 > 3000ms（说明 `Win32_PerfFormattedData_PerfProc_Process` 那一趟把单轮拖长了）：把 `enable()` 里的 `withCpu` 改为 `false`，并在界面进程榜卡片上写「CPU 列在本机实测使单轮耗时 X ms（预算 Y ms），已降级为仅内存列」，同时把告警规则 `procCpu` 置为依赖不满足（Task 9 的 `dependencyGated` 会用到）。
 - 若 `rows` 里出现 `'非JSON行'`：确认它来自哪一行并让它进时间线（Task 8 的 `onRows(null, line)` 分支），**不要**改成 `if(!parsed) return;` 静默丢弃。
