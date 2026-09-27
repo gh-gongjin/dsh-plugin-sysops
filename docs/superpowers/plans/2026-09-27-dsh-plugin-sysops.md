@@ -3686,16 +3686,18 @@ Expected: `29/29 通过`（①②③段 15 条 = `rule-1..10` + `hit-1..5`，加
 **Files:**
 - Create: `lib/clean/rules.js`
 - Create: `lib/prefs/rules-store.js`
-- Modify: `lib/prefs/spec.js`（`cleanRulesRecord` 追加 `off` 字段）
-- Modify: `test/prefs.test.mjs`（追加 ④段）
+- Modify: `lib/prefs/spec.js`（`cleanRulesRecord` 追加 `off` 字段，`items[]` 追加 `kind`）
+- Modify: `test/prefs.test.mjs`（追加 ④段；②段 `prefs-4` 的正面夹具补一个 `kind` —— 见 Step 3 末尾的说明）
 
 **Interfaces:**
 - Consumes: `check`（Task 2）、`createPrefStore` / `cleanRulesRecord`（Task 3）
 - Produces:
-  - `BUILTIN_RULES: rule[]`（只收「计划期实测修正」里 **13 条存在** 的路径），`rule = { id, n, kind, dir, glob, ageDays, note, readonly: true }`
+  - `BUILTIN_RULES: rule[]`（只收本机存在性复核**实测存在**的 12 条路径，2026-09-27 现采；`windows-err` 已因 `WER` 用户目录不存在剔除），`rule = { id, n, kind, dir, glob, ageDays, note, readonly: true, rel }` —— `dir`/`glob` 是**加载时按 `os.homedir()` 展开好的绝对路径**，Task 12 的 scanner 直接用，不再自己拼
+  - `DEFAULT_OFF = ['packages-cache', 'playwright-browsers']`（首次读取即生效的默认关闭集，`rules-8/9/10` 的条数断言都要减去它）
   - `enabledBuiltin(offIds) → rule[]`、`RULE_KINDS = ['缓存','日志','旧版本','崩溃转储']`
-  - `createRuleStore({ prefStore, logger? })` → `{ list(), userRules(), activeRules(), add(rule), remove(id), toggle(id, on) , error }`
+  - `createRuleStore({ prefStore, logger? })` → `{ list(), userRules(), activeRules(), add(rule), remove(id), toggle(id, on) , error }`；**四个写口一律返回 `prefStore.write()` 的落库结果**（行级 `updatedAt` 由 prefs 盖，未声明字段已被 schema 丢弃 —— 返回入参等于对调用方撒谎）
   - `RULE_ERROR`（`GUARD_DENY` `UNKNOWN_ID` `BAD_RULE` `STORE_UNAVAILABLE`）
+  - `cleanRulesRecord` 的 `items[]` 必须**声明 `kind`**（`requiredString`），否则 `arrayOf` 会把它静默丢掉 ⇒ 规则存进去、读出来就没有分类，而 `validate()` 又要求 `kind` 非空 —— 那条规则会在**每次 `activeRules()` 读取时抛错**，比写不进去更糟
 
 - [ ] **Step 1: 写失败的测试（④段，接进 `test/prefs.test.mjs`）**
 
@@ -3705,7 +3707,7 @@ const CR = await import('../lib/clean/rules.js');
 const { createRuleStore, RULE_ERROR } = await import('../lib/prefs/rules-store.js');
 
 check('rules-1 内置库只收本机实测存在的路径（凭印象列路径 = 清单永远 0 命中）', () => {
-  assert.equal(CR.BUILTIN_RULES.length, 13);
+  assert.equal(CR.BUILTIN_RULES.length, 12); // WER 实测不存在，见 Step 3 下方的现采说明
   for (const r of CR.BUILTIN_RULES) {
     assert.ok(/^[a-z0-9._-]+$/.test(r.id), `规则 id 非法：${r.id}`);
     assert.ok(CR.RULE_KINDS.includes(r.kind), `${r.id} 的 kind 不在表内：${r.kind}`);
@@ -3716,6 +3718,10 @@ check('rules-1 内置库只收本机实测存在的路径（凭印象列路径 =
   const banned = ['Crashpad', 'NuGet', '.npm', '.pnpm-store', 'WeChat Runtime'];
   for (const b of banned) {
     assert.ok(!CR.BUILTIN_RULES.some((r) => r.dir.includes(b) || r.glob.includes(b)), `实测不存在的路径进了内置库：${b}`);
+  }
+  // DEFAULT_OFF 里的 id 必须真实存在：拼错一个字母 = 那条默认关永远关不上，且不会有任何报错
+  for (const id of CR.DEFAULT_OFF) {
+    assert.ok(CR.BUILTIN_RULES.some((r) => r.id === id), `DEFAULT_OFF 引用了不存在的内置规则 id：${id}`);
   }
 });
 
@@ -3742,6 +3748,10 @@ check('rules-4 clean_rules 记录形状：off 是内置规则 id 数组，脏形
   assert.deepEqual(r.off, ['temp-user', 'npm-cache']);
   assert.throws(() => t.parse({ items: [], off: 'temp-user' }), /off/);
   assert.throws(() => t.parse({ items: [], off: [1] }), /off/);
+  // kind 必须在 schema 里声明：arrayOf 会丢未声明字段，丢了以后 validate() 会在每次读规则时抛错
+  const one = t.parse({ items: [{ id: 'u-1', n: 'x', glob: 'C:\\x\\*', ageDays: 1, kind: '缓存' }], off: [], updatedAt: 1 });
+  assert.equal(one.items[0].kind, '缓存', 'kind 没存住 = 被 arrayOf 静默丢字段');
+  assert.throws(() => t.parse({ items: [{ id: 'u-1', n: 'x', glob: 'C:\\x\\*', ageDays: 1 }], off: [], updatedAt: 1 }), /kind/);
 });
 
 const userRule = (over = {}) => ({
@@ -3750,7 +3760,10 @@ const userRule = (over = {}) => ({
 });
 
 const ruleWorld = (over = {}) => {
-  const facility = over.facility === undefined ? createMemoryFacility() : over.facility;
+  // **判键在不在，不判值**：`ruleWorld({ facility: undefined })` 要的就是"宿主没有 storageDomain"，
+  // 写成 `over.facility === undefined ? 内存桩 : over.facility` 会把它当成"没传"而塞进内存桩，
+  // rules-10 就什么也没测到（③段 prefs-9 踩过同一处，注释在 `test/prefs.test.mjs:122-127`）。
+  const facility = 'facility' in over ? over.facility : createMemoryFacility();
   const prefStore = createPrefStore({ getFacility: () => facility, now: () => 1000, logger: { warn() {} } });
   return { prefStore, store: createRuleStore({ prefStore, logger: { warn() {} } }) };
 };
@@ -3759,7 +3772,9 @@ await checkAsync('rules-5 新增本机规则：合法 glob 入库，返回归一
   const w = ruleWorld();
   const out = await w.store.add(userRule());
   assert.equal(out.items.length, 1);
-  assert.equal(out.items[0].updatedAt, 1000);
+  // updatedAt 是**行级**戳（record 只有行级），由 prefStore.write 盖；断成 items[0].updatedAt 会永远 undefined
+  assert.equal(out.updatedAt, 1000);
+  assert.equal(out.items[0].kind, '缓存', '走完整写-读一轮回来看 kind 存没存住');
 });
 
 await checkAsync('rules-6 命中红线的规则在**写入阶段**就被拒（不是执行阶段才失败）', async () => {
@@ -3790,7 +3805,8 @@ await checkAsync('rules-8 activeRules = 开启的内置 + 用户规则，按 gua
   const w = ruleWorld();
   await w.store.add(userRule());
   const rows = await w.store.activeRules();
-  assert.equal(rows.filter((r) => r.readonly).length, CR.BUILTIN_RULES.length);
+  // 从未写入过 ⇒ off 取 DEFAULT_OFF，所以「开着的内置」是 12 - DEFAULT_OFF.length，不是 12
+  assert.equal(rows.filter((r) => r.readonly).length, CR.BUILTIN_RULES.length - CR.DEFAULT_OFF.length);
   assert.equal(rows.filter((r) => !r.readonly).length, 1);
   assert.ok(rows.every((r) => r.glob && r.ageDays >= 0));
 });
@@ -3799,11 +3815,14 @@ await checkAsync('rules-9 toggle 内置规则写入 off；remove 删用户规则
   const w = ruleWorld();
   await w.store.add(userRule());
   const first = CR.BUILTIN_RULES[0].id;
+  // 本例假设"首条内置规则默认是开的"；哪天它进了 DEFAULT_OFF，关-开两步就变成空操作而仍然全绿
+  assert.ok(!CR.DEFAULT_OFF.includes(first), `首条内置规则 ${first} 已默认关闭，本例失效`);
   await w.store.toggle(first, false);
   let all = await w.store.list();
-  assert.deepEqual(all.off, [first]);
+  // 从未写入时 off 以 DEFAULT_OFF 打底，所以断"包含"而不是断"等于那一条"
+  assert.deepEqual([...all.off].sort(), [...CR.DEFAULT_OFF, first].sort());
   await w.store.toggle(first, true);
-  assert.deepEqual((await w.store.list()).off, []);
+  assert.deepEqual([...(await w.store.list()).off].sort(), [...CR.DEFAULT_OFF].sort());
   await w.store.remove('u-1');
   assert.equal((await w.store.list()).items.length, 0);
   await assert.rejects(() => w.store.remove('u-404'), (e) => e.code === RULE_ERROR.UNKNOWN_ID);
@@ -3812,7 +3831,8 @@ await checkAsync('rules-9 toggle 内置规则写入 off；remove 删用户规则
 await checkAsync('rules-10 存储不可用时 error 有值、activeRules 只剩内置（清理页仍可用，但看不到本机规则）', async () => {
   const w = ruleWorld({ facility: undefined });
   const rows = await w.store.activeRules();
-  assert.equal(rows.length, CR.BUILTIN_RULES.length);
+  // 同样减去默认关那两条：无库时读到的 off 就是 DEFAULT_OFF，不是空数组
+  assert.equal(rows.length, CR.BUILTIN_RULES.length - CR.DEFAULT_OFF.length);
   assert.equal(w.store.error, RULE_ERROR.STORE_UNAVAILABLE);
 });
 ```
@@ -3826,16 +3846,21 @@ Expected: `rules-1` 起 `ERR_MODULE_NOT_FOUND` 指向 `lib/clean/rules.js`。
 
 - [ ] **Step 3: 写实现**
 
-`lib/clean/rules.js` —— 13 条全部来自「计划期实测修正」的存在性复核（2026-09-27），`home` 用 `%USERPROFILE%` 展开后的绝对路径，由 `lib/clean/scanner.js`（Task 12）在遍历前用 `path.join(os.homedir(), …)` 生成，常量表里只存**相对用户目录的段串**，避免把机器名焊进仓库：
+`lib/clean/rules.js` —— 12 条全部来自本机存在性复核（2026-09-27 现采，见 Step 3 末尾的读数块；`windows-err` 因 `WER` 用户目录不存在已剔除），仓库里只存**相对用户目录的段串 `rel`**（不把机器名焊进代码），但**导出的 rule 对象必须带加载时展开好的 `dir` / `glob`**：rules-1/2/8/10 与 `activeRules()` 的 guard 复检都要读 `r.dir` / `r.glob`，只给 `rel` 会让四条用例一起红（预检实测：原稿 ④段 10 例红 6 例，其中 4 例死在这里），Task 12 的 scanner 也不必再展开一遍：
 
 ```js
+import os from 'node:os';
+import path from 'node:path';
+
 export const RULE_KINDS = ['缓存', '日志', '旧版本', '崩溃转储'];
 
-/** `rel` 相对 os.homedir()；`abs` 为少数不在用户目录下的规则保留绝对路径。 */
-const mk = (id, n, kind, rel, ageDays, note) => ({
-  id, n, kind, readonly: true, ageDays, note,
-  rel, // Task 12 的 scanner 展开成 dir / glob
-});
+const HOME = os.homedir();
+
+/** `rel` 用 `/` 分隔、相对 `os.homedir()`；`dir`/`glob` 是加载时展开出来的本机绝对路径。 */
+const mk = (id, n, kind, rel, ageDays, note) => {
+  const dir = path.join(HOME, ...rel.split('/'));
+  return { id, n, kind, readonly: true, ageDays, note, rel, dir, glob: path.join(dir, '*') };
+};
 
 export const BUILTIN_RULES = [
   mk('temp-user', '用户临时目录', '缓存', 'AppData/Local/Temp', 3, '系统与应用共用，正在占用的文件会被跳过'),
@@ -3845,7 +3870,6 @@ export const BUILTIN_RULES = [
   mk('npm-cache', 'npm 下载缓存', '缓存', 'AppData/Local/npm-cache', 30, '清掉后首个 `npm i` 需重新下载'),
   mk('pip-cache', 'pip 下载缓存', '缓存', 'AppData/Local/pip/Cache', 30, ' Wheels 会重新下载'),
   mk('crash-dumps', '崩溃转储', '崩溃转储', 'AppData/Local/CrashDumps', 7, '只影响事后分析，除非正要查崩溃'),
-  mk('windows-err', 'Windows 错误报告缓存', '日志', 'AppData/Local/Microsoft/Windows/WER', 7, '系统自身的错误收集目录，仅清用户级缓存'),
   mk('packages-cache', 'UWP 包缓存', '缓存', 'AppData/Local/Packages', 60, '范围较大，默认关闭；展开后逐项看命中量再勾'),
   mk('local-cache', '通用 .cache 目录', '缓存', '.cache', 30, '开发工具通用缓存'),
   mk('wechat-cache', '微信文件缓存', '缓存', 'AppData/Roaming/Tencent/WeChat', 30, '含图片视频缓存，聊天记录不在此目录'),
@@ -3862,7 +3886,12 @@ export function enabledBuiltin(offIds = []) {
 }
 ```
 
-> 说明两处与「实测修正」的差异，执行时**必须**在代码注释里写清并保留：`AppData/Local/Microsoft/Windows/WER`、`AppData/Local/Package Cache` 与 `.cache` 三条里，`WER` 未做过存在性复核 → Step 4 前用 `test -d "$LOCALAPPDATA/Microsoft/Windows/WER"` 现测一次；不存在就把该条从 `BUILTIN_RULES` 里删掉并把 `length` 断言改成实测数（**内置库的条数断言跟着实测走，不许反过来改实测**）。`Package Cache`（Windows Installer 的包缓存，删了会让已装程序 repair 失败）经判定**不入内置库**，红线之外还要留出修复能力。
+> **两处与「实测修正」的差异，执行时必须照下面写并在代码注释里保留：**
+>
+> 1. **`windows-err`（`AppData/Local/Microsoft/Windows/WER`）不入内置库 —— 实测不存在。** 2026-09-27 现采（`node tmp/t11wer.mjs`，读数 `tmp/t11-wer.txt`）：`WER`、`WER/ReportQueue`、`WER/ReportArchive` 三条全 `ENOENT`；Windows 的错误报告实际落在 `C:/ProgramData/Microsoft/Windows/WER`，那是**系统存储、不在用户目录下**，既违反"内置库只存相对 `os.homedir()` 的段串"这条约束，也踩红线附近的应用能力（属主与 ACL）。所以 `BUILTIN_RULES` 是 **12 条**，`rules-1` 的条数断言写 12。**条数跟着实测走，不许反过来改实测。** 剔除后内置库里暂时没有 `日志` 类规则，`RULE_KINDS` 仍保留四类 —— 它是**用户自建规则**的分类表（Task 22 清理页的分类筛选按它渲染），不是内置库的投影，不要因为"没人用"就删。
+> 2. **`Package Cache` 不入内置库（判定，不是漏收）**：`C:/ProgramData/Package Cache` 实测存在，但它是 Windows Installer 的包缓存，删掉会让已装程序的 repair / 卸载失败 —— 红线之外还要留出修复能力。`rules-1` 的 `banned` 列表按上面第 1 条同步（`Crashpad` / `NuGet` / `.npm` / `.pnpm-store` / `WeChat Runtime` 五条实测不存在，不得混进来）。
+>
+> 其余 12 条实测存在（`tmp/t11-wer.txt` 同轮读数）：`Temp` 6524 条目、`Explorer` 33 条目（抽样 79 MB）、`CrashDumps` 3 文件（抽样 141 MB）、`ms-playwright` / `Packages` / `.cache` / `WeChat` / `Edge/.../Cache` / `Code/Cache` / `pip/Cache` 均存在。**注意**：多条规则在 depth-1 只有子目录没有文件（缓存目录普遍套一层，如 `Edge/.../Cache/Cache_Data`）—— 这是常态，不是误收；深度遍历与"目录算不算命中"由 Task 12 的 scanner 裁决，本任务只保证路径存在且过 guard。
 
 `lib/prefs/rules-store.js`：
 
@@ -3887,11 +3916,14 @@ export const RULE_ERROR = {
 const err = (code, why) => Object.assign(new Error(why), { code, why });
 
 export function createRuleStore({ prefStore, logger }) {
+  /** 从未写入 / 存储不可用时的空行形状。**只能有一处定义** —— 见 Step 6 的 V5。 */
+  const emptyRow = () => ({ items: [], off: DEFAULT_OFF.slice(), updatedAt: 0 });
+
   const read = async () => {
     if (!prefStore?.available) return null;
     try {
       const row = await prefStore.read('clean_rules');
-      return row ?? { items: [], off: DEFAULT_OFF.slice(), updatedAt: 0 };
+      return row ?? emptyRow();
     } catch (e) {
       logger?.warn?.(`[sysops] 本机清理规则读取失败：${e.message}`);
       return null;
@@ -3900,8 +3932,9 @@ export function createRuleStore({ prefStore, logger }) {
 
   const write = async (next) => {
     if (!prefStore?.available) throw err(RULE_ERROR.STORE_UNAVAILABLE, 'storageDomain 不可用，规则只能只读');
-    await prefStore.write('clean_rules', next);
-    return next;
+    // 必须返回 prefStore 落库后那一份，不是手里的 `next`：行级 `updatedAt` 由 prefStore 盖，
+    // 且未声明字段已被 schema 丢弃 —— 返回入参会让调用方以为自己的对象原样存住了。
+    return prefStore.write('clean_rules', next);
   };
 
   const validate = (r) => {
@@ -3920,7 +3953,7 @@ export function createRuleStore({ prefStore, logger }) {
       return prefStore?.available ? null : RULE_ERROR.STORE_UNAVAILABLE;
     },
     async list() {
-      return (await read()) ?? { items: [], off: DEFAULT_OFF.slice(), updatedAt: 0 };
+      return (await read()) ?? emptyRow();
     },
     async userRules() {
       return (await this.list()).items;
@@ -3951,30 +3984,54 @@ export function createRuleStore({ prefStore, logger }) {
 }
 ```
 
-`lib/prefs/spec.js` 的 `cleanRulesRecord` 追加一行 `off: arrayOfItem('clean_rules.off', requiredString('off[]'))`，并在 `cleanRulesRecord` 的注释里写明「`off` 只装内置规则 id」。
+`lib/prefs/spec.js` 的 `cleanRulesRecord` 改两处（`arrayOfItem` / `requiredString` / `optionalString` 该文件已经 import 了，不用新增引入）：
 
-- [ ] **Step 4: 现测 WER 路径存在性，再跑测试**
+1. 追加一行 `off: arrayOfItem('clean_rules.off', requiredString('off[]'))`，并在 `cleanRulesRecord` 的注释里写明「`off` 只装内置规则 id」。
+2. `items` 的 item schema 里追加 `kind: requiredString('items[].kind')`（放在 `ageDays` 之后、`note` 之前）。**这条不是可选的润色**：`arrayOf` 逐元素走 item schema，未声明的字段会被**静默丢弃**（`lib/kv-schema.js:199-221`）—— 不声明 `kind`，规则写进去再读出来就没有分类，而 `rules-store.js` 的 `validate()` 要求 `kind` 非空 ⇒ 每次 `activeRules()` 都抛 `BAD_RULE`，**清理页整页打不开**。用 `required` 而不是 `optional`：写入口已经强制非空，schema 与校验器必须同一口径；`optional` 只会把"漏了 kind"推迟到读取阶段炸。
 
-```bash
-test -d "$LOCALAPPDATA/Microsoft/Windows/WER" && echo "WER 存在" || echo "WER 不存在"
-```
-按结果决定内置库是否收 `windows-err`（并同步 `rules-1` 的条数断言），然后：
+`rules-4` 钉 schema 层的 kind 往返与缺失拒绝，`rules-5` 钉走完整写-读一轮回来的 kind —— 两条都要，只留一条时"删掉 kind 声明"这种破坏只会红一处，容易被当成偶发。
+
+3. **连带改动：`test/prefs.test.mjs` 的 `prefs-4`（②段，Task 3 已评审通过）正面夹具要补 `kind`。** 它第 112 行 parse 的 item 只有 `id/n/glob/ageDays` —— 写它的时候 `kind` 还不在形状里。加了必填 `kind` 之后这条会红在 `items[].kind 必填`。**改夹具，不改断言**：`{ id: 'u-1', n: '浏览器缓存', glob: '…\\Temp\\*', ageDays: 7, kind: '缓存' }`，三条拒绝路径（缺 glob / ageDays 越界）与 `assert.equal` 全部原样保留。这是 schema 演进的必然连带，不是"顺手重构已评审测试" —— 报告里要单独点名这条改了什么、为什么。
+
+- [ ] **Step 4: 跑测试确认通过（WER 现采已在计划期完成，不必再测）**
+
+控制器 2026-09-27 已现采完存在性复核（`node tmp/t11wer.mjs` → `tmp/t11-wer.txt`）：`WER` / `WER/ReportQueue` / `WER/ReportArchive` 全 `ENOENT`，其余 12 条目录全部存在。结论已经写进 Step 3 的常量表与 `rules-1` 断言，**执行者不要再"按结果决定是否收 `windows-err`"** —— 那条已经不在表里了。换机器或换用户时（`os.homedir()` 不同）才需要重跑 Step 5 的探针，并同样遵守"条数跟着实测走"。
 
 Run: `node test/prefs.test.mjs`
 Expected: `23/23 通过`（①3 ②4 ③6 ④10），退出码 0。
+旁路不许漂（同一轮现跑，不许引用上一轮）：`node test/alerts.test.mjs` → **29/29**；`node test/guard.test.mjs` → **19/19**；`SKIP_LOCAL=1 node test/collect.test.mjs` → **48/48**。
 
-- [ ] **Step 5: 真机复核内置规则确实命中文件（不是只存在目录）**
+- [ ] **Step 5: 真机复核内置规则确实命中条目（不是只存在目录）**
+
+**禁止 `node -e "…"`**（本机 bash 会吃掉路径里的反斜杠转义，探针脚本已在 `tmp/t11probe.mjs` 落好，直接跑）：
 
 ```bash
-node --input-type=module -e "
-const os=await import('node:os');const fp=await import('node:fs');const p=await import('node:path');
-const {BUILTIN_RULES}=await import('./lib/clean/rules.js');
-for(const r of BUILTIN_RULES){const d=p.join(os.homedir(),r.rel);
- try{const es=fp.readdirSync(d);let f=0,b=0;for(const e of es.slice(0,400)){try{const st=fp.statSync(p.join(d,e));if(st.isFile()){f++;b+=st.size;}}catch{}}
- console.log(r.id.padEnd(16),es.length,'条目 抽样',f,'文件',Math.round(b/2**20),'MB');}
- catch(e){console.log(r.id.padEnd(16),'读不到：',e.code);}}"
+node tmp/t11probe.mjs > tmp/t11-probe.txt 2>&1
 ```
-Expected: 13 条里没有 `ENOENT`（有条数为 0 的目录允许，但要在汇报里点名）；任何 `ENOENT` 说明存在性复核过期，按 Global constraints 的「现采优先」当场修正。
+再 `Read tmp/t11-probe.txt`。期望逐条对上（2026-09-27 本机读数）：
+- **12 条全部"存在"，输出里没有任何 `ENOENT`**。出现 `ENOENT` = 存在性复核过期，当场按「现采优先」修正常量表并同步 `rules-1` 的条数断言。
+- 输出第一行是 `规则条数 12  默认关 packages-cache,playwright-browsers` —— 条数与默认关集要当轮打印出来，别靠记忆。
+- **depth1文件 为 0 的条目是常态**（缓存目录普遍套一层子目录，如 `Edge/.../Cache/Cache_Data`）：`edge-cache` / `vscode-cache` / `pip-cache` / `packages-cache` / `local-cache` / `wechat-cache` / `playwright-browsers` 这 7 条本机就是 0。汇报里点名即可，**不要**因此删规则，也**不要**在 `rules-N` 里断"每条都至少有一个文件"（那会把 Task 12 的递归遍历契约提前焊死）。
+- 大条目两条可对照：`temp-user` 数千条目、`win-explorer` 与 `crash-dumps` 有实测 MB 量级。
+- 末尾"排除判定"块：`Package Cache` 显示"存在"是**预期**（判定为不入库），其余显示 `ENOENT`。
+
+- [ ] **Step 6: 变异自证（五次「破坏 → 跑红 → 还原 → 重跑全绿」，写入交付报告）**
+
+每条都要有当轮 `git diff --numstat` 证明确实动了字节，还原后 `git status --short -- lib test` 必须净。**红点归因是控制器预检实测的，照抄不算取证** —— 自己要跑出同一红点才算过。
+
+| 编号 | 破坏 | 预期红在 | 为什么这条值得破坏 |
+|---|---|---|---|
+| V1 | `mk()` 里不再生成 `glob`（只留 `dir`） | `rules-2` | 内置库若不加载时展开，`activeRules()` 的 guard 复检与 Task 12 扫描器都会拿到 `undefined` |
+| V2 | `write()` 里**保留落库**、只把返回值换成入参：`await prefStore.write('clean_rules', next); return next;` | `rules-5`（只有 `out.updatedAt` 那一条断言抓到） | 落库那份与入参那份的差别只剩行级戳与被丢字段 —— 断言必须钉到这一格，否则"返回自己的对象"这种撒谎没人管 |
+| V3 | `validate()` 去掉 `check(r.glob, { mode: 'glob' })` | `rules-6` **+** `rules-7` | 红线唯一裁决点：存进去一条永远执行不了的规则，比拒绝写入难查得多（`rules-7` 的未展开 `%LOCALAPPDATA%` 同属 guard 职责） |
+| V4 | `items` schema 删掉 `kind` 声明 | `rules-4` + `rules-5` **+** `rules-8` | `arrayOf` 静默丢未声明字段 ⇒ 读回来没分类 ⇒ `validate()` 每次读都抛 ⇒ **`activeRules()` 直接 reject，清理页整页打不开**（`rules-8` 红就是这条链的实测证据） |
+| V5 | `emptyRow()` 的 `off` 换成 `[]` | `rules-8` + `rules-9` + `rules-10` | 默认关（`Packages` 147 子目录、`ms-playwright` 重装代价大）没有打底就等于没实现 |
+
+**V2 与 V5 的写法是实测修出来的，别退回直觉版本：**
+- V2 最初写成 `return next;`（把 `prefStore.write` 整个删掉）→ 红 `rules-5`+`rules-8`+`rules-9`，看着很承重，其实测的是"不写库"。**必须** `await` 掉真实写入再换返回值，才只剩 `updatedAt` 那一格差异。
+- 空行形状原先在 `read()` 和 `list()` 各写了一份字面量 ⇒ V5 只改 `read()` 时 `rules-10` **不红**（无库路径走的是 `list()` 那份默认）。这就是"同一默认值两处定义"可以让一半默认行为无声失效的活证 —— 所以 `emptyRow()` 单点定义，两处引用。
+- V4 与 V2 的红点都含 `rules-5`，**这是实测事实，不是笔误** —— 别为了"每条变异红点互不相同"去改断言。
+
 提交信息草稿：`feat(sysops): 内置清理规则库与本机规则仓储（写入前过 guard）`
 
 ## Task 12: `lib/clean/scanner.js` —— 只读遍历 + 进度 + 可停止
@@ -7342,7 +7399,7 @@ Expected：输出六行 `{ name, value, unit, specValue, driftPct }`，脚本内
 1. **§1.2 实测代价表**：`typeperf -sc 3（常驻流式）` 一行改为定窗续采实况 ——「`-sc 0` 单样本即退出，改为每窗 `-sc 30 -si 1` 续采；暖身 218.9ms，窗口衔接处有约 1 个采样周期空隙」；新增一行「`Get-Counter -ComputerName .` 输出为 GBK 码页 → 解码代价已计入适配器，中文计数器名不再乱码」；`Get-CimInstance` 行的结论从「5s 刷新」改为「常驻单轮 ≈2.5s，故 `procIntervalSec` 默认 3s」。
 2. **§3.2 配置读写**：`PATCH /sysops/api/prefs`、`PATCH /sysops/api/rules` 两处方法名改为 `POST /sysops/api/prefs`、`POST /sysops/api/rules/add|toggle|remove`，并补一句理由：「宿主 webServer 只在 POST 下稳定给出 body，写接口统一 POST，GET 只读」（这是计划期实测修正，不是设计变更）。
 3. **§3.4 搜索**：`GET /sysops/api/search?q&mode&limit` 保留，补 `POST /sysops/api/search/reprobe`（缓存 30s，改配置后需显式失效）；并加一行状态说明：「本机未装 Everything（`C:\Program Files\Everything` 不存在、`where es.exe` 无命中、`curl 127.0.0.1:3417` 拒连），故两个 Everything 适配器标『未在本机验证』，`walk` 是当前唯一实跑通路」。
-4. **§8 未决项表**：三行全部收口 —— 内置清理规则「已定：只收本机实测存在的路径，共 13 条」；暂存目录「已定：默认落点 `%LOCALAPPDATA%\dsh-plugin-sysops\quarantine`（由宿主展开成绝对路径后放进 Task 19 载荷 `defaults`；prefs 只存展开后的绝对路径，`prefq-1` 拒未展开形），界面渲染 prefs 实配值、无实配时回落 `defaults`，原型里的 `C:\Users\gongj\.dsh-quarantine\2026-09-27\` 是演示串」；曲线保留窗口「已定：30min，ring 内存实测 4 源 × 1800 点 < 1MB」；末行 spec 位置「保留在 `docs/superpowers/specs/`，不与兄弟插件的 `docs/design-spec.md` 统一」。
+4. **§8 未决项表**：三行全部收口 —— 内置清理规则「已定：只收本机实测存在的路径，共 12 条（2026-09-27 复核把 `WER` 剔了，见 Task 11 Step 3 的现采块）」；暂存目录「已定：默认落点 `%LOCALAPPDATA%\dsh-plugin-sysops\quarantine`（由宿主展开成绝对路径后放进 Task 19 载荷 `defaults`；prefs 只存展开后的绝对路径，`prefq-1` 拒未展开形），界面渲染 prefs 实配值、无实配时回落 `defaults`，原型里的 `C:\Users\gongj\.dsh-quarantine\2026-09-27\` 是演示串」；曲线保留窗口「已定：30min，ring 内存实测 4 源 × 1800 点 < 1MB」；末行 spec 位置「保留在 `docs/superpowers/specs/`，不与兄弟插件的 `docs/design-spec.md` 统一」。
 
 - [ ] **Step 8: 收尾（本工作区不是 git 仓库）**
 
