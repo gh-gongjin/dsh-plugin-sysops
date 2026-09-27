@@ -598,5 +598,222 @@ check('ps-8 l1b 门面：onData 收 Buffer、UTF-8 解码一次、非 JSON 行�
   assert.throws(() => L1B.createL1b({ sup, onRows: 1 }), /onRows/);
 });
 
+/* ⑥段：collect service 编排 */
+const { createCollectService } = await import('../lib/collect/service.js');
+
+function fakeWorld(over = {}) {
+  let t = 0;
+  const timers = [];
+  const events = [];
+  const started = [];
+  const stopped = [];
+  const l0Reads = [];
+  const caps = {};                    // 服务传给工厂的出口（onPoint / onRows）落在这里，用例才有东西可断
+  let coreCount = over.cores ?? 8;    // svc-1 要在跑的过程中改核数（热插拔基线复位那条契约）
+  let resetCount = 0;
+  const intervalFn = (fn, ms) => { const h = { fn, ms, done: false }; timers.push(h); return h; };
+  // svc-7 走的是 `globalThis.setInterval` 回退分支。**不打桩真的话，`w.timers` 恒是空数组**
+  // —— 预检变异取证：把实现里的 `globalThis.clearInterval(l0Handle.h)` 整行删掉，原样用例仍 PASS（空断言）。
+  const realSI = globalThis.setInterval, realCI = globalThis.clearInterval;
+  const si = [];
+  if (over.noTimer) {
+    globalThis.setInterval = (fn, ms) => { const h = { fn, ms, live: true }; si.push(h); return h; };
+    globalThis.clearInterval = (h) => { if (h && 'live' in h) h.live = false; };
+  }
+  const sup = {
+    start: (key, spec) => { started.push(key); return { key, state: 'starting', restarts: 0, detail: '' }; },
+    stop: async (key) => { stopped.push(key); return null; },
+    state: (key) => ({ key, state: over.supState ?? 'on', restarts: 0, pid: 1, lastTick: 0, stderrTail: '', detail: '' }),
+    status: () => over.supStatus ?? [],
+    tick: () => {},
+    // 标志必须挂在**桩对象自己**上。原先写 `over.supDisposed = true`，而 `over` 没暴露给用例，
+    // svc-8 的 `w.sup.supDisposed` 就永远取不到 —— 探针实测是硬失败（`undefined`），不是空断言。
+    supDisposed: false,
+    dispose() { this.supDisposed = true; },
+  };
+  const svc = createCollectService({
+    getPrefs: () => over.prefs ?? { collect: { cadence: '1s', keepMinutes: 30 }, sources: { l0: true, l1a: true, l1b: false } },
+    logger: { warn() {}, info() {} },
+    now: () => t,
+    getIntervalFn: () => (over.noTimer ? null : intervalFn),
+    osMod: { cpus: () => Array.from({ length: coreCount }, () => 0) },
+    makeSupervisor: () => sup,
+    makeL0: () => ({
+      // cpu 必须**始终落在 0~100**：percent ring 见到 >100 判 bad 直接丢（真实现也是如此）。
+      // 预检取证：原样写 `cpu: 10 + i` 时第 91 拍起全是 bad，svc-6 的点数上限断言永远填不满，
+      // 于是那条断言只在数一个早就被丢弃的环 —— 断的是替身的形状，不是服务的行为。
+      read: () => { const i = l0Reads.length; l0Reads.push(1); return over.l0?.(i) ?? { t, cpu: 10 + (i % 80), mem: 50, diskFree: 70 * 2 ** 30, diskTotal: 200 * 2 ** 30 }; },
+      reset: () => { l0Reads.length = 0; resetCount += 1; },
+    }),
+    makeL1a: ({ sup: s, onPoint }) => { caps.onPoint = onPoint; return { enable: () => s.start('l1a'), disable: () => s.stop('l1a'), state: () => sup.state('l1a') }; },
+    makeL1b: ({ sup: s, onRows }) => { caps.onRows = onRows; return { enable: () => s.start('l1b'), disable: () => s.stop('l1b'), state: () => sup.state('l1b'), latest: () => over.procRows ?? null }; },
+  });
+  svc.onEvent((e) => events.push(e));
+  // fire 是"重复敲同一个活着定时器"，不是"消耗一个定时器"：`h.done` 只由服务在 clearL0 时置。
+  // 预检取证：原样 `h.done = true; h.fn();` 时 svc-6 的 400 次循环实际只跑了一拍（第 2 次起 find 不到句柄），
+  // 而把 windowMs/maxPoints 改成 1e12/1e9 那条仍 PASS —— 断言完全空转。
+  return { svc, caps, si, t: () => t, clock: () => t, reads: () => l0Reads.length, resets: () => resetCount, setCores: (n) => { coreCount = n; },
+    adv: (ms) => { t += ms; }, events, started, stopped, timers, sup,
+    fire: (n = 1) => { const h = timers.find((x) => !x.done); if (!h) return; for (let i = 0; i < n; i++) h.fn(); },
+    restore: () => { globalThis.setInterval = realSI; globalThis.clearInterval = realCI; } };
+}
+
+check('svc-1 start 后 L0 按档位跑，L1a/L1b 的出口被接上且点真的进环并 emit metrics', () => {
+  const w = fakeWorld();
+  w.svc.start();
+  assert.ok(w.started.includes('l1a'), 'l1a 默认开（实测 <1% 代价），应被 start');
+  assert.equal(w.svc.snapshot().cadence, '1s');
+  // 这两条是预检补的：原用例断一个 `type==='l1a-enable'` 的事件，而 `fakeWorld` 里**没有任何代码会 emit 它**
+  // —— 工厂收到的 `onPoint` 被塞进返回对象当属性，`events` 又没暴露给工厂，所以那条断言是硬失败（不是空断言，是根本不可能成立）。
+  // 换成真口径：断服务确实把出口函数传给了工厂，再手工灌一个点，验它落进对应的 ring 并推了事件。
+  assert.equal(typeof w.caps.onPoint, 'function', '服务必须把 onPoint 传给 createL1a');
+  assert.equal(typeof w.caps.onRows, 'function', '服务必须把 onRows 传给 createL1b（Task 7 已定为不传就抛，漏接=静默吞榜）');
+  w.adv(1000); w.fire();                       // 先敲一拍 L0，让假时钟走到 1000（ring 只收严格递增的 t）
+  const before = w.events.length;
+  w.caps.onPoint({ metric: 'netDown', t: w.clock(), v: 2 * 1024 * 1024 });
+  const s = w.svc.snapshot();
+  assert.equal(s.series.netDown.at(-1).v, 2 * 1024 * 1024, 'L1a 的点必须落进 netDown ring（字节/秒原值，不做 /8）');
+  assert.equal(s.latest.netDown, 2 * 1024 * 1024, 'latest.netDown 与 ring 同口径，界面自己换算 MB/s');
+  assert.equal(w.events.length, before + 1, '写点成功必须 emit');
+  assert.equal(w.events.at(-1).type, 'metrics');
+  assert.equal(w.events.at(-1).key, 'netDown');
+  // 非 JSON 行不许静默（Task 7 下游契约）：走 (null, line) 分支必须在 snapshot 里留痕
+  w.caps.onRows(null, 'Write-Error : 表达式或语句中包含意外的标记');
+  assert.notEqual(w.svc.snapshot().proc.note, '', '非 JSON 行要留下可见的因由，不能只丢');
+  // 非 JSON 轮**没有**可信的轮次时间戳：`proc.t` 只在解析成功时写。界面按 `proc.t` 判新鲜度，
+  // 把它折成 0 或留着上一轮的值都会让"多久没出数"这个数算错。
+  assert.equal(w.svc.snapshot().proc.t, null, '整轮非 JSON 时 proc.t 必须是 null，不是 0 也不是残值');
+  // 台账 Task 5 下游契约②：核数变了要复位 cpu 基线，否则 `computeCpuPct` 在两次样本核数不等时返回 NaN
+  // ⇒ 曲线**成片**丢点（每拍都丢）。两条一起断，才挡住"每拍都 reset"这个反向的错。
+  const r0 = w.resets();
+  w.adv(1000); w.fire();
+  assert.equal(w.resets(), r0, '核数没变不许复位');
+  w.setCores(4);
+  w.adv(1000); w.fire();
+  assert.equal(w.resets(), r0 + 1, '核数变化必须调 l0.reset()');
+});
+
+check('svc-2 档位切 5s / 暂停：源状态与 cadence 同步变，并 emit sources', () => {
+  const w = fakeWorld();
+  w.svc.start();
+  w.svc.setCadence('5s');
+  assert.equal(w.svc.snapshot().cadence, '5s');
+  w.svc.setCadence('暂停');
+  const s = w.svc.snapshot();
+  assert.equal(s.cadence, '暂停');
+  assert.equal(s.sources.find((r) => r.key === 'l0').state, 'off');
+  assert.ok(w.events.some((e) => e.type === 'sources'), '切档必须有 sources 事件（界面要立刻改文案）');
+  assert.throws(() => w.svc.setCadence('2s'), /cadence/);
+});
+
+check('svc-3 脏点不写 ring，只进 dropped 计数（一个假点会被读成真实尖峰）', () => {
+  const w = fakeWorld({ l0: (i) => (i === 1 ? { t: 0, cpu: NaN, mem: 50, diskFree: 1, diskTotal: 2 } : undefined) });
+  w.svc.start();
+  const before = w.svc.snapshot().dropped.bad;
+  // 手工推两拍：第一拍正常、第二拍 cpu 是 NaN
+  w.fire(2);
+  // **必须 `+ 1` 而不是 `>= before`**：原样写 `>=` 时 `before` 是 0，断言永真，
+  // 预检变异取证 —— 把实现里的 `droppedBad` 计数整段删掉，原样用例照样 PASS（空断言）。
+  assert.equal(w.svc.snapshot().dropped.bad, before + 1, 'NaN 点必须计数一次，且只计那一个指标');
+  assert.ok(w.svc.snapshot().series.cpu.length <= 1, '脏点不许写进 cpu ring');
+});
+
+await checkAsync('svc-4 L1b 默认关；只有「开 + 页面可见」才启动，不可见时停采并清残值', async () => {
+  const w = fakeWorld({ prefs: { collect: { cadence: '1s' }, sources: { l0: true, l1a: true, l1b: true } } });
+  w.svc.start();
+  assert.ok(!w.started.includes('l1b'), '默认不可见时不起 L1b（实测单轮 1.6–1.9s 的代价不能白付）');
+  await w.svc.setVisible(true);
+  assert.ok(w.started.includes('l1b'), '可见 + 开关为真 才起');
+  // Task 7 的 I-1 在编排层的镜像：`latest()` 现在 disable 就返 null，服务侧的 proc.rows 也必须跟着清，
+  // 否则界面拿着"已停源的上一轮进程榜"画实时卡片 —— 这是最坏的一种静默。
+  w.caps.onRows({ t: 5, rows: [{ pid: 1, name: 'a.exe', ws: 1024, cpuPct: 1 }] });
+  assert.equal(w.svc.snapshot().proc.rows.length, 1);
+  assert.equal(w.svc.snapshot().proc.t, 5, '成功轮的 t 必须透到 snapshot().proc.t（Task 7 §Produces 点名的字段）');
+  await w.svc.setVisible(false);
+  assert.ok(w.stopped.includes('l1b'), '页面切走要停采');
+  assert.deepEqual(w.svc.snapshot().proc.rows, [], '停采必须清进程榜残值');
+  assert.equal(w.svc.snapshot().proc.t, null, '残值清理要连 t 一起清，否则界面拿到"带新鲜时间戳的空榜"或反过来');
+  assert.ok(w.events.some((e) => e.type === 'proc' && e.rows.length === 0), '清空也要推 proc 事件，否则 SSE 侧留着旧榜');
+});
+
+await checkAsync('svc-5 supervisor 终态原样透传进 sources，且 L1a 不随页面可见性停采', async () => {
+  const w = fakeWorld({ supState: 'exited-max' });
+  w.svc.start();
+  await w.svc.setVisible(true);
+  const row = w.svc.snapshot().sources.find((r) => r.key === 'l1a');
+  assert.equal(row.state, 'exited-max', 'supervisor 的终态要原样透传，界面按四类分支给文案');
+  // 用例标题原本写"网络计数器名缺失时 state 为 unavailable"，但体内断的是 exited-max，
+  // 而 `unavailable` 这个态在本文件里从来没有实现会置它（Task 6 的 l1a 只经 supervisor 置态）——
+  // 标题改成断言的真实口径。计数器名缺失的真机文案归 Task 21（台账：typeperf 以 exit=4026531842 退出且错误走 stdout）。
+  await w.svc.setVisible(false);
+  assert.ok(!w.stopped.includes('l1a'), 'L1a 成本实测 <1%，不随可见性起停（只有 L1b 受闸门）');
+  assert.ok(w.stopped.includes('l1b'), '同一动作里 L1b 必须被停');
+});
+
+check('svc-6 snapshot 的点位数上限 = keepMinutes×60+1（1s 档，含边界一拍）', () => {
+  const w = fakeWorld({ prefs: { collect: { cadence: '1s', keepMinutes: 5 } } });
+  w.svc.start();
+  for (let i = 0; i < 400; i++) { w.adv(1000); w.fire(); }
+  assert.ok(w.reads() >= 400, `400 次 fire 必须真的采了 400 拍（读到 ${w.reads()} 次）—— 这条钉住 fire() 是"重复敲同一个活着的定时器"，不是消耗句柄`);
+  const s = w.svc.snapshot();
+  // **断精确值而不是 `<= 301`**：`<=` 在 windowMs/maxPoints 被改成天文数字时照样绿（预检变异取证：
+  // 把 ring 的 windowMs 改 1e12、maxPoints 改 1e9，原样用例仍 PASS —— 因为 fire() 只跑了一拍，环里只有 1 个点）。
+  // 5min 窗 + `maxPoints = keepMinutes*60 + 1` ⇒ 400 拍里只剩最后 301 个（窗底含边界保留）。
+  assert.equal(s.series.cpu.length, 301, `5min 窗 @1s 上限 301，实得 ${s.series.cpu.length}`);
+  assert.equal(s.keepMinutes, 5);
+});
+
+check('svc-7 宿主无 timer 时退 setInterval，并在 snapshot.timerBackend 如实标', () => {
+  const w = fakeWorld({ noTimer: true });
+  w.svc.start();
+  assert.equal(w.svc.snapshot().timerBackend, 'setInterval');
+  assert.equal(w.si.length, 1, `回退分支必须真的挂上一个 setInterval（实得 ${w.si.length} 个）`);
+  assert.equal(w.timers.length, 0, '宿主给了 null 就不许再走 ctx.interval 那条路');
+  w.svc.dispose();
+  // 原来这条断 `w.timers.every(...)`，但 noTimer 分支下 `timers` 恒是空数组，`.every()` 真空通过
+  // —— 预检变异取证：删掉实现里的 `globalThis.clearInterval(l0Handle.h)`，原样用例照样 PASS。
+  // 现在打桩真的 setInterval/clearInterval（fakeWorld 里装、本条末尾还原），断**那个句柄**被置死。
+  assert.ok(w.si.every((h) => h.live === false), '退 setInterval 必须显式 clearInterval，否则留野定时器');
+  w.restore();
+});
+
+await checkAsync('svc-8 dispose：停 L0 定时器、停所有子进程、清 ring；重复调用不抛', async () => {
+  const w = fakeWorld();
+  w.svc.start();
+  w.adv(1000); w.fire();
+  assert.ok(w.svc.snapshot().series.cpu.length >= 1, '前置条件：ring 里得先有点，否则下面"清 ring"那条是空的');
+  w.svc.dispose();
+  w.svc.dispose();
+  assert.ok(w.stopped.includes('l1a'));
+  assert.ok(w.sup.supDisposed, 'supervisor 要 dispose');
+  assert.equal(w.svc.snapshot().series.cpu.length, 0, 'dispose 要清 ring（标题主张，原来没有断言承重）');
+  assert.deepEqual(w.svc.snapshot().proc.rows, [], 'dispose 也要清进程榜');
+  // 真机串跑实测：dispose 后 sources 是 `l0:on,l1a:off,l1b:off` —— l0 那行按「开关+档位」算，
+  // 而 dispose 只清了定时器。这一条把它钉成 off，否则界面/日志会以为主进程还在采样。
+  const l0row = w.svc.snapshot().sources.find((r) => r.key === 'l0');
+  assert.equal(l0row.state, 'off', 'dispose 后 l0 行不许再报 on');
+  assert.match(l0row.detail, /dispose/, 'detail 要说清是 dispose 停的，不是用户把档位调成暂停');
+});
+
+await checkAsync('svc-9 setSource(key,on) 改开关会立即起/停对应源', async () => {
+  const w = fakeWorld({ prefs: { collect: { cadence: '1s' }, sources: { l0: true, l1a: false, l1b: false } } });
+  w.svc.start();
+  assert.ok(!w.started.includes('l1a'), '配置里 l1a=false 就不该起');
+  await w.svc.setSource('l1a', true);
+  assert.ok(w.started.includes('l1a'));
+  await w.svc.setSource('l1a', false);
+  assert.ok(w.stopped.includes('l1a'));
+});
+
+check('svc-10 diskFreePct 序列 = 可用/总容量，单位与 diskFreeGb 分两处口径不混用', () => {
+  const w = fakeWorld();
+  w.svc.start();
+  w.adv(1000); w.fire();
+  const s = w.svc.snapshot();
+  assert.equal(Math.round(s.latest.diskFreeGb * 10) / 10, 70);
+  assert.equal(Math.round(s.latest.diskTotalGb * 10) / 10, 200);
+  assert.equal(Math.round(s.series.diskFreePct.at(-1).v * 10) / 10, 35);
+});
+
 console.log(`\n  ${passed}/${passed + failed} 通过`);
 process.exit(failed ? 1 : 0);
