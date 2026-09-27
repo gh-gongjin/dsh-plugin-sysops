@@ -4626,23 +4626,48 @@ Run: `node test/alerts.test.mjs` → `33/33 通过`（改名回归）
 **Interfaces:**
 - Consumes: `check`（Task 2）、注入的 `fsMod`、`prefs.clean`
 - Produces:
-  - `DEFAULT_QUARANTINE = (appData) => path.join(appData, 'dsh-plugin-sysops', 'quarantine')`
-  - `dayDir(now, rootDir) → string`（`<root>/<YYYY-MM-DD>`）
-  - `createQuarantine({ rootDir, fsMod, pathMod, logger, now })` → `{ ensureRoot(), stash(absPath) → { ok, dest, method, why? }, stats() → { dirs, files, bytes, oldest } }`
+  - `DEFAULT_QUARANTINE = (appData) => join(appData, 'dsh-plugin-sysops', 'quarantine')` —— 用 `node:path` 的 `join`，**不要字符串直拼**（T14-G：直拼遇到带尾分隔符的入参会多一个反斜杠，`prefq-4` 会红）
+  - `dayDir(now, rootDir) → string`（`<root>\<YYYY-MM-DD>`，取**本地**日期）
+  - `createQuarantine({ rootDir, fsMod, pathMod, logger, now, forbiddenPrefixes })` → `{ ensureRoot(), stash(absPath) → { ok, dest, method, why? }, stats() → { dirs, files, bytes, oldest }, rootDir() }`
+  - **`forbiddenPrefixes: string[]`（缺省 `[]`）由调用方负责喂**：Task 15 传「`activeRules()` 里各条的 `dir` 集」，本任务的测试夹具（`quarWorld`）传 `%LOCALAPPDATA%\Temp` 那条。除调用方之外没有任何人执行这条红线 —— 派单时若发现 `forbiddenPrefixes` 没有真实喂入者，就是 Task 15 的漏。
+  - **`stash()` 内部 `await ensureRoot()`，配置错时抛异常而不是返回 `{ ok:false }` —— 这是有意的**：暂存目录配错属于「整批该停」，不是单个条目失败。Task 15 必须在批次外层 catch，不要放进条目循环。
   - prefs `clean` 组：`{ quarantineDir, keepDays, after }`，`after ∈ ['none','log']`
+
+- [ ] **Step 0: 预检裁定（Ruling-72，控制器 2026-09-28 现采，执行者照此实现，不要再自行发明）**
+
+现采证据：`node tmp/t14probe.mjs` → `tmp/t14-probe.txt`（`check()` 为**同步**，五条形制路径逐条裁决）：
+- `...\AppData\Local\dsh-plugin-sysops\quarantine` → `allow=true`（合法暂存）
+- `C:\Windows\q` → `allow=false code=GUARD_SYSTEM_DIR`，`why` 含「系统目录禁止操作」
+- `AppData\q` → `GUARD_NO_DRIVE`，`why` 含「盘符」
+- `%LOCALAPPDATA%\q` → `GUARD_UNEXPANDED_VAR`，`why` 含「%变量%」
+- `...\AppData\Local\Temp\q` → **`allow=true`**（Temp 本来就是可清理区，guard 没错 —— 这条是 T14-B 的依据）
+
+| 编号 | 问题 | 裁定（已落进下面的 Step 1/2/3 代码） |
+|---|---|---|
+| **T14-B**（Critical） | `q-6` 按原稿不可能变绿：`quarWorld` 从不传 `forbiddenPrefixes`（缺省 `[]`），而另一条拒绝路径 `check(rootDir)` 现采对 `Temp\q` 是 `allow=true` ⇒ `ensureRoot()` 不抛，`assert.rejects` 必红 | `quarWorld` 默认传 `forbiddenPrefixes: [TEMP_PREFIX]`（q-1..q-5 同用，顺带让正向路径也走一遍），`q-6` 只换 `rootDir` |
+| **T14-C**（Critical） | `stash()` 里 `isDir` 的 IIFE 短路失效：`statSync` 抛错时 IIFE 返回**对象**并赋给 `isDir`，代码继续走 `freeDest()` / `renameSync()`。真机上「源已被别的程序删掉」是最常见的条目级失败 ⇒ 误判成 `method:'move'`；同盘 rename 先抛 EXDEV 时又因对象为真值误报「目录跨卷复制未实现」。原稿 ③段没有任何「源不存在」用例 | 拆成显式 `try/catch` + 提前 `return { ok:false, dest:'', method:'none', why }`；新增 `q-8 源不存在` 用例钉住 |
+| **T14-D**（Important） | `stats()` 零覆盖，且假 FS 让它恒为 0：`quarFs.readdirSync` 用 `d.startsWith(p + '/')` 做前缀匹配，桩里路径全是反斜杠 ⇒ 恒返回 `[]`。照原稿补测试会得到「files 恒 0」的**假绿** | 先修桩（前缀与切分都用反斜杠，并同时枚举 `files` 的直接子项），再加 `q-9` 覆盖 `{dirs, files, bytes, oldest}` —— `oldest` 是 Task 24 设置页 keepDays 到期提醒的唯一数据源 |
+| **T14-E**（Important） | Step 5 原稿双重违规：① 用 `node --input-type=module -e "…"`（本仓库硬约束禁止）；② 里面全是字面 `\` 路径 —— 已实测证明「写成文件」也不够：工具调用层把 `\` 折半一次，JS 再把 `\U` 当转义吃掉，第一轮探针实际输入是 `C:Usersgongj…` 这种畸形串，guard 对它返回 `allow=true`，差点据此裁定「红线漏判」 | Step 5 落 `tmp/t14probe.mjs`，**脚本里的反斜杠一律 `String.fromCharCode(92)` 拼接**，并打印「段数」自证输入形状；暂存根放进仓库 `tmp/` 下、由脚本自己 `rmSync(recursive, force)`（自己造的临时物自己清） |
+| **T14-F**（Minor） | `freeDest` 生成的是 `2-name` **前缀**，文件头注释写「加 `-2` / `-3` 后缀」 | 注释跟代码（前缀对 `basename` 稳定，行为不变）；用例标题同改为「加序号前缀」 |
+| **T14-G**（Minor） | `DEFAULT_QUARANTINE` 实现直拼且形参改名，`prefq-4` 拿 `path.join` 对比 ⇒ 入参带尾分隔符时多一个反斜杠，断言红 | 实现改用 `node:path` 的 `join`，形参名回到 `appData` |
+| **T14-H**（Minor，时区耦合） | `dayDir` 取**本地**日期，原稿夹具喂 `new Date('2026-09-27T10:00:00Z')`：本机 +08 同日所以 `q-1` 的 `/2026-09-27/` 成立，换 UTC 负偏移机器会红。`q-7` 原稿的 `new Date('2026-09-07T23:30:00+08:00')` 同病（+14 机器上本地是 09-08） | 两处夹具都改本地构造：`now` 用 `new Date(2026, 8, 27, 10, 0, 0)`、`q-7` 用 `new Date(2026, 8, 7, 23, 30, 0)`，断言不动 —— 测试与所在时区解耦 |
+| **T14-I**（计数） | Step 4 原稿期望 `28/28 (①12 ②9 ③7)`：②9 已被 Task 13 的 `rec-10` 变成 ②10；③段随 T14-C/D 加 `q-8`、`q-9` ⇒ ③=9 | 新期望 **`31/31`**（①11 + 真机 1 + ②10 + ③9），`SKIP_LOCAL=1` 下 `30/30` + 1 行 SKIP。prefs 侧 ⑤4 ⇒ **`28/28`**（①3 ②4 ③6 ④11 ⑤4，与 Task 11 闭环后的 `24/24` 衔接） |
+
+**另记（已落进 Step 1）**：`prefq-1` 里 `assert.throws(…, /guard|受保护/)` 这条**必然命中** —— spec 抛的 message 前缀就含「未通过 guard」，与路径是否真被拒无关；哪天 `check()` 不再拒系统目录，这条仍然绿。收紧为 `/系统目录|b-system-dir/`。另外两条（`/盘符/`、`/变量/`）现采已证实各自 code 的 `why` 里有对应词，保留。
 
 - [ ] **Step 1: 写失败的测试（prefs ⑤段：暂存目录配置的形状）**
 
 ```js
 /* ⑤段：clean 组（暂存目录 / 保留天数 / 清理后动作） */
 const path0 = await import('node:path');
-const guard0 = await import('../lib/clean/guard.js');
+// 这里不 import guard —— ⑤段断的是 schema 的拒绝形状，guard 是在 spec.js 里被调的，
+// 断言收紧到 /系统目录/ 之后，命中的是 guard 产出在 message 里的那句 `why`。
 
 check('prefq-1 quarantineDir 必须是 guard 放行的绝对路径，且不能落在被清理目录内部', () => {
   const t = prefsMod.prefsRecord;
   const okDir = 'C:\\Users\\gongj\\AppData\\Local\\dsh-plugin-sysops\\quarantine';
   assert.equal(t.parse({ clean: { quarantineDir: okDir } }).clean.quarantineDir, okDir);
-  assert.throws(() => t.parse({ clean: { quarantineDir: 'C:\\Windows\\q' } }), /guard|受保护/);
+  assert.throws(() => t.parse({ clean: { quarantineDir: 'C:\\Windows\\q' } }), /系统目录|b-system-dir/);
   assert.throws(() => t.parse({ clean: { quarantineDir: 'AppData\\q' } }), /盘符/);
   assert.throws(() => t.parse({ clean: { quarantineDir: '%LOCALAPPDATA%\\q' } }), /变量/);
 });
@@ -4663,6 +4688,9 @@ check('prefq-3 after 只有两个取值，未知值拒绝', () => {
 check('prefq-4 默认暂存路径在 %LOCALAPPDATA% 下（不落进被清理目录）', () => {
   const d = Q.DEFAULT_QUARANTINE('C:\\Users\\gongj\\AppData\\Local');
   assert.equal(d, path0.join('C:\\Users\\gongj\\AppData\\Local', 'dsh-plugin-sysops', 'quarantine'));
+  // T14-G：宿主很可能给带尾分隔符的 %LOCALAPPDATA%。字符串直拼在这里会多出一个反斜杠，
+  // 而这一行也是 Step 6 的 V4（把 join 换回直拼）唯一的红点来源 —— 少了它 V4 无人可抓。
+  assert.equal(Q.DEFAULT_QUARANTINE('C:\\Users\\gongj\\AppData\\Local\\'), d, '尾分隔符不得改变结果');
   const { BUILTIN_RULES } = QruleMod;
   for (const r of BUILTIN_RULES) {
     assert.ok(!d.toLowerCase().includes(r.rel.toLowerCase().replace(/\//g, '\\').toLowerCase()), `暂存目录落在内置规则 ${r.id} 内部，会被自己清掉`);
@@ -4698,7 +4726,15 @@ function quarFs(over = {}) {
     unlinkSync: (p) => { if (over.unlinkFails) throw Object.assign(new Error('被占用'), { code: 'EPERM' }); files.delete(p); },
     rmSync: (p) => { if (over.rmFails) throw Object.assign(new Error('非空'), { code: 'ENOTEMPTY' }); dirs.delete(p); },
     readSync: () => [],
-    readdirSync: (p) => [...dirs].filter((d) => d.startsWith(p + '/')).map((d) => d.slice(p.length + 1).split('/')[0]).filter(Boolean),
+    // 桩里所有路径都是反斜杠 ⇒ 前缀与切分都必须用反斜杠。原稿写 `p + '/'` 会让
+    // stats() 恒拿到 `[]`（假绿），见 Step 0 的 T14-D。
+    readdirSync: (p) => {
+      const pre = `${p}\\`;
+      const names = new Set();
+      for (const d of dirs) if (d.startsWith(pre)) names.add(d.slice(pre.length).split('\\')[0]);
+      for (const f of files.keys()) if (f.startsWith(pre)) names.add(f.slice(pre.length).split('\\')[0]);
+      return [...names].filter(Boolean);
+    },
     join: (...a) => a.join('\\'),
     __files: files, __dirs: dirs,
   };
@@ -4706,14 +4742,22 @@ function quarFs(over = {}) {
 
 const QU = await import('../lib/clean/quarantine.js');
 
+// T14-B：`forbiddenPrefixes` 只能由调用方喂 —— 现采证明 guard 对 Temp 是 allow=true（Temp 本来就是可清理区），
+// 不传这条则 q-6 永远绿不了，「暂存目录不得落在被清理路径内」这条红线也就没有任何执行者。
+// 缺省传 Temp：q-1..q-5 的**源**在 Temp 下（源不受这条管），rootDir 在插件目录下 ⇒ 正反两条路径都被走过。
+const TEMP_PREFIX = 'C:\\Users\\gongj\\AppData\\Local\\Temp';
+const QUAR_ROOT = 'C:\\Users\\gongj\\AppData\\Local\\dsh-plugin-sysops\\quarantine';
+
 function quarWorld(over = {}) {
   const fsMod = over.fsMod ?? quarFs({ files: { 'C:\\Users\\gongj\\AppData\\Local\\Temp\\old.log': { size: 1000 } }, isDir: new Set() });
   const log = [];
   const q = QU.createQuarantine({
-    rootDir: 'C:\\Users\\gongj\\AppData\\Local\\dsh-plugin-sysops\\quarantine',
+    rootDir: QUAR_ROOT,
     fsMod, pathMod: { join: (...a) => a.join('\\'), basename: (p) => p.split('\\').pop() },
     logger: { warn: (m) => log.push(m) },
-    now: () => new Date('2026-09-27T10:00:00Z').getTime(),
+    // T14-H：本地构造。喂 ISO 的 Z 串时，UTC 负偏移机器上 `dayDir` 的本地日期会跨到前一天 ⇒ 测试与所在时区解耦。
+    now: () => new Date(2026, 8, 27, 10, 0, 0).getTime(),
+    forbiddenPrefixes: [TEMP_PREFIX],
     ...over.q,
   });
   return { q, fsMod, log };
@@ -4752,7 +4796,7 @@ await checkAsync('q-4 rename 被 EBUSY 挡住：method 保持 move 但 ok=false�
   assert.match(r.why, /EBUSY|被占用/);
 });
 
-await checkAsync('q-5 目标名撞车时加序号后缀，绝不覆盖已暂存件', async () => {
+await checkAsync('q-5 目标名撞车时加序号前缀，绝不覆盖已暂存件', async () => {
   const fsMod = quarFs({
     files: {
       'C:\\Users\\gongj\\AppData\\Local\\Temp\\a\\old.log': { size: 11 },
@@ -4765,17 +4809,48 @@ await checkAsync('q-5 目标名撞车时加序号后缀，绝不覆盖已暂存�
   assert.equal(r1.ok, true);
   assert.equal(r2.ok, true);
   assert.notEqual(r1.dest, r2.dest, '同名条目必须落在不同路径，否则第二件会盖掉第一件');
+  assert.match(r2.dest, /\\2-old\.log$/, '撞名时加的是 2- **前缀**（T14-F：注释和标题都跟代码，不跟直觉）');
   assert.equal(fsMod.__files.get(r1.dest).size, 11, '第一件不得被覆盖');
   assert.equal(fsMod.__files.get(r2.dest).size, 22);
 });
 
 await checkAsync('q-6 暂存目录自身落在被清理路径下 → ensureRoot 拒绝并说清原因', async () => {
-  const w = quarWorld({ q: { rootDir: 'C:\\Users\\gongj\\AppData\\Local\\Temp\\q' } });
+  // 只换 rootDir，forbiddenPrefixes 沿用 quarWorld 缺省（T14-B）。
+  // 现采：guard 对 `…\Temp\q` 是 allow=true，所以这里的红必须归因到 forbiddenPrefixes 那道检查，不是 guard 先拒。
+  const w = quarWorld({ q: { rootDir: `${TEMP_PREFIX}\\q` } });
   await assert.rejects(() => w.q.ensureRoot(), /暂存目录|不能被清理/);
 });
 
+await checkAsync('q-8 源条目已被别的程序删掉：条目级失败、说清原因，绝不走进 rename', async () => {
+  // T14-C：原稿的 isDir IIFE 在 statSync 抛错时返回**对象**并继续往下跑，
+  // 于是「源不存在」会被报成 method:'move'（同盘）或「目录跨卷复制未实现」（EXDEV）。
+  const w = quarWorld({ fsMod: quarFs({ files: {} }) });
+  const r = await w.q.stash(`${TEMP_PREFIX}\\gone.log`);
+  assert.equal(r.ok, false);
+  assert.equal(r.method, 'none', '不能报成 move —— 那是「已经搬走了」的意思');
+  assert.equal(r.dest, '');
+  assert.match(r.why, /ENOENT|找不到/);
+});
+
+await checkAsync('q-9 stats 汇总天数/件数/字节/最早日期（Task 24 的 keepDays 到期提醒只吃这四个数）', async () => {
+  const fsMod = quarFs({
+    files: {
+      `${TEMP_PREFIX}\\a\\old.log`: { size: 11 },
+      `${TEMP_PREFIX}\\b\\old.log`: { size: 22 },
+    },
+  });
+  // 手动造一个更早的日期目录：oldest 必须取到它，而不是只回「今天」
+  fsMod.mkdirSync(`${QUAR_ROOT}\\2026-09-26`);
+  fsMod.__files.set(`${QUAR_ROOT}\\2026-09-26\\earlier.bin`, { size: 5 });
+  const w = quarWorld({ fsMod });
+  assert.equal((await w.q.stash(`${TEMP_PREFIX}\\a\\old.log`)).ok, true);
+  assert.equal((await w.q.stash(`${TEMP_PREFIX}\\b\\old.log`)).ok, true);
+  assert.deepEqual(await w.q.stats(), { dirs: 2, files: 3, bytes: 38, oldest: '2026-09-26' });
+});
+
 check('q-7 dayDir 用本地日期且补零', () => {
-  assert.equal(QU.dayDir(new Date('2026-09-07T23:30:00+08:00').getTime(), 'R'), 'R\\2026-09-07');
+  // T14-H：夹具本地构造，断言「按本地字段取值 + 月/日补零」，与所在时区无关。
+  assert.equal(QU.dayDir(new Date(2026, 8, 7, 23, 30, 0).getTime(), 'R'), 'R\\2026-09-07');
 });
 ```
 
@@ -4788,14 +4863,19 @@ check('q-7 dayDir 用本地日期且补零', () => {
  * 暂存目录：「隔离」这条路径的落点。
  *
  * 三条要点：
- *  1. **绝不覆盖**：目标重名时加 `-2` / `-3` 后缀，撞到底也宁可失败。
+ *  1. **绝不覆盖**：目标重名时在名字前加 `2-` / `3-` **前缀**，撞到底（99 次）也宁可失败。
  *  2. **EXDEV 回退先写后删**（spec §4.3）：复制失败 → 原件不动；复制成功但删源失败
  *     → 返回 ok:false 并说明「副本已在暂存区，原件未删」，让用户自己决定。
  *  3. **暂存目录不能落在被清理路径里**，否则第二次扫描会清掉第一次的后悔药。
+ *     这条靠 `forbiddenPrefixes`，由调用方喂（Task 15 传 active rules 的 `dir` 集）；
+ *     guard 对 Temp 一类可清理区是放行的，它管不了这个。
  */
+import { join } from 'node:path';
 import { check } from './guard.js';
 
-export const DEFAULT_QUARANTINE = (localAppData) => `${localAppData}\\dsh-plugin-sysops\\quarantine`;
+// T14-G：必须用 path.join —— 字符串直拼遇到带尾分隔符的 appData 会多出一个反斜杠，
+// 而 `prefq-4` 是拿 `path.join` 的结果对比的。
+export const DEFAULT_QUARANTINE = (appData) => join(appData, 'dsh-plugin-sysops', 'quarantine');
 
 export function dayDir(now, rootDir) {
   const d = new Date(now);
@@ -4828,11 +4908,20 @@ export function createQuarantine({ rootDir, fsMod, pathMod, logger, now, forbidd
   async function stash(absPath) {
     const g = check(absPath);
     if (!g.allow) return { ok: false, dest: '', method: 'none', why: g.why };
+    // 配置错 → 抛异常（不是 {ok:false}）：整批该停。Task 15 在批次外层 catch。
     await ensureRoot();
     const dir = dayDir(now(), rootDir);
     if (!fsMod.existsSync(dir)) fsMod.mkdirSync(dir, { recursive: true });
     const base = pathMod.basename(absPath);
-    const isDir = (() => { try { return fsMod.statSync(absPath).isDirectory(); } catch (e) { return { ok: false, dest: '', method: 'none', why: `${base} 读不到：${e.code ?? e.message}` }; } })();
+    // T14-C：这里是显式 try/catch + 提前 return。原稿把一个 IIFE 的返回值（抛错时是**对象**）
+    // 赋给 isDir 再往下走，于是「源已被别的程序删掉」这个真机上最常见的条目级失败，
+    // 会被报成 method:'move'（同盘 rename 抛 ENOENT）或「目录跨卷复制未实现」（先抛 EXDEV 时）。
+    let isDir;
+    try {
+      isDir = fsMod.statSync(absPath).isDirectory();
+    } catch (e) {
+      return { ok: false, dest: '', method: 'none', why: `${base} 读不到：${e.code ?? e.message}` };
+    }
     let dest;
     try { dest = freeDest(dir, base); } catch (e) { return { ok: false, dest: '', method: 'none', why: e.message }; }
     try {
@@ -4880,7 +4969,7 @@ export function createQuarantine({ rootDir, fsMod, pathMod, logger, now, forbidd
 }
 ```
 
-`lib/prefs/spec.js` 的 `prefsRecord` 追加 `clean` 组（`quarantineDir` 校验用 `check()`，`why` 里带上「guard」「受保护」「盘符」「变量」等 Task 2 已产出的措辞 —— `prefq-1` 靠它匹配）：
+`lib/prefs/spec.js` 的 `prefsRecord` 追加 `clean` 组（`quarantineDir` 校验用 `check()`，抛的 message 是 `clean.quarantineDir 未通过 guard：${g.why}` —— `prefq-1` 的四条断言分别靠 `g.why` 里现采证实存在的「系统目录禁止操作」「盘符」「%变量%」措辞匹配，所以**别只留「未通过 guard」前缀**，`why` 必须原样带上）：
 
 ```js
 /**
@@ -4913,20 +5002,72 @@ clean: record({
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `node test/prefs.test.mjs` → `28/28 通过`（①3 ②4 ③6 ④11 ⑤4）
-Run: `node test/clean.test.mjs` → `28/28 通过`（①12 ②9 ③7）
-Run: `SKIP_LOCAL=1 node test/clean.test.mjs` → `27/27 + 1 SKIP`
+Run: `node test/clean.test.mjs` → `31/31 通过`（①11 + 真机 1 + ②10 + ③9 —— T14-I；②10 是 Task 13 的 `rec-10`，别照抄本任务书里更早的 ②9）
+Run: `SKIP_LOCAL=1 node test/clean.test.mjs` → `30/30 通过` + 1 行 `SKIP cln-真机-1`
+Run: `node test/alerts.test.mjs` → `33/33 通过`；`node test/guard.test.mjs` → `19/19 通过`；`node test/collect.test.mjs` → `48/48 通过`
 
-- [ ] **Step 5: 真机验一次 EXDEV 判定（不写真文件，用同盘 move 路径）**
+- [ ] **Step 5: 真机验一次「同盘 move + stats 非零」（T14-E）**
 
-```bash
-node --input-type=module -e "
-const fs=await import('node:fs'),path=await import('node:path'),os=await import('node:os');
-const Q=await import('./lib/clean/quarantine.js');
-const src=path.join(os.tmpdir(),'sysops-q-src.txt');fs.writeFileSync(src,'x');
-const q=Q.createQuarantine({rootDir:path.join(os.tmpdir(),'sysops-q-root'),fsMod:{existsSync:fs.existsSync,mkdirSync:fs.mkdirSync,statSync:fs.statSync,renameSync:fs.renameSync,copyFileSync:fs.copyFileSync,unlinkSync:fs.unlinkSync,readdirSync:fs.readdirSync},pathMod:{basename:path.basename,join:path.join},logger:{warn:console.log},now:()=>Date.now(),forbiddenPrefixes:[]});
-console.log(await q.stash(src));console.log('源还在？',fs.existsSync(src),'暂存',await q.stats());"
+**禁止** `node --input-type=module -e "…"`（本仓库硬约束）。落 `tmp/t14probe.mjs` 再 `node tmp/t14probe.mjs > tmp/t14-probe.txt 2>&1`，然后 Read 那个文件（控制台 cp936 会把中文打成乱码）。
+脚本里**所有反斜杠一律 `String.fromCharCode(92)` 拼**，并在开头打印一次「段数」自证输入形状。现采（控制器 2026-09-28，`node tmp/t14g.mjs` → `tmp/t14g.txt`）三条：
+- 仓库内**绝对 F: 路径** → `allow=true`（探针可以落在 `tmp/` 下）；
+- **相对路径** → `GUARD_NO_DRIVE`「必须是带盘符的绝对路径」⇒ `rootDir` 与源路径都必须先 `path.resolve` 再交给 `createQuarantine` / `stash`；
+- **折半畸形串** `C:Usersgongjtmp…` → `allow=true`（本轮真踩过：`\` 在派单途中被折半、JS 又把 `\U` 当转义吃掉，guard 对那个畸形串是放行的 ⇒ 段数自证必须在 `resolve` **之后**打印，落在 5 段才算输入形状对）。
+
+暂存根放仓库 `tmp/sysops-q-root`（`tmp/` 在 `.gitignore` 内），由脚本自己 `rmSync(..., { recursive: true, force: true })` 收尾 —— 自己造的临时物自己清。
+
+```js
+// tmp/t14probe.mjs —— 真机同盘 move + stats 非零；不碰用户数据区
+import fs from 'node:fs';
+import path from 'node:path';
+const B = String.fromCharCode(92);            // 反斜杠唯一来源，别在字面量里写 \\
+const SRC = path.resolve(['tmp', 'sysops-q-src.txt'].join(B));
+const ROOT = path.resolve(['tmp', 'sysops-q-root'].join(B));
+// 自证输入形状（resolve 之后）：盘符 + 4 段 = 5；被折半/转义吃掉时会退化
+console.log('输入形状', SRC.split(B).filter(Boolean).length, JSON.stringify(SRC.split(B).filter(Boolean)));
+console.log('abs?', path.isAbsolute(SRC), path.isAbsolute(ROOT));
+
+const Q = await import('../lib/clean/quarantine.js');
+fs.rmSync(ROOT, { recursive: true, force: true });
+fs.writeFileSync(SRC, 'probe');
+const q = Q.createQuarantine({
+  rootDir: ROOT,
+  fsMod: { existsSync: fs.existsSync, mkdirSync: fs.mkdirSync, statSync: fs.statSync,
+    renameSync: fs.renameSync, copyFileSync: fs.copyFileSync, unlinkSync: fs.unlinkSync,
+    rmSync: fs.rmSync, readdirSync: fs.readdirSync },
+  pathMod: { basename: path.basename, join: path.join },
+  logger: { warn: (m) => console.log('WARN', m) },
+  now: () => Date.now(),
+  forbiddenPrefixes: [path.resolve(['tmp', 'sysops-q-forbidden'].join(B))],   // 正向路径：不命中也要求解过
+});
+const r = await q.stash(SRC);
+console.log('stash →', r.ok, r.method, r.dest);
+console.log('源还在？', fs.existsSync(SRC));
+console.log('stats →', await q.stats());
+console.log('二次 stash 同一个已消失的源 →', await q.stash(SRC));   // T14-C 的真机对账
+fs.rmSync(ROOT, { recursive: true, force: true });
+fs.rmSync(SRC, { force: true });
 ```
-Expected: `ok:true, method:'move'`、源不存在、暂存 `files:1`；跑完 `rm -rf "$TMPDIR/sysops-q-root"` 由你手动执行（临时目录属可清范围，但删它也要你点头）。
+
+Expected 六行：`输入形状 5 ["F:","dsh-plugins","dsh-plugin-sysops","tmp","sysops-q-src.txt"]`；`abs? true true`；`stash → true move`（dest 在 `<ROOT>\<本地当天日期>\` 下）；`源还在？ false`；`stats → { dirs: 1, files: 1, bytes: 5, oldest: <本地当天> }`；末行 `ok:false method:'none'` —— **源不存在必须报 `none`，不得报 `move`**（T14-C）。
+`tmp/` 由脚本自己清干净；跑完 `git status --short` 必须仍是净的。
+
+- [ ] **Step 6: 变异自证（六次「破坏 → 跑红 → 还原 → 重跑全绿」，写入交付报告）**
+
+前置（Task 11 实测教训）：`lib/clean/quarantine.js` 是本任务新建的**未跟踪文件**，`git diff --numstat` 对未跟踪内容恒为空、取不到证 ⇒ 电池开始前先 `git add` 本任务那四个文件，此后 numstat 是「工作区 vs 暂存区」，变异非空 / 还原为空才可验证。**提交前终检 `git status --short -- lib test` 必须只剩这四条已暂存记录。**
+每条都要当轮跑出**同一个红点**（下面写的红点是控制器预检推断，照抄不算取证），还原后 `node test/clean.test.mjs` 与 `node test/prefs.test.mjs` 都要回到 `31/31`、`28/28`。
+
+| 编号 | 破坏 | 预期红在 | 为什么值得破坏 |
+|---|---|---|---|
+| V1 | `stash()` 里 `isDir` 的显式 try/catch 换回原稿形状（IIFE 抛错时 `return { ok:false, … }` 那个**对象**赋给 `isDir`，代码继续走 `freeDest` / `renameSync`） | **只红 `q-8`**：`method` 报成 `move` | 真机上最常见的条目级失败就是「源已被别的程序删掉」。红点必须证明 `method:'none'` 这一格有断言承重 —— 否则 Task 15 的三档计数会把「没搬走」算进「已隔离」 |
+| V2 | 删掉 `ensureRoot()` 里 `for (const p of forbiddenPrefixes) …` 那一段 | **只红 `q-6`** | 现采证明 guard 对 `Temp\q` 是 `allow=true`，这条红线**只有** `forbiddenPrefixes` 在执行；删了它「第二次扫描清掉第一次的后悔药」无人可挡 |
+| V3 | `quarFs` 的 `readdirSync` 前缀匹配换回 `p + '/'`（反斜杠桩配斜杠前缀） | **只红 `q-9`**（`files`/`bytes` 归 0、`oldest` 变 `null` ⇒ `deepEqual` 红） | 证桩修不是白改：`stats()` 在原稿下恒为 0，任何照原稿补的测试都是**假绿** |
+| V4 | `DEFAULT_QUARANTINE` 改回 `` `${appData}\\dsh-plugin-sysops\\quarantine` `` 字符串直拼 | `prefq-4` 里尾分隔符那一行 | 宿主给的 `%LOCALAPPDATA%` 常带尾分隔符 ⇒ 双反斜杠路径进 guard、进设置页显示，`join` 的归一化是唯一的抓网 |
+| V5 | copy-delete 分支里去掉 `unlinkSync` 的 catch（删源失败也照样 `return { ok:true … }`） | **红 `q-3`**（`q-2` 仍绿） | 「副本已在暂存区、原件未删，需手动确认」这句话只有 `q-3` 在钉；静默吞掉等于告诉用户搬完了 |
+| V6 | spec 的 `keepDays` 去掉上界（保留 `v < 7` 那条） | **只红 `prefq-2`** | spec §8 定的是「到期只提醒、不自动删」，保留期无上界 = 用户可以把暂存件设成永久而无人提醒 |
+
+**红点必须是「只红它该红的那条」**：V1/V2/V3/V6 如果出现额外红点，先判是否同因（同一处字节被两条断言读到），同因可接受并在报告里写清；如果是断言之间互相兜底，就要在报告里说明哪条是主力。
+
 提交信息草稿：`feat(sysops): 暂存目录（EXDEV 回退先写后删 + 暂存位置红线校验）`
 
 ## Task 15: `lib/clean/executor.js` + `lib/clean/service.js` —— 两段式的第二半
