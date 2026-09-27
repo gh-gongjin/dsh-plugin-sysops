@@ -3696,7 +3696,7 @@ Expected: `33/33 通过`（①②③段 15 条 = `rule-1..10` + `hit-1..5`，加
   - `BUILTIN_RULES: rule[]`（只收本机存在性复核**实测存在**的 12 条路径，2026-09-27 现采；`windows-err` 已因 `WER` 用户目录不存在剔除），`rule = { id, n, kind, dir, glob, ageDays, note, readonly: true, rel }` —— `dir`/`glob` 是**加载时按 `os.homedir()` 展开好的绝对路径**，Task 12 的 scanner 直接用，不再自己拼
   - `DEFAULT_OFF = ['packages-cache', 'playwright-browsers']`（首次读取即生效的默认关闭集，`rules-8/9/10` 的条数断言都要减去它）
   - `enabledBuiltin(offIds) → rule[]`、`RULE_KINDS = ['缓存','日志','旧版本','崩溃转储']`
-  - `createRuleStore({ prefStore, logger? })` → `{ list(), userRules(), activeRules(), add(rule), remove(id), toggle(id, on) , error }`；**四个写口一律返回 `prefStore.write()` 的落库结果**（行级 `updatedAt` 由 prefs 盖，未声明字段已被 schema 丢弃 —— 返回入参等于对调用方撒谎）
+  - `createRuleStore({ prefStore, logger? })` → `{ list(), userRules(), activeRules(), add(rule), remove(id), toggle(id, on) , error }`；**四个写口一律返回 `prefStore.write()` 的落库结果**（行级 `updatedAt` 由 prefs 盖，未声明字段已被 schema 丢弃 —— 返回入参等于对调用方撒谎）；**`add()` 还拒绝「用户规则 id 撞内置 id」**（`RULE_ERROR.BAD_RULE`）—— `toggle` 按内置 id 寻址、`remove` 按 `items` 寻址，撞名会让一条规则同时存在于两个寻址空间（评审 F-1，`rules-11` 钉住）
   - `RULE_ERROR`（`GUARD_DENY` `UNKNOWN_ID` `BAD_RULE` `STORE_UNAVAILABLE`）
   - `cleanRulesRecord` 的 `items[]` 必须**声明 `kind`**（`requiredString`），否则 `arrayOf` 会把它静默丢掉 ⇒ 规则存进去、读出来就没有分类，而 `validate()` 又要求 `kind` 非空 —— 那条规则会在**每次 `activeRules()` 读取时抛错**，比写不进去更糟
 
@@ -3836,6 +3836,14 @@ await checkAsync('rules-10 存储不可用时 error 有值、activeRules 只剩�
   assert.equal(rows.length, CR.BUILTIN_RULES.length - CR.DEFAULT_OFF.length);
   assert.equal(w.store.error, RULE_ERROR.STORE_UNAVAILABLE);
 });
+
+await checkAsync('rules-11 用户规则不许占用内置 id（撞名会拆成两个寻址空间：toggle 关内置、清单里却留着同 id 的用户条目）', async () => {
+  const w = ruleWorld();
+  const builtinId = CR.BUILTIN_RULES[0].id;
+  // 只换 id，glob 仍是合法的 pnpm store —— 红必须归因到撞名检查，不能是 guard 先拒
+  await assert.rejects(() => w.store.add(userRule({ id: builtinId })), (e) => e.code === RULE_ERROR.BAD_RULE);
+  assert.equal((await w.store.userRules()).some((r) => r.id === builtinId), false, '撞名的用户规则不能落库');
+});
 ```
 
 （④段用到的 `guardMod` / `prefsMod` 在段首补两行 import：`const guardMod = await import('../lib/clean/guard.js');` 与 `const prefsMod = await import('../lib/prefs/spec.js');` —— 现有 ②段是按名字解构导入的，这里要整模块句柄给循环里用。）
@@ -3965,6 +3973,9 @@ export function createRuleStore({ prefStore, logger }) {
     },
     async add(rule) {
       validate(rule);
+      // 内置 id 是 `toggle` 的寻址空间，用户规则的 `items` 是 `remove` 的寻址空间 —— 两者撞名时
+      // `toggle(id,false)` 关的是内置、`activeRules()` 里却还留着同 id 的用户条目，Task 15/22 按 id 对账会双计。
+      if (BUILTIN_RULES.some((r) => r.id === rule.id)) throw err(RULE_ERROR.BAD_RULE, `规则 id ${rule.id} 是内置规则 id，用户规则请另取 id（内置规则用 toggle 开关）`);
       const row = await this.list();
       if (row.items.some((x) => x.id === rule.id)) throw err(RULE_ERROR.BAD_RULE, `规则 id 重复：${rule.id}`);
       return write({ ...row, items: [...row.items, rule] });
@@ -3999,7 +4010,7 @@ export function createRuleStore({ prefStore, logger }) {
 控制器 2026-09-27 已现采完存在性复核（`node tmp/t11wer.mjs` → `tmp/t11-wer.txt`）：`WER` / `WER/ReportQueue` / `WER/ReportArchive` 全 `ENOENT`，其余 12 条目录全部存在。结论已经写进 Step 3 的常量表与 `rules-1` 断言，**执行者不要再"按结果决定是否收 `windows-err`"** —— 那条已经不在表里了。换机器或换用户时（`os.homedir()` 不同）才需要重跑 Step 5 的探针，并同样遵守"条数跟着实测走"。
 
 Run: `node test/prefs.test.mjs`
-Expected: `23/23 通过`（①3 ②4 ③6 ④10），退出码 0。
+Expected: `24/24 通过`（①3 ②4 ③6 ④11），退出码 0。
 旁路不许漂（同一轮现跑，不许引用上一轮）：`node test/alerts.test.mjs` → **33/33**；`node test/guard.test.mjs` → **19/19**；`SKIP_LOCAL=1 node test/collect.test.mjs` → **48/48**。
 
 - [ ] **Step 5: 真机复核内置规则确实命中条目（不是只存在目录）**
@@ -4027,6 +4038,7 @@ node tmp/t11probe.mjs > tmp/t11-probe.txt 2>&1
 | V3 | `validate()` 去掉 `check(r.glob, { mode: 'glob' })` | `rules-6` **+** `rules-7` | 红线唯一裁决点：存进去一条永远执行不了的规则，比拒绝写入难查得多（`rules-7` 的未展开 `%LOCALAPPDATA%` 同属 guard 职责） |
 | V4 | `items` schema 删掉 `kind` 声明 | `rules-4` + `rules-5` **+** `rules-8` | `arrayOf` 静默丢未声明字段 ⇒ 读回来没分类 ⇒ `validate()` 每次读都抛 ⇒ **`activeRules()` 直接 reject，清理页整页打不开**（`rules-8` 红就是这条链的实测证据） |
 | V5 | `emptyRow()` 的 `off` 换成 `[]` | `rules-8` + `rules-9` + `rules-10` | 默认关（`Packages` 147 子目录、`ms-playwright` 重装代价大）没有打底就等于没实现 |
+| V6（评审 F-1 连带） | 删掉 `add()` 里「用户规则 id 撞内置 id」那一行拒绝 | **只红 `rules-11`** | 两个寻址空间撞名 ⇒ `toggle` 关内置、清单留同 id 用户条目，Task 15/22 按 id 对账双计 |
 
 **V2 与 V5 的写法是实测修出来的，别退回直觉版本：**
 - V2 最初写成 `return next;`（把 `prefStore.write` 整个删掉）→ 红 `rules-5`+`rules-8`+`rules-9`，看着很承重，其实测的是"不写库"。**必须** `await` 掉真实写入再换返回值，才只剩 `updatedAt` 那一格差异。
@@ -4900,7 +4912,7 @@ clean: record({
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `node test/prefs.test.mjs` → `27/27 通过`（①3 ②4 ③6 ④10 ⑤4）
+Run: `node test/prefs.test.mjs` → `28/28 通过`（①3 ②4 ③6 ④11 ⑤4）
 Run: `node test/clean.test.mjs` → `28/28 通过`（①12 ②9 ③7）
 Run: `SKIP_LOCAL=1 node test/clean.test.mjs` → `27/27 + 1 SKIP`
 
@@ -7443,7 +7455,7 @@ SKIP_LOCAL=1 node test/search.test.mjs
 Expected：
 - `plugin.test.mjs` `90/90`（①15 rt ②8 hx ③12 cf ④16 pg1 ⑤14 pg2 ⑥12 pg3 ⑦13 pg4）
 - `host-compat.test.mjs` `8/8`（hc-1..hc-8）
-- `collect.test.mjs` `48/48`、`alerts.test.mjs` `33/33`、`clean.test.mjs` `46/46`（含 1 条真机）、`search.test.mjs` `26/26`、`prefs.test.mjs` `23/23`（①3 ②4 ③6 ④10）、`guard.test.mjs` `19/19`（另需打印「拒绝断言 61 条 / 分支命中 16/16」，见 Step 2）
+- `collect.test.mjs` `48/48`、`alerts.test.mjs` `33/33`、`clean.test.mjs` `46/46`（含 1 条真机）、`search.test.mjs` `26/26`、`prefs.test.mjs` `24/24`（①3 ②4 ③6 ④11）、`guard.test.mjs` `19/19`（另需打印「拒绝断言 61 条 / 分支命中 16/16」，见 Step 2）
 - `SKIP_LOCAL=1` 两行：`clean` → `45/45 + 1 SKIP`，`search` → Everything 相关真机用例 SKIP、walk 通路仍实跑
 - **任何一条 FAIL 都不算过**；出现"用例静默通过"（断言对象为空数组的 `.some()`）要按 Step 3 的变异法回查。
 
