@@ -133,7 +133,7 @@ check('rule-10 ALERT_METRICS 与 prefs.alerts 的五个键一致（Task 3 与这
 
 /* ③段：alert_hit 仓储（内存桩，零真 IO） */
 const { createAlertHitStore, RECORDS_ERROR } = await import('../lib/alerts/store.js');
-const { ALERT_HIT_MAX, hitKey } = await import('../lib/alerts/spec.js');
+const { ALERT_HIT_MAX, hitKey } = await import('../lib/records/spec.js');
 const { createMemoryFacility } = await import('./_helpers.mjs');
 
 const N = { info() {}, warn() {} };
