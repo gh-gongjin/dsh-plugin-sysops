@@ -905,11 +905,11 @@ export const prefsDomain = defineDomain({
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `node test/prefs.test.mjs`
-Expected: `14/14 通过`（①3 + ②4 + ③7），退出码 0。
+Expected: `13/13 通过`（①3 + ②4 + ③6 —— ③段实测只有 prefs-5~10 六条，计划原先写 ③7 是算术笔误，已按落地产物校正），退出码 0。
 
 - [ ] **Step 5: 留档**
 
-Run: `SKIP_LOCAL=1 node test/prefs.test.mjs`（确认无真机用例被误跳），Expected: 仍 `14/14`。
+Run: `SKIP_LOCAL=1 node test/prefs.test.mjs`（确认无真机用例被误跳），Expected: 仍 `13/13`。
 ---
 
 ## Task 4: `lib/collect/ring.js` + `lib/collect/l0-node.js`
@@ -3174,7 +3174,7 @@ test -d "$LOCALAPPDATA/Microsoft/Windows/WER" && echo "WER 存在" || echo "WER 
 按结果决定内置库是否收 `windows-err`（并同步 `rules-1` 的条数断言），然后：
 
 Run: `node test/prefs.test.mjs`
-Expected: `24/24 通过`（①3 ②4 ③7 ④10），退出码 0。
+Expected: `23/23 通过`（①3 ②4 ③6 ④10），退出码 0。
 
 - [ ] **Step 5: 真机复核内置规则确实命中文件（不是只存在目录）**
 
@@ -3943,7 +3943,7 @@ clean: record({
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `node test/prefs.test.mjs` → `28/28 通过`（①3 ②4 ③7 ④10 ⑤4）
+Run: `node test/prefs.test.mjs` → `27/27 通过`（①3 ②4 ③6 ④10 ⑤4）
 Run: `node test/clean.test.mjs` → `28/28 通过`（①12 ②9 ③7）
 Run: `SKIP_LOCAL=1 node test/clean.test.mjs` → `27/27 + 1 SKIP`
 
@@ -6486,7 +6486,7 @@ SKIP_LOCAL=1 node test/search.test.mjs
 Expected：
 - `plugin.test.mjs` `90/90`（①15 rt ②8 hx ③12 cf ④16 pg1 ⑤14 pg2 ⑥12 pg3 ⑦13 pg4）
 - `host-compat.test.mjs` `8/8`（hc-1..hc-8）
-- `collect.test.mjs` `47/47`、`alerts.test.mjs` `28/28`、`clean.test.mjs` `46/46`（含 1 条真机）、`search.test.mjs` `26/26`、`prefs.test.mjs` `24/24`（①3 ②4 ③7 ④10）、`guard.test.mjs` `19/19`（另需打印「拒绝断言 61 条 / 分支命中 16/16」，见 Step 2）
+- `collect.test.mjs` `47/47`、`alerts.test.mjs` `28/28`、`clean.test.mjs` `46/46`（含 1 条真机）、`search.test.mjs` `26/26`、`prefs.test.mjs` `23/23`（①3 ②4 ③6 ④10）、`guard.test.mjs` `19/19`（另需打印「拒绝断言 61 条 / 分支命中 16/16」，见 Step 2）
 - `SKIP_LOCAL=1` 两行：`clean` → `45/45 + 1 SKIP`，`search` → Everything 相关真机用例 SKIP、walk 通路仍实跑
 - **任何一条 FAIL 都不算过**；出现"用例静默通过"（断言对象为空数组的 `.some()`）要按 Step 3 的变异法回查。
 
