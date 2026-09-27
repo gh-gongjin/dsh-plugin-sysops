@@ -5499,32 +5499,66 @@ Expected: `ex-1` 起 `ERR_MODULE_NOT_FOUND` 指向 `lib/clean/executor.js`。
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `node test/clean.test.mjs`
-Expected: `46/46 通过`（①12 ②9 ③7 ④11 ⑤7 — 其中含 1 条真机用例）
-> 计数核对：①段 scanner 12 条（`cln-1..10` + `cln-9b` + `cln-真机-1`）、②段 records 9 条、③段 quarantine 7 条、④段 executor 11 条、⑤段 clean service 7 条 → 合计 **46**。`SKIP_LOCAL=1` 时真机那条打印 SKIP，期望 `45/45 通过 + 1 SKIP`。（先前草稿写 41 是漏了 ①③两段的新增用例，以逐段清点为准。）
-Run: `SKIP_LOCAL=1 node test/clean.test.mjs` → `40/40 + 1 SKIP`
+Expected: `56/56 通过`（①15 + ②10 + ③9 + ④13 + ⑤9 = 56，与 T15-C 同行内算式一致）
+> 逐段清点（Task 12 两轮修复后的实际落地数，别照抄本任务书更早的草稿）：①段 15 条 = `cln-1..10` + `cln-9b` + `cln-9c` + `cln-5b` + `cln-7c` + `cln-真机-1`；
+> ②段 10 条 = `rec-1..rec-10`（Task 13 闭环数，`25/25` 已现证）；③段 9 条 = `q-1..q-7` + `q-8` + `q-9`（T14-C/D）；
+> ④段 13 条、⑤段 9 条由本任务自己新增（`ex-9b`/`ex-12`/`cs-8`/`cs-9` 等），**以 Step 1-3 实际写出的 `await checkAsync(` 计数为准**。
+> 旧草稿的 `46/46`、`45/45 + 1 SKIP`、`40/40` 三行全部作废。
+Run: `SKIP_LOCAL=1 node test/clean.test.mjs` → `55/55 通过` + 1 行 `SKIP cln-真机-1`
+Run: `node test/alerts.test.mjs` → `33/33`；`node test/guard.test.mjs` → `19/19`；`SKIP_LOCAL=1 node test/collect.test.mjs` → `48/48`；`node test/prefs.test.mjs` → `28/28`
 
-- [ ] **Step 6: 真机端到端（在 %TEMP% 里真建真删，spec §5 要求）**
+- [ ] **Step 6: 真机端到端（按 T15-D 落文件、样本根挪进仓库 tmp，spec §5 要求）**
 
-```bash
-node --input-type=module -e "
-const fs=await import('node:fs'),os=await import('node:os'),path=await import('node:path');
-const root=path.join(os.tmpdir(),'sysops-clean-e2e');fs.rmSync(root,{recursive:true,force:true});
-fs.mkdirSync(path.join(root,'old'),{recursive:true});fs.writeFileSync(path.join(root,'old','a.txt'),'hello');
-const t=path.join(root,'old');const old=new Date(Date.now()-40*864e5);fs.utimesSync(t,old,old);fs.utimesSync(path.join(t,'a.txt'),old,old);
-const SC=await import('./lib/clean/scanner.js');const EX=await import('./lib/clean/executor.js');
-const sc=SC.createScanner({fsMod:{readdirSync:fs.readdirSync,statSync:fs.statSync,join:path.join},osMod:{homedir:os.homedir},now:()=>Date.now(),logger:{warn:console.error},onProgress(){}});
-const res=await sc.scan([SC.expandRule({id:'e2e',n:'端到端样本',kind:'缓存',ageDays:7,rel:path.relative(os.homedir(),t).replace(/\\/g,'/'),glob:'C:\\\\*'}, {home:os.homedir()})]);
-console.log('扫描命中',res.totals.n,'bytes',res.totals.bytes);
-const fp=await import('node:fs/promises');const facility={async open(){const m=new Map();return{close(){},table:()=>({get:(k)=>m.get(k),entries:()=>m.entries(),keys:()=>m.keys(),put:async(k,v)=>{m.set(k,v)},delete:async(k)=>{m.delete(k)},update:async(k,f)=>{m.set(k,f(m.get(k)))}})}}};
-const ps=await import('./lib/clean/plan-store.js').then(m=>m.createPlanStore({getFacility:()=>facility,now:()=>Date.now(),newId:()=>'p-e2e',logger:{warn:console.error}}));
-const ls=await import('./lib/clean/log-store.js').then(m=>m.createLogStore({getFacility:()=>facility,now:()=>Date.now(),logger:{warn:console.error}}));
-await ps.save(res,{beforeFree:1,modeDefault:'delete-file'});
-const ex=EX.createExecutor({fsMod:{...fs,statSync:fs.statSync,realpathSync:fs.realpathSync},planStore:ps,logStore:ls,quarantine:{async stash(p){fs.rmSync(p,{recursive:true});return{ok:true,dest:'q',method:'move',why:''}}},logger:{warn:console.error},onEvent(e){console.log('事件',e.state,e.errnoText||'')}});
-const sum=await ex.apply({planId:'p-e2e',itemIds:res.items.map(i=>i.id),mode:'delete-dir'});
-console.log('结果',JSON.stringify({ok:sum.ok,skipped:sum.skipped,failed:sum.failed,rejected:sum.rejected}),'目录还在？',fs.existsSync(t));
-"
+**不许再用 `node --input-type=module -e "…"`**：那一版整段是字面 `\` 与 `'C:\\\\*'` 的双层转义，派单途中 `\` 还会再折半一次，路径会静默变形。
+把脚本落成 `tmp/t15e2e.mjs` 再 `node tmp/t15e2e.mjs`，反斜杠一律 `String.fromCharCode(92)`，并把输入形状自证（段数）打印出来。
+样本根**不是** `%TEMP%`，而是仓库内 `tmp/sysops-clean-e2e`（自建自删，绝不动用户真实 Temp；guard 对仓库内 F: 绝对路径 `allow=true`，现证见 `tmp/t14g.txt`）：
+
+```js
+// tmp/t15e2e.mjs —— Task 15 真机端到端：扫描 + 执行 + 留痕，全在仓库 tmp 里自建自删
+const fs = await import('node:fs');
+const path = await import('node:path');
+const B = String.fromCharCode(92);            // 反斜杠不许写字面量：见 T15-D / 本仓库硬约束
+const root = path.resolve('tmp', 'sysops-clean-e2e');
+console.log('样本根', root, '| 反斜杠段数', root.split(B).length, '| 正斜杠段数', root.split('/').length);
+
+fs.rmSync(root, { recursive: true, force: true });
+fs.mkdirSync(path.join(root, 'old'), { recursive: true });
+fs.writeFileSync(path.join(root, 'old', 'a.txt'), 'hello');
+fs.mkdirSync(path.join(root, 'keep'), { recursive: true });
+fs.writeFileSync(path.join(root, 'keep', 'b.txt'), 'fresh');
+const old = new Date(Date.now() - 40 * 864e5);
+for (const p of ['old', path.join('old', 'a.txt')]) fs.utimesSync(path.join(root, p), old, old);
+
+const SC = await import('./lib/clean/scanner.js');
+const EX = await import('./lib/clean/executor.js');   // 与 Step 4 的导出名对齐
+const sc = SC.createScanner({
+  fsMod: { readdirSync: fs.readdirSync, statSync: fs.statSync, join: path.join },
+  osMod: { homedir: () => root }, now: () => Date.now(), logger: { warn: console.error }, onProgress() {},
+});
+const res = await sc.scan([SC.expandRule({ id: 'e2e', n: '端到端样本', kind: '缓存', ageDays: 7, dir: root, pattern: '*' }, { home: root })]);
+console.log('命中', res.totals.n, 'bytes', res.totals.bytes, 'items', res.items.map((i) => i.path));
+
+const facility = { /* 用 test/clean.test.mjs 里同一份内存设施桩，别在这里另写一套 */ };
+const planStore = (await import('./lib/clean/plan-store.js')).createPlanStore({ getFacility: () => facility, now: () => Date.now(), newId: () => 'p-e2e', logger: { warn: console.error } });
+const logStore = (await import('./lib/clean/log-store.js')).createLogStore({ getFacility: () => facility, now: () => Date.now(), logger: { warn: console.error } });
+await planStore.save(res, { beforeFree: 1, modeDefault: 'delete-dir' });
+const ex = EX.createExecutor({ fsMod: { ...fs, realpathSync: fs.realpathSync }, planStore, logStore, logger: { warn: console.error } });
+await ex.run('p-e2e', res.items.map((i) => i.id));   // 与 Step 4 的执行入口签名对齐
+
+// 断言（不是打印）：够老的整条消失、够新的原样还在、留痕里有对应记录；任何一条不过就非零退出。
+const fail = [];
+if (fs.existsSync(path.join(root, 'old'))) fail.push('old 没被删掉');
+if (!fs.existsSync(path.join(root, 'keep'))) fail.push('keep 被误删（够新的条目必须原样保留）');
+// 第三条断言按 Step 4 的留痕形状补：logStore 里必须有一条指向 p-e2e 与 root/old 的成功记录。
+console.log(fail.length ? 'FAIL ' + fail.join('；') : '端到端 PASS');
+process.exitCode = fail.length ? 1 : 0;
 ```
-Expected: `扫描命中 1`、`ok: 1`、`目录还在？ false`。**这条真机跑的是本仓库唯一会真的删文件的测试**，路径限定在 `%TEMP%\sysops-clean-e2e` 内，且执行前 guard 已放行 —— 不得为跑通它放宽任何红线。
+
+Run: `node tmp/t15e2e.mjs` → Expected: 退出码 0，且输出里 `端到端 PASS`。
+**这块留了三处必须与 Step 4 对齐的签名**（`facility` 桩、`ex.run` 入口、留痕断言）：实现先落地、脚本照实现补全，
+不许反过来为了让脚本好写而改 Step 4 的公共 API，也不许把断言降级成只打印（本仓库硬约束：禁止仅打印不断言）。
+收尾：`fs.rmSync(root, { recursive: true, force: true })` 由脚本自己负责，跑完不在仓库里留样本目录。
+
 提交信息草稿：`feat(sysops): 两段式执行器与清理服务（快照 re-stat 闸门 + 三档计数）`
 
 ---
@@ -5685,12 +5719,40 @@ Run: `SKIP_LOCAL=1 node test/search.test.mjs` → `9/9 通过`
 
 - [ ] **Step 5: 真机探测（本机按实测修正 #4 应为未安装）**
 
-```bash
-node --input-type=module -e "
-const fs=await import('node:fs');const PB=await import('./lib/search/probe.js');
-const p=PB.createProbe({fsMod:{existsSync:fs.existsSync},requestFn:async(u)=>{try{const r=await fetch(u,{signal:AbortSignal.timeout(1500)});return{status:r.status,body:await r.text()}}catch(e){throw e}},execFileMod:(...a)=>import('node:util').then(u=>u.promisify(require('node:child_process').execFile)(...a)),getPrefs:()=>({search:{}}),now:()=>Date.now()});
-const r=await p.probe(true);console.log(JSON.stringify({installed:r.installed,http:r.http,es:r.es,ready:r.ready,via:r.via,level:r.level},null,0));console.log(r.checks.map(c=>c.key+':'+(c.ok?'OK':c.detail)).join(' | '));"
+**不许内联**（T14-E 同口径硬约束），落 `tmp/t16probe.mjs`：
+
+```js
+/* Task 16 Step 5：真机探测。跑法：node tmp/t16probe.mjs > tmp/t16-probe.txt 2>&1，然后 Read 那个文件。 */
+const fsMod = await import('node:fs');
+const cp = await import('node:child_process');
+const util = await import('node:util');
+const execFile = util.promisify(cp.execFile);
+const PB = await import('./lib/search/probe.js');
+
+const p = PB.createProbe({
+  fsMod: { existsSync: (s) => fsMod.existsSync(s) },
+  requestFn: async (url, opts = {}) => {
+    const r = await fetch(url, { signal: AbortSignal.timeout(opts.timeoutMs ?? 1500) });
+    return { status: r.status, body: await r.text() };
+  },
+  // 原稿这里写的是 require('node:child_process') —— ESM 里没有 require，内联版一跑就抛，
+  // 而 probe 的 catch 会把它打成「es 不通」的 detail，读数看着正常、其实那条腿从未真跑过。
+  execFileMod: async (cmd, args) => {
+    const { stdout } = await execFile(cmd, args, { timeout: 3000, windowsHide: true });
+    return { stdout };
+  },
+  getPrefs: () => ({ search: { mode: 'everything', port: PB.DEFAULT_EVERYTHING_PORT, esPath: '', walkDirs: [] } }),
+  now: () => Date.now(),
+});
+
+const r = await p.probe(true);
+const row = (c) => `${c.key}=${c.ok ? 'OK' : c.detail}`;
+console.log(JSON.stringify({ installed: r.installed, http: r.http, es: r.es, e2e: r.e2e, ready: r.ready, via: r.via, level: r.level, degraded: r.degraded }));
+console.log(r.checks.map(row).join(' | '));
+console.log('advice 条数', r.advice.length);
 ```
+
+Run: `node tmp/t16probe.mjs > tmp/t16-probe.txt 2>&1` 然后 Read `tmp/t16-probe.txt`（控制台 cp936 会把中文打成乱码）。
 Expected（2026-09-27 实测修正 #4）：`installed:false, http:false, es:false, ready:false, level:null`，四行 checks 各有 detail。若本机后来装了 Everything，把这条真机结果与修正 #4 一起回写 spec（Task 25）。
 提交信息草稿：`feat(sysops): Everything 三级探测（缓存 30s + 逐级原因）`
 
@@ -5955,14 +6017,35 @@ Expected: `26/26 通过`（①9 ②6 ③3 ④4 ⑤7 — 减去与①重叠 3 条
 
 - [ ] **Step 5: 真机 walk 实测（与 spec §1.2 的 7.3s 对齐）**
 
-```bash
-node --input-type=module -e "
-const fs=await import('node:fs'),path=await import('node:path'),os=await import('node:os');
-const WK=await import('./lib/search/walk.js');
-const t0=Date.now();
-const r=await WK.walkSearch({q:'report',limit:50,dirs:[path.join(os.homedir(),'AppData','Local')],fsMod:{readdirSync:fs.readdirSync,statSync:fs.statSync,join:path.join},pathMod:{join:path.join,basename:path.basename},now:()=>Date.now(),budgetMs:20000});
-console.log('耗时',Date.now()-t0,'ms','命中',r.rows.length,'walked',r.walked,'truncated',r.truncated,'timedOut',r.timedOut,'skipped',r.skipped.length);"
+**不许内联**（T14-E 同口径硬约束），落 `tmp/t17walk.mjs`：
+
+```js
+/* Task 17 Step 5：真机 walk 实测。跑法：node tmp/t17walk.mjs > tmp/t17-walk.txt 2>&1，然后 Read 那个文件。 */
+const fsMod = await import('node:fs');
+const path = await import('node:path');
+const osMod = await import('node:os');
+const WK = await import('./lib/search/walk.js');
+
+const B = String.fromCharCode(92);
+const dir = path.join(osMod.homedir(), 'AppData', 'Local');
+// 输入形状自证（T14-E）：路径由系统拼出、段数对得上，才说明「遍历的确实是这个目录」而不是畸形串
+const segs = dir.split(B).filter(Boolean);
+console.log('dir=', dir, '| 段数=', segs.length, '| 逐段=', segs.join(' > '));
+
+const t0 = Date.now();
+const r = await WK.walkSearch({
+  q: 'report',
+  limit: 50,
+  dirs: [dir],
+  fsMod: { readdirSync: (p) => fsMod.readdirSync(p), statSync: (p) => fsMod.statSync(p), join: path.join },
+  pathMod: { join: path.join, basename: path.basename },
+  now: () => Date.now(),
+  budgetMs: 20000,
+});
+console.log('耗时', Date.now() - t0, 'ms | 命中', r.rows.length, '| walked', r.walked, '| truncated', r.truncated, '| timedOut', r.timedOut, '| skipped', r.skipped.length);
 ```
+
+Run: `node tmp/t17walk.mjs > tmp/t17-walk.txt 2>&1` 然后 Read `tmp/t17-walk.txt`。
 Expected: 不抛；`walked` 量级与 spec 的 14.5 万同数量级；`timedOut` 视本机而定，为 true 时说明预算生效（把结论写进 Task 25 的实测复跑表）。
 提交信息草稿：`feat(sysops): 搜索三适配器与通路选择（含诚实降级文案）`
 
