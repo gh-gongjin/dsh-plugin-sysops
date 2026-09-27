@@ -644,10 +644,15 @@ check('prefs-2 prefs 记录：采样档位白名单、源开关三态、脏字�
   assert.throws(() => t.parse({ collect: { keepMinutes: 0 } }), /keepMinutes/);
 });
 
-check('prefs-3 prefs 记录：告警阈值、限定目录、null 与空数组的区别', () => {
+check('prefs-3 prefs 记录：告警阈值、搜索通路、限定目录、null 与空数组的区别', () => {
   const t = prefsDomain.tables.prefs.valueSchema;
-  const r = t.parse({ search: { walkDirs: [] }, alerts: { cpu: { value: 85, consecutive: 3, cooldownSec: 600 } } });
+  const r = t.parse({ search: { walkDirs: [], port: 3417, esPath: 'D:\\tools\\es.exe' }, alerts: { cpu: { value: 85, consecutive: 3, cooldownSec: 600 } } });
   assert.deepEqual(r.search.walkDirs, [], '用户主动清空必须存得下来（不等于从未写入）');
+  assert.equal(r.search.port, 3417, 'Task 16/17 与设置页都读这一键，进不了库就是假配置');
+  assert.equal(r.search.esPath, 'D:\\tools\\es.exe');
+  assert.throws(() => t.parse({ search: { port: 0 } }), /port/);
+  assert.throws(() => t.parse({ search: { port: 70000 } }), /port/);
+  assert.throws(() => t.parse({ search: { port: '3417' } }), /port/);
   assert.throws(() => t.parse({ alerts: { cpu: { value: '85', consecutive: 3, cooldownSec: 60 } } }), /value/);
   assert.throws(() => t.parse({ alerts: { cpu: { value: 85, consecutive: 0, cooldownSec: 60 } } }), /consecutive/);
   assert.throws(() => t.parse({ alerts: { cpu: { value: 85, consecutive: 1, cooldownSec: 5 } } }), /cooldownSec/);
@@ -840,6 +845,14 @@ export const prefsRecord = record(
         }),
         walkDirs: arrayOfItem('search.walkDirs', requiredString('walkDirs[]')),
         limit: optionalInt('search.limit'),
+        /** 这两键是"用户可改"而非"装机配置"：Task 16 探测与 Task 17 搜索都从这里读，
+         *  设置页 pg4-8 也渲染它们 —— 少一键，改端口就永远存不进库。 */
+        port: makeSchema((v) => {
+          if (v === undefined || v === null) return undefined;
+          if (!Number.isInteger(v) || v < 1 || v > 65535) throw new Error(`search.port 必须是 1~65535 的整数，收到 ${JSON.stringify(v)}`);
+          return v;
+        }),
+        esPath: optionalString('search.esPath'),
       },
       'search',
     ),
@@ -4945,7 +4958,7 @@ Expected: `ERR_MODULE_NOT_FOUND` 指向 `lib/api.js`。
 
 - 表驱动：`const ROUTES = { 'GET /api/snapshot': (deps) => async () => json(res, 200, { ok: true, data: snapshotOf(deps) }), … }`，`handler(req, res, url)` 里 `const key = req.method + ' ' + url.pathname`；**命中不了就先分辨 404 与 405**（rt-11：同 path 其它方法存在 → 405，否则 404）。
 - 回环闸门（rt-12）：`remoteAddress` 必须是 `127.x` / `::1`，且 `x-forwarded-for` 一旦存在就要求每一跳都是回环，否则 403。理由写进注释：这个插件能删文件，不接受经反代转发进来的远程驱动。
-- `snapshotOf(deps)` = `{ …collect.snapshot(), alerts: { unread, rules: alerts.ruleRows(), hits: 最近 50 条 }, clean: { state, plan: 最近一次 planId } }`，键名与 rt-1 的 11 个键一致。
+- `snapshotOf(deps)` = `{ …collect.snapshot(), alerts: { unread, rules: alerts.ruleRows(), hits: 最近 50 条 }, clean: { state, plan: 最近一次 planId } }`，键名与 rt-1 断言里那 10 个键一致：Task 8 的 `snapshot()` 出八个（`cadence keepMinutes timerBackend series latest sources proc dropped`），`alerts` 与 `clean` 由本任务补两个。
 - `openSse(res)`：`writeHead(200, {'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache, no-transform','Connection':'keep-alive','X-Accel-Buffering':'no'})`，立即写一次 `: ok\n\n` 注释帧；`send(event, data)` 写 `event: <name>\ndata: <json>\n\n`；每 25s 写 `: ping\n\n` 心跳（防反代掐）；`close()` 幂等。
 - `createHub(onFirst, onLast)`：`Set` 管理连接数，`add` 时 `count===1` → `onFirst()`；`remove` 时 `count===0` → `onLast()`。`onFirst/onLast` 就是 `collect.setVisible(true/false)`（rt-3）。`res.on('close')` 里 `remove`。
 - service 事件 → SSE 帧一一对应：`metrics` / `sources` / `proc` / `alert` / `clean:progress` / `clean:item` / `clean:done` / `clean:summary` / `clean:error` / `collect:refresh`。`broadcast` 时对每个 client 的 `write` 返回值不做判断（背压不管，掉帧优于卡住服务端），但 `write` 抛错要 `remove(client)`（这是"响应写失败"这一唯一例外的落点）。
@@ -5246,7 +5259,7 @@ export function createCaps({ logger } = {}) {
    }, 'sysops:lifecycle');
    ```
    `hc-6` 断言的就是这里：退回的 `setInterval` 句柄必须被 `collect.dispose()` 清掉。
-9. `ctx.on('webserver/index-inject', ...)` 推 `{ kind:'global', name: GLOBAL_KEY, value }`，`value` 含 `panelId/label/panelOrder/routePrefix/api: ROUTE_PREFIX + '/api'`、`capabilities: caps.read()`、`capabilityRows: caps.rows()`、`cadences: COLLECT_CADENCE`、`sourceKeys: SOURCE_KEYS`、`defaults`（`{ procIntervalSec, procMaxRows, keepMinutes }`）、`redlines`（`BRANCH_IDS` 里 `b-system-dir/b-recycle-bin/b-program-files/b-registry` 四条对应的中文说明，设置页红线 notice 直接吃它，**不再在 client.js 里抄一份**）、`searchAdvice`（`ADVICE` 三条，搜索页引导卡吃它）。
+9. `ctx.on('webserver/index-inject', ...)` 推 `{ kind:'global', name: GLOBAL_KEY, value }`，`value` 含 `panelId/label/panelOrder/routePrefix/api: ROUTE_PREFIX + '/api'`、`capabilities: caps.read()`、`capabilityRows: caps.rows()`、`cadences: COLLECT_CADENCE`、`sourceKeys: SOURCE_KEYS`、`defaults`（`{ procIntervalSec, procMaxRows, keepMinutes, searchPort }` —— `searchPort` 必须在里面，Task 23 的 `probeHint` 端口号吃 `cfg().defaults.searchPort`，漏了它就是界面写死 3417 的假象）、`redlines`（`BRANCH_IDS` 里 `b-system-dir/b-recycle-bin/b-program-files/b-registry` 四条对应的中文说明，设置页红线 notice 直接吃它，**不再在 client.js 里抄一份**）、`searchAdvice`（`ADVICE` 三条，搜索页引导卡吃它）。
 10. 常驻子进程与"不代装软件"的红线：这里**只 spawn `typeperf` / `powershell`**，绝不 spawn 安装器；`everything` 只走 HTTP 与 `execFile('es.exe')`。文件头注释写明。
 
 - [ ] **Step 4: 跑测试确认通过**
@@ -5365,7 +5378,7 @@ Expected: `23/23 通过`（①15 ②8）。若 ①段因 `probe` 独立 dep 的�
 
 - [ ] **Step 1a: 建共用渲染夹具 `test/render-fixtures.mjs`**
 
-Task 20 的 ③段与 Task 21~24 的页面用例都要「把组件函数跑一遍、再遍历返回的节点树找文案与类名」，这份夹具先建好，四个任务共用一份而不是各自复制。**形状逐字照 `dsh-plugin-stock-analysis/test/plugin.test.mjs:654-697`（桩 React）与 `:781-830`（`walk`）**，只有名字与注释按本插件改：
+Task 20 的 ③段与 Task 21~24 的页面用例都要「把组件函数跑一遍、再遍历返回的节点树找文案与类名」，这份夹具先建好，四个任务共用一份而不是各自复制。**形状逐字照 `dsh-plugin-stock-analysis/test/plugin.test.mjs:654-697`（桩 React）与 `:781-830`（`walk`）**，只有名字与注释按本插件改；`clientPayload()` 是本计划新增的第四件导出，股票插件没有对应物 —— 理由是 ④~⑦段要共享同一份宿主注入载荷，四个任务各写一份 `globalThis.__SYSOPS__` 必然写出互相矛盾的字段（这次 pre-flight 就抓到 `defaults` 少一键、`sources` 挂错层级两处）：
 
 ```js
 /* test/render-fixtures.mjs —— 页面组件的渲染夹具（零依赖，桩 React） */
@@ -5436,6 +5449,33 @@ export function walk(node, out = newOut(), depth = 0) {
 /** 渲染一个函数组件并返回 walk 的结果。 */
 export function render(Comp, props = {}) {
   return walk(Comp(props));
+}
+
+/**
+ * ④~⑦段共用的宿主注入载荷，字段与 Task 19 `index-inject` 推进去的 `value` 逐键一致。
+ * 每段渲染前要 `globalThis.__SYSOPS__ = clientPayload()` 写回：client.js 的 `cfg()` 是
+ * 现取的（Task 20 的约定，只有 `PANEL_ID` 在模块求值时定死），上一段用例改过的载荷会串下来。
+ * `redlines` / `searchAdvice` 故意留空 —— 吃它们的 `pg4-5`、`pg3-3` 会自己塞，空数组能顺便
+ * 证明"宿主没给文案时界面不编第二份"。
+ */
+export function clientPayload(over = {}) {
+  return {
+    panelId: 'sysops', label: '系统运维', panelOrder: 12, routePrefix: '/sysops', api: '/sysops/api',
+    capabilities: { storageDomain: true, timer: true, webServer: true, notifications: false, autostart: false },
+    capabilityRows: [
+      { key: 'storageDomain', label: 'storageDomain（持久化）', ok: true, detail: '', fallback: '' },
+      { key: 'timer', label: 'timer（ctx.interval）', ok: true, detail: '', fallback: '' },
+      { key: 'webServer', label: 'webServer（路由 + index-inject）', ok: true, detail: '', fallback: '' },
+      { key: 'notifications', label: '系统通知（托盘）', ok: false, detail: '', fallback: '宿主不提供' },
+      { key: 'autostart', label: '开机自启常驻', ok: false, detail: '', fallback: '宿主不提供' },
+    ],
+    cadences: ['1s', '5s', 'paused'],
+    sourceKeys: ['l0', 'l1a', 'l1b', 'l2'],
+    defaults: { procIntervalSec: 3, procMaxRows: 400, keepMinutes: 30, searchPort: 3417 },
+    redlines: [],
+    searchAdvice: [],
+    ...over,
+  };
 }
 ```
 
@@ -5656,12 +5696,13 @@ Expected: 同样 `35/35`（本文件无真机用例）。
 
 - [ ] **Step 1: 写失败的测试（④段：监控页）**
 
-在 ③段之后、文件末尾统计之前追加。渲染前必须先把完整载荷写回 `globalThis.__SYSOPS__`（Task 20 已把 `cfg()` 改成现取，所以这一步在 ④段才有效）。
+在 ③段之后、文件末尾统计之前追加。渲染前必须先把完整载荷写回 `globalThis.__SYSOPS__`（Task 20 已把 `cfg()` 改成现取，所以这一步在 ④段才有效）—— 用夹具里的 `clientPayload()`，④~⑦段共享同一份，不许在本段手写第二份字面量。
 
 ```js
 /* ④段：监控页 —— 纯函数级视图助手 + 组件渲染遍历 */
-const { walk, render } = await import('./render-fixtures.mjs');
+const { walk, render, clientPayload } = await import('./render-fixtures.mjs');
 MON = CLIENT.__test.monitor;
+globalThis.__SYSOPS__ = clientPayload();
 
 /** 快照夹具：形状与 Task 18 的 snapshotOf() 逐键一致，不许多造字段。 */
 function SNAP(over = {}) {
@@ -6238,10 +6279,10 @@ Expected: 同样 `77/77`（本文件始终无真机用例；Everything 相关真
 **Interfaces:**
 - Consumes: `GET /api/prefs` 与 `POST /api/prefs`（patch 语义，Task 3 的 `normalize` 返回归一化全量）、`GET /api/rules` + `POST /api/rules/{add,remove,toggle}`、`GET /api/caps`（Task 19 的 `caps.rows()`）、Task 19 载荷的 `redlines` / `capabilityRows` / `cadences` / `defaults`、Task 21 的规则置灰同源数据（`snap.alerts.rules`）
 - Produces（`__test.settings`）：
-  - `SettingsPage({ prefs, rules, caps, snap, err, saving, onPatch, onRuleAdd, onRuleToggle, onRuleRemove, onSave })`
   - `SettingsPage({ prefs, rules, caps, capRows, snap, err, saving, onPatch, onRuleAdd, onRuleToggle, onRuleRemove, onSave })`（`capRows` 由 `SysopsPage` 把 `cfg().capabilityRows` 传下来 —— 页面不自己读全局，测试才能塞假能力表）
-  - `SOURCE_ROWS(prefs, snap) → [{ key, name, tier, desc, cadText, switch: null | { on, disabled, key } }]`（恰好四行：L0 / L1a / L1b / L2；**L0 的 `switch` 是 `null`**，档位入口只在监控页那一处）
+  - `SOURCE_ROWS(prefs, snap) → [{ key, name, tier, desc, cadText, switch: null | { on, disabled, key } }]`（恰好四行：L0 / L1a / L1b / L2；源开关读 **`prefs.sources`**，与 Task 3 的 `prefsRecord` 同级，**不在 `prefs.collect` 里**；**L0 的 `switch` 是 `null`**，档位入口只在监控页那一处）
   - `ruleCells(rules) → [{ n, glob, ageText, kind, pill, blocked, on, denyWhy }]`（`pill ∈ '内置'|'本机'`；`denyWhy` 原样透传宿主 `guardDenied.why`）
+  - `ruleStateText(v) → string`（`null` / `[]` / 数组三态，见 Step 3 末条）
   - `patchBody(patch) → { prefs: patch }`（**只发差量**，服务端 normalize 后回全量）
   - `capCells(rows) → [{ label, value, cls, detail, hasSwitch }]`
   - `SAVE_DISABLED(prefs, caps, err) → { disabled, why }`
@@ -6254,10 +6295,14 @@ Expected: 同样 `77/77`（本文件始终无真机用例；Everything 相关真
 /* ⑦段：设置页 —— 开关、规则、能力表与只读闸门 */
 SET = CLIENT.__test.settings;
 
-const PREFS = (over = {}) => ({ collect: { cadence: '1s', keepMinutes: 30, sources: { l0: true, l1a: true, l1b: false, l2: true }, procIntervalSec: 3, procMaxRows: 400 },
+/** 逐键照 Task 3 `prefsRecord`（含 Task 12 追加的 `clean` 组）：`sources` 与 `collect` **同级**。
+ *  `procIntervalSec` / `procMaxRows` 不在这里 —— 它们是宿主配置（Task 19 载荷 `defaults`），不是用户偏好；
+ *  界面要显示就经 `cfg().defaults` 取，塞进 prefs 夹具会让设置页读一个服务端永不返回的字段。 */
+const PREFS = (over = {}) => ({ collect: { cadence: '1s', keepMinutes: 30 },
+  sources: { l0: true, l1a: true, l1b: false, l2: true },
   clean: { quarantineDir: '%LOCALAPPDATA%\\dsh-plugin-sysops\\quarantine', keepDays: 7, after: 'log' },
   search: { mode: 'everything', port: 3417, esPath: '', walkDirs: [], limit: 200 },
-  alerts: {}, ...(over || {}) });
+  alerts: {}, ...over });
 const CAPS_OK = { storageDomain: true, timer: true, webServer: true, notifications: false, autostart: false };
 const CAP_ROWS = [
   { key: 'storageDomain', label: 'storageDomain（持久化）', ok: true, detail: '', fallback: '' },
@@ -6388,7 +6433,8 @@ Expected: ⑦段全红（`__test.settings` 未导出），①~⑥段仍 `77/77` 
 - `SAVE_DISABLED` 的三个来源要按优先级：`caps.storageDomain === false` → 「配置只读：宿主未提供 storageDomain」；`err.code === 'PREFS_UNAVAILABLE'` → 「上一次保存失败（501），原因同上」；`saving === true` → 「保存中…」。禁用了就一定有 `why` 显示在旁边，**不允许只变灰**。
 - `capCells(rows)` 直接吃 `cfg().capabilityRows`（= Task 19 `caps.rows()`）；`ok === true` → `提供`（绿 pill），`ok === false && NEVER_PROVIDED` → `宿主不提供`（灰 pill），其余 `ok === false` → `fallback` 文案 + 「已降级」（琥珀 pill）。**能力表五行一律不给开关**（`pg4-9`）。
 - `ruleStateText(v)`：`null` → 「本机尚未写入清理规则，当前只用内置库」；`[]` → 「本机规则已全部清空」；数组 → 「本机规则 N 条」。三态分开是 spec §3.2 的硬要求（`null` ≠ `[]`）。
-- 表单控件全部自研：档位/after 用 `.so-seg`，数值输入用 `<input class="so-input">` + 提交时 `clamp`（钳制逻辑与 Task 3 的 `resolveConfig` 一致，**界面钳一次是为了不出现"填 9999 保存成功但实际跑 120"的错觉**，宿主仍要再钳一次）。`pg4-*` 不测交互（桩 React 不持久化状态），钳制的真断言在 `test/prefs.test.mjs`（Task 3）。
+- 表单控件全部自研：档位/after 用 `.so-seg`，数值输入用 `<input class="so-input">` + 提交时 `clamp`（钳制范围与 Task 19 的 `resolveConfig`、Task 3 的 schema 区间一致，**界面钳一次是为了不出现"填 9999 保存成功但实际跑 120"的错觉**，宿主仍要再钳一次）。`pg4-*` 不测交互（桩 React 不持久化状态），钳制的真断言在 `test/prefs.test.mjs`（Task 3）。
+- 搜索通路两字段（`pg4-8`）的**取值来源分两层，别混**：当前生效值读 `prefs.search.port` / `prefs.search.esPath`（用户设过的，Task 3 已把这两键收进 schema），占位与回落读 `cfg().defaults.searchPort`（Task 19 载荷）。保存走 `patchBody({ search: { port, esPath } })`。
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -6463,7 +6509,7 @@ Expected: 四次变异**都**产生 FAIL；任何一次全绿说明对应用例�
 `tmp/preview.html` 的构造（形状照 `../dsh-plugin-stock-analysis/tmp/dom.html`）：
 1. `<style>` 内联宿主 token 的 `:root` 变量（从 `prototype/index.html` 的 `:root` 逐条搬，`--dsw-alias-*` 全套）；
 2. `<script src="./react.js">`、`<script src="./react-dom.js">`；
-3. 一段桩：`globalThis.__SYSOPS__ = { panelId:'sysops', label:'系统运维', panelOrder:12, routePrefix:'', api:'/sysops/api', capabilities:{...}, capabilityRows:[...5 行], cadences:['1s','5s','paused'], sourceKeys:['l0','l1a','l1b','l2'], defaults:{ procIntervalSec:3, procMaxRows:400, keepMinutes:30, searchPort:3417 }, redlines:[...4 条], searchAdvice:[...3 条] }`（`routePrefix` 给空是故意的？不给空，**必须给 `/sysops`**，否则 Task 20 之后 `apply` 直接 return，预览页什么都没有）；
+3. 一段桩：`globalThis.__SYSOPS__ = { ... }` —— **键集合照 `test/render-fixtures.mjs` 的 `clientPayload()` 逐键抄**（这里不能 import 那个 `.mjs`，浏览器半边是普通 `<script>`），值把两份演示用文案补上：`redlines` 四条、`searchAdvice` 三条、`capabilityRows` 五行。`routePrefix` 必须是 `/sysops`，给空会让 Task 20 的 `apply` 首行直接 return，预览页一片空白。
 4. `globalThis.window.__ModuleLoader__ = { load: (d) => { const C = d.factory((n) => n === 'react' ? globalThis.React : (()=>{throw new Error(n)})()); window.__C = C; } }`；
 5. `<script src="../client.js">`，随后 `C.apply(ctx)`，`ctx` 是最小宿主桩：`{ effect: (f) => f(), slots: { inject: (n, cb) => cb(), register: (o, Comp) => { document.getElementById('root').replaceChildren(ReactDOM.createElement(Comp, {})); return () => {}; } } }`；
 6. 桩 `globalThis.fetch`：`/sysops/api/stream` 返回一个每 900ms 推一帧 `metrics` 的 `ReadableStream`，`snapshot/prefs/rules/search/search/probe/clean/state/clean/logs/quarantine` 返回内置 fixture JSON（数值用 Task 8/15/16/17 测试里的同一份夹具，**不要另编一套**）。
