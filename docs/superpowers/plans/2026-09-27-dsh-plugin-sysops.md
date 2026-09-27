@@ -6028,7 +6028,9 @@ check('pg2-8 请求体结构上不含路径：applyBody 只出三键（与宿主
 });
 
 check('pg2-9 暂存目录显示 prefs 的实配值，不照抄原型的演示路径', () => {
-  const txt = CLEAN.quarantineText({ clean: { quarantineDir: '%LOCALAPPDATA%\\dsh-plugin-sysops\\quarantine', keepDays: 7 } });
+  // 夹具必须是**展开后的绝对路径**：Task 14 的 `prefq-1` 让 prefs schema 直接拒掉未展开的 `%LOCALAPPDATA%\q`，
+  // 所以库里永远不可能出现 `%` 形 —— 拿它当 prefs 值是假夹具（界面无条件渲染 prefs 实配值）。
+  const txt = CLEAN.quarantineText({ clean: { quarantineDir: 'C:\\Users\\gongj\\AppData\\Local\\dsh-plugin-sysops\\quarantine', keepDays: 7 } });
   assert.ok(txt.includes('dsh-plugin-sysops\\quarantine'), txt);
   assert.ok(!txt.includes('.dsh-quarantine'), '原型里那串是演示值：' + txt);
   assert.match(txt, /保留 7 天|7 天/);
@@ -6092,7 +6094,7 @@ Expected: ⑤段全红（`__test.clean` 未导出），①~④段仍 `51/51` 绿
 - `planRows(plan, sel)` 的 `accText` 用 `fmtAge(now - atime)`（Task 20），`riskPill` 三态：`guardDenied → '已拒绝'`、`riskLevel==='mid' → riskWhy`、否则 `'无'`；`guardDenied.why` 原样显示（文案来自宿主 `check()` 的 `why`，**页面不自己造句**）。
 - `selTotals` 的可选集合定义：`!guardDenied && sel.has(id)`；`risky`/`rejected` 计数用来渲染 `pg2-5`/`pg2-6` 的说明文字。`selectAllIds(plan)` = 未拒 + `riskLevel==='low'` 的 id 列表（与原型 `btnSelAll` 同规则），并让「全选已跳过 N 项标风险的（应用正在运行）」这句话由 `risky` 驱动。
 - `applyBody` 是**唯一**构造执行请求的地方，签名 `applyBody(planId, ids, mode)`；`mode` 只能取宿主 `MODES` 三值（Task 15），页面不引入第四种。注释写死理由：路径永远来自宿主侧快照，前端连路径都不发（spec §3.3）。
-- `quarantineText(prefs)` 直接渲染 `prefs.clean.quarantineDir` 与 `keepDays`；**prefs 没设过时回落到 `cfg().defaults.quarantineDir`**（Task 19 载荷里宿主展开好的绝对路径），两条都没有才渲染「尚未设置暂存目录」—— 一律不许渲染出字面量 `undefined`（`optionalString` 与 `prefq-1` 的语义决定了"空"在服务端就是 `undefined`，不是 `''`）。**这里收口计划期发现的口径冲突**：原型 `.dsh-quarantine\2026-09-27\` 是演示串，运行时的权威值来自 prefs（Task 3 的 `expandPath` 解析 `%LOCALAPPDATA%\dsh-plugin-sysops\quarantine`）。Task 25 回写 spec §8 未决项时把这条记为已定。
+- `quarantineText(prefs)` 直接渲染 `prefs.clean.quarantineDir` 与 `keepDays`；**prefs 没设过时回落到 `cfg().defaults.quarantineDir`**（Task 19 载荷里宿主展开好的绝对路径），两条都没有才渲染「尚未设置暂存目录」—— 一律不许渲染出字面量 `undefined`（`optionalString` 与 `prefq-1` 的语义决定了"空"在服务端就是 `undefined`，不是 `''`）。**这里收口计划期发现的口径冲突**：原型 `.dsh-quarantine\2026-09-27\` 是演示串，运行时的权威值来自 prefs（展开由宿主做：Task 14 的 `prefq-1` 规定 prefs 只收展开后的绝对路径，未展开的 `%...%` 形在 schema 层就被拒；Task 19 把内置默认以展开态放进 `defaults.quarantineDir`）。Task 25 回写 spec §8 未决项时把这条记为已定。
 - 按钮禁用必须带原因：`sel.size === 0 → 「勾选至少一项」`、`caps.storageDomain === false → 「配置只读：宿主未提供 storageDomain」` 且两个写按钮 `disabled`。
 - 所有错误渲染在触发它的那张卡内部（`.so-notice-red` / `.so-notice-amber`），**无浮层**（cf-12 与 `pg2-13` 双钉）。
 
@@ -6299,11 +6301,15 @@ SET = CLIENT.__test.settings;
 
 /** 逐键照 Task 3 `prefsRecord`（含 Task 12 追加的 `clean` 组）：`sources` 与 `collect` **同级**。
  *  `procIntervalSec` / `procMaxRows` 不在这里 —— 它们是宿主配置（Task 19 载荷 `defaults`），不是用户偏好；
- *  界面要显示就经 `cfg().defaults` 取，塞进 prefs 夹具会让设置页读一个服务端永不返回的字段。 */
+ *  界面要显示就经 `cfg().defaults` 取，塞进 prefs 夹具会让设置页读一个服务端永不返回的字段。
+ *  两处夹具必须与 Task 3 / Task 14 的归一语义一致，否则设置页会被假夹具带偏：
+ *  ① `quarantineDir` 只能是**展开后的绝对路径**（`prefq-1` 在 schema 层就拒 `%...%`，库里永不出现未展开形）；
+ *  ② `esPath` 是 `optionalString`，空串会被归一成 `undefined`，所以 normalize 之后的夹具里是 `undefined` 而不是 `''`
+ *     —— `pg4-8` 正是靠这条验输入框不渲染出字面量 `undefined`。 */
 const PREFS = (over = {}) => ({ collect: { cadence: '1s', keepMinutes: 30 },
   sources: { l0: true, l1a: true, l1b: false, l2: true },
-  clean: { quarantineDir: '%LOCALAPPDATA%\\dsh-plugin-sysops\\quarantine', keepDays: 7, after: 'log' },
-  search: { mode: 'everything', port: 3417, esPath: '', walkDirs: [], limit: 200 },
+  clean: { quarantineDir: 'C:\\Users\\gongj\\AppData\\Local\\dsh-plugin-sysops\\quarantine', keepDays: 7, after: 'log' },
+  search: { mode: 'everything', port: 3417, esPath: undefined, walkDirs: [], limit: 200 },
   alerts: {}, ...over });
 const CAPS_OK = { storageDomain: true, timer: true, webServer: true, notifications: false, autostart: false };
 const CAP_ROWS = [
@@ -6373,7 +6379,8 @@ check('pg4-6 新增规则的拒绝文案就地落，不弹浮层', () => {
 
 check('pg4-7 暂存目录渲染 prefs 实配值 + 到期提醒不自动删 + after 两档', () => {
   const out = PAGE({});
-  assert.ok(out.has('%LOCALAPPDATA%\\dsh-plugin-sysops\\quarantine'), '显示 prefs 里的原始值（宿主展开绝对路径时另附一行）');
+  assert.ok(out.has('C:\\Users\\gongj\\AppData\\Local\\dsh-plugin-sysops\\quarantine'), '显示 prefs 的实配值（prefs 里只会是展开后的绝对路径，`prefq-1` 已拒未展开形）');
+  assert.ok(!out.has('%LOCALAPPDATA%'), '界面不得把 `%...%` 当可配置值展示：prefs schema 里它不可能存在');
   assert.ok(out.has('到期提醒，不自动删'));
   assert.ok(out.has('什么都不做') && out.has('写一条留痕并刷新曲线'));
 });
@@ -6544,7 +6551,7 @@ Expected：输出六行 `{ name, value, unit, specValue, driftPct }`，脚本内
 1. **§1.2 实测代价表**：`typeperf -sc 3（常驻流式）` 一行改为定窗续采实况 ——「`-sc 0` 单样本即退出，改为每窗 `-sc 30 -si 1` 续采；暖身 218.9ms，窗口衔接处有约 1 个采样周期空隙」；新增一行「`Get-Counter -ComputerName .` 输出为 GBK 码页 → 解码代价已计入适配器，中文计数器名不再乱码」；`Get-CimInstance` 行的结论从「5s 刷新」改为「常驻单轮 ≈2.5s，故 `procIntervalSec` 默认 3s」。
 2. **§3.2 配置读写**：`PATCH /sysops/api/prefs`、`PATCH /sysops/api/rules` 两处方法名改为 `POST /sysops/api/prefs`、`POST /sysops/api/rules/add|toggle|remove`，并补一句理由：「宿主 webServer 只在 POST 下稳定给出 body，写接口统一 POST，GET 只读」（这是计划期实测修正，不是设计变更）。
 3. **§3.4 搜索**：`GET /sysops/api/search?q&mode&limit` 保留，补 `POST /sysops/api/search/reprobe`（缓存 30s，改配置后需显式失效）；并加一行状态说明：「本机未装 Everything（`C:\Program Files\Everything` 不存在、`where es.exe` 无命中、`curl 127.0.0.1:3417` 拒连），故两个 Everything 适配器标『未在本机验证』，`walk` 是当前唯一实跑通路」。
-4. **§8 未决项表**：三行全部收口 —— 内置清理规则「已定：只收本机实测存在的路径，共 13 条」；暂存目录「已定：`%LOCALAPPDATA%\dsh-plugin-sysops\quarantine`，界面渲染 prefs 实配值，原型里的 `C:\Users\gongj\.dsh-quarantine\2026-09-27\` 是演示串」；曲线保留窗口「已定：30min，ring 内存实测 4 源 × 1800 点 < 1MB」；末行 spec 位置「保留在 `docs/superpowers/specs/`，不与兄弟插件的 `docs/design-spec.md` 统一」。
+4. **§8 未决项表**：三行全部收口 —— 内置清理规则「已定：只收本机实测存在的路径，共 13 条」；暂存目录「已定：默认落点 `%LOCALAPPDATA%\dsh-plugin-sysops\quarantine`（由宿主展开成绝对路径后放进 Task 19 载荷 `defaults`；prefs 只存展开后的绝对路径，`prefq-1` 拒未展开形），界面渲染 prefs 实配值、无实配时回落 `defaults`，原型里的 `C:\Users\gongj\.dsh-quarantine\2026-09-27\` 是演示串」；曲线保留窗口「已定：30min，ring 内存实测 4 源 × 1800 点 < 1MB」；末行 spec 位置「保留在 `docs/superpowers/specs/`，不与兄弟插件的 `docs/design-spec.md` 统一」。
 
 - [ ] **Step 8: 收尾（本工作区不是 git 仓库）**
 
