@@ -4304,6 +4304,17 @@ Expected: `12/12 通过`，退出码 0。
 Run: `SKIP_LOCAL=1 node test/clean.test.mjs`
 Expected: `11/11 通过` + 1 行 `SKIP cln-真机-1`。
 
+> **执行后回填（2026-09-28 Task 12 修复轮，Ruling-77）**：评审 F-1 判为数据丢失级 ——
+> 深度截断 / `stop()` / `maxEntries` 触顶时**没走完**的条目会带着半截的 `size/count/newest` 进 `items`，
+> 而下游 `delete-dir` 是递归删目录，re-stat 闸门兜不住「扫描前就存在、因而没被看见」的新文件。
+> 修复给候选加内部字段 `partial`/`pending`，定稿前先判不完整 ⇒ 只进 `skipped`（`code: 'INCOMPLETE'`），
+> **不往 `items` 加字段**（Task 13 的 `record()` 会静默丢未声明字段）。
+> 新增 `cln-9c`、`cln-5b`，并在 `cln-7` 里补断言（不新建用例，Ruling-77 第 3 点）：`pending` 判据的证人是
+> 「第一层放一个目录候选 + 第 2 次回调才 `stop()`」这组夹具，外加**同夹具不收手的对照跑** ——
+> 没有对照就分不清「判据拿掉了它」还是「本来就不进清单」（Ruling-79）。
+> 门禁随之变：`node test/clean.test.mjs` ⇒ **`14/14`**（①13 + 真机 1），`SKIP_LOCAL=1` ⇒ **`13/13` + 1 行 SKIP**。
+> 下游任务书里的 clean 读数一律以 **①=13（含真机 1 = 14）** 为基数，不要照抄本文件里更早的 ①11/①12。
+
 - [ ] **Step 5: 真机耗时实测（spec §1.2 的 7.3s 结论要跟着走）**
 
 **必须落成文件再跑，不许用 `node -e` / `node --input-type=module -e` 内联**：本机 bash 会吃脚本里的 `\` 转义（这是本仓库执行至今的硬约束），原稿那版还有个 `path=path0=await import(...)` 笔误，内联跑一次就炸一次。写 `tmp/t12perf.mjs`（`tmp/` 已在 `.gitignore` 里，不提交）：
@@ -4384,7 +4395,7 @@ Expected: 退出码 0；`walked` 与耗时同量级合理 —— 同机现采的
 >
 > **T13-C（Minor）**：本任务的旁路读数 `alerts 29/29` 已过期，Task 10 修复轮后是 **33/33**（三处已同步改）。
 >
-> 计数随之变：②段 `rec-1..rec-9` + 新增 `rec-10` = **10** 例 ⇒ 门禁 `22/22`（①11 + 真机 1 + ②10），`SKIP_LOCAL=1` 下 `21/21` + 1 行 SKIP。
+> 计数随之变：②段 `rec-1..rec-9` + 新增 `rec-10` = **10** 例 ⇒ 门禁 `24/24`（①13 + 真机 1 + ②10 —— ① 段基数已由 Task 12 修复轮（Ruling-77/79）从 11 抬到 13，见 Task 12 Step 4 上方的回填），`SKIP_LOCAL=1` 下 `23/23` + 1 行 SKIP。
 
 
 - [ ] **Step 1: 建 records 域（改名 + 追加两表）**
@@ -4608,8 +4619,8 @@ Expected: `rec-1` FAIL（`lib/alerts/spec.js` 已被改名 → `ERR_MODULE_NOT_F
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `node test/clean.test.mjs`
-Expected: `22/22 通过`（①11 + 真机 1 + ②10 —— SKIP_LOCAL 下 21/21 + 1 SKIP）
-Run: `SKIP_LOCAL=1 node test/clean.test.mjs` → `21/21 通过` + 1 行 `SKIP cln-真机-1`
+Expected: `24/24 通过`（①13 + 真机 1 + ②10 —— SKIP_LOCAL 下 23/23 + 1 SKIP）
+Run: `SKIP_LOCAL=1 node test/clean.test.mjs` → `23/23 通过` + 1 行 `SKIP cln-真机-1`
 Run: `node test/alerts.test.mjs` → `33/33 通过`（改名回归）
 提交信息草稿：`refactor(sysops): 记录域改名 records 并加清单快照/执行留痕仓储`
 
@@ -4651,7 +4662,7 @@ Run: `node test/alerts.test.mjs` → `33/33 通过`（改名回归）
 | **T14-F**（Minor） | `freeDest` 生成的是 `2-name` **前缀**，文件头注释写「加 `-2` / `-3` 后缀」 | 注释跟代码（前缀对 `basename` 稳定，行为不变）；用例标题同改为「加序号前缀」 |
 | **T14-G**（Minor） | `DEFAULT_QUARANTINE` 实现直拼且形参改名，`prefq-4` 拿 `path.join` 对比 ⇒ 入参带尾分隔符时多一个反斜杠，断言红 | 实现改用 `node:path` 的 `join`，形参名回到 `appData` |
 | **T14-H**（Minor，时区耦合） | `dayDir` 取**本地**日期，原稿夹具喂 `new Date('2026-09-27T10:00:00Z')`：本机 +08 同日所以 `q-1` 的 `/2026-09-27/` 成立，换 UTC 负偏移机器会红。`q-7` 原稿的 `new Date('2026-09-07T23:30:00+08:00')` 同病（+14 机器上本地是 09-08） | 两处夹具都改本地构造：`now` 用 `new Date(2026, 8, 27, 10, 0, 0)`、`q-7` 用 `new Date(2026, 8, 7, 23, 30, 0)`，断言不动 —— 测试与所在时区解耦 |
-| **T14-I**（计数） | Step 4 原稿期望 `28/28 (①12 ②9 ③7)`：②9 已被 Task 13 的 `rec-10` 变成 ②10；③段随 T14-C/D 加 `q-8`、`q-9` ⇒ ③=9 | 新期望 **`31/31`**（①11 + 真机 1 + ②10 + ③9），`SKIP_LOCAL=1` 下 `30/30` + 1 行 SKIP。prefs 侧 ⑤4 ⇒ **`28/28`**（①3 ②4 ③6 ④11 ⑤4，与 Task 11 闭环后的 `24/24` 衔接） |
+| **T14-I**（计数） | Step 4 原稿期望 `28/28 (①12 ②9 ③7)`：②9 已被 Task 13 的 `rec-10` 变成 ②10；③段随 T14-C/D 加 `q-8`、`q-9` ⇒ ③=9；①段又随 Task 12 修复轮（Ruling-77/79，新增 `cln-9c`/`cln-5b`）由 12 变 **14** | 新期望 **`33/33`**（①13 + 真机 1 + ②10 + ③9），`SKIP_LOCAL=1` 下 `32/32` + 1 行 SKIP。prefs 侧 ⑤4 ⇒ **`28/28`**（①3 ②4 ③6 ④11 ⑤4，与 Task 11 闭环后的 `24/24` 衔接） |
 
 **另记（已落进 Step 1）**：`prefq-1` 里 `assert.throws(…, /guard|受保护/)` 这条**必然命中** —— spec 抛的 message 前缀就含「未通过 guard」，与路径是否真被拒无关；哪天 `check()` 不再拒系统目录，这条仍然绿。收紧为 `/系统目录|b-system-dir/`。另外两条（`/盘符/`、`/变量/`）现采已证实各自 code 的 `why` 里有对应词，保留。
 
@@ -5002,8 +5013,8 @@ clean: record({
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `node test/prefs.test.mjs` → `28/28 通过`（①3 ②4 ③6 ④11 ⑤4）
-Run: `node test/clean.test.mjs` → `31/31 通过`（①11 + 真机 1 + ②10 + ③9 —— T14-I；②10 是 Task 13 的 `rec-10`，别照抄本任务书里更早的 ②9）
-Run: `SKIP_LOCAL=1 node test/clean.test.mjs` → `30/30 通过` + 1 行 `SKIP cln-真机-1`
+Run: `node test/clean.test.mjs` → `33/33 通过`（①13 + 真机 1 + ②10 + ③9 —— T14-I；②10 是 Task 13 的 `rec-10`，别照抄本任务书里更早的 ②9；①13 是 Task 12 修复轮新增的 `cln-9c`/`cln-5b`）
+Run: `SKIP_LOCAL=1 node test/clean.test.mjs` → `33/33 通过` + 1 行 `SKIP cln-真机-1`
 Run: `node test/alerts.test.mjs` → `33/33 通过`；`node test/guard.test.mjs` → `19/19 通过`；`node test/collect.test.mjs` → `48/48 通过`
 
 - [ ] **Step 5: 真机验一次「同盘 move + stats 非零」（T14-E）**
@@ -5081,10 +5092,26 @@ Expected 六行：`输入形状 5 ["F:","dsh-plugins","dsh-plugin-sysops","tmp",
 - Consumes: `check` / `checkOperation`（Task 2）、`createPlanStore` / `createLogStore`（Task 13）、`createQuarantine`（Task 14）、`createScanner`（Task 12）、`createRuleStore`（Task 11）、`prefs.clean.after`
 - Produces:
   - `createExecutor({ fsMod, planStore, logStore, quarantine, logger, now, onEvent })` → `{ apply({ planId, itemIds, mode }) → Promise<Summary> }`
-  - `Summary = { planId, logId, ok, skipped, failed, rejected, bytesFreed, beforeFree, afterFree, results: [item result] }`
+  - `Summary = { planId, logId, ok, skipped, failed, rejected, bytesFreed, beforeFree, afterFree, results: [item result] }`，整批拒时另有 **`error`**（`GUARD_OPERATION_DENIED` / `SYSOPS_RECORDS_NOT_FOUND` / `SYSOPS_QUARANTINE_UNAVAILABLE`，见 T15-B/T15-E —— Task 18 的 `statusFor(code)` 要能查到这三条）
   - item result：`{ id, state: 'ok'|'skipped'|'rejected-snapshot'|'rejected-unknown'|'failed', errnoText, dest?, path }`
-  - `createCleanService({ ruleStore, makeScanner, makeExecutor, planStore, logStore, getPrefs, fsMod, osMod, pathMod, logger, now })` → `{ startScan(), stopScan(), state(), apply({planId,itemIds,mode}), plans({limit}), logs({limit}), unfinished(), quarantineStats(), onEvent(cb) → unsub, dispose() }`
+  - `createCleanService({ ruleStore, makeScanner, makeExecutor, makeQuarantine, planStore, logStore, getPrefs, fsMod, osMod, pathMod, logger, now })` → `{ startScan(), stopScan(), state(), apply({planId,itemIds,mode}), plans({limit}), logs({limit}), unfinished(), quarantineStats(), onEvent(cb) → unsub, dispose() }`
+  - **`makeQuarantine({ rootDir, fsMod, pathMod, logger, now, forbiddenPrefixes })` 是 Task 14 那条红线的唯一真实喂入者**（T15-A）：`rootDir` 取 `prefs.clean.quarantineDir ?? DEFAULT_QUARANTINE(join(osMod.homedir(), 'AppData', 'Local'))`，`forbiddenPrefixes` 取 `(await ruleStore.activeRules()).map((r) => r.dir)`。
   - 事件：`{type:'clean:progress', …}` / `{type:'clean:done', plan}` / `{type:'clean:item', …}` / `{type:'clean:summary', summary}` / `{type:'clean:error', where, error}`
+
+- [ ] **Step 0: 预检裁定（Ruling-76，控制器 2026-09-28 现采，执行者照此实现，不要再自行发明）**
+
+| 编号 | 问题 | 裁定（已落进下面的 Step 1/2/4/5/6 代码） |
+|---|---|---|
+| **T15-A**（Critical） | **Task 14 的暂存红线没有任何构造者。** `createQuarantine` 在 Consumes 里列着，但 `createCleanService` 的参数表里根本没有 quarantine；Step 4 的 service 要点通篇不提它。`quarantineStats()` 同样无人实现其来源。⇒ 「暂存目录不得落在被清理路径内」这条只活在 Task 14 的测试里（Ruling-72 的「另记」预言的正是这个），`prefs.clean.quarantineDir` 存进去后运行时没人读 | service 加 `makeQuarantine` 工厂参数，**每次 `apply` / `quarantineStats` 现造**（prefs 与规则集都会在两次调用之间变）：`rootDir = getPrefs().clean?.quarantineDir ?? DEFAULT_QUARANTINE(join(osMod.homedir(),'AppData','Local'))`，`forbiddenPrefixes = (await ruleStore.activeRules()).map(r => r.dir)`。新增 **`cs-8`** 断这两样真的传进去了 |
+| **T15-B**（Critical） | **`stash()` 的抛异常没人接。** Task 14 Interfaces 明写「配置错整批停 ⇒ 批次外层 catch」，而 Step 4 的条目循环里 `await quarantine.stash(path)` 抛出的话会一路穿透 `apply()` → HTTP 层 500，用户看到的是「服务器错误」而不是「暂存目录配错了」 | executor 在 `mode === 'move-to-quarantine'` 时**先于条目循环** `await quarantine.ensureRoot()` 并 try/catch ⇒ 抛即整批返回 `{ error:'SYSOPS_QUARANTINE_UNAVAILABLE', ok:0, skipped:0, failed:0, rejected:0, results:[] }` 且**一个条目都不碰**。`delete-file` / `delete-dir` **不得**调 `ensureRoot()`（删除模式不该被暂存配置错拖死）。新增 **`ex-12`** 钉住这两半 |
+| **T15-C**（计数） | Step 5 期望 `46/46（①12 ②9 ③7 ④11 ⑤7）`、`SKIP_LOCAL 40/40` —— ②9/③7 是 Task 13/14 闭环前的旧账（②已随 `rec-10` 变 10、③已随 `q-8`/`q-9` 变 9、①已随 Task 12 修复轮变 13+真机 1），且本任务自己还要加 `ex-9b`/`ex-12`/`cs-8`/`cs-9` | 新期望 **`55/55`**（①13 含真机 1 + ②10 + ③9 + ④13 + ⑤9），`SKIP_LOCAL=1` ⇒ **`54/54` + 1 行 SKIP**。两行草稿读数（46、40）都是错的，一并作废；④/⑤ 以本任务书逐段清点为准，派单前控制器会再核对一次 |
+| **T15-D**（Critical，硬约束） | Step 6 用 `node --input-type=module -e "…"`，里面还全是字面 `\` 与 `'C:\\\\*'` 这种双层转义 —— 与本仓库硬约束冲突（同 T14-E），且派单途中 `\` 会再折半一次 | 落 `tmp/t15e2e.mjs`，反斜杠一律 `String.fromCharCode(92)`，打印段数自证。**样本根从 `%TEMP%` 挪进仓库 `tmp/sysops-clean-e2e`**：这是全仓库唯一真删文件的用例，自建自删的目录比动用户真实 Temp 更守得住「不碰范围外之物」；现采（`tmp/t14g.txt`）证明 guard 对仓库内绝对 F: 路径 `allow=true`，红线不受影响 |
+| **T15-E**（Important） | `Summary` 类型里没有 `error` 键，而 ex-4 断 `sum.error === 'GUARD_OPERATION_DENIED'`、ex-11 断 `sum.error === 'SYSOPS_RECORDS_NOT_FOUND'`；Task 18 的 `statusFor(code)` 按 code 分支 | 三个整批拒的 code 写进 Produces（Interfaces 已改），Task 18 派单时把这三条一起给它 |
+| **T15-F**（Important） | `cs-4` 标题写「state.stopped 标出」，断言却是 `svc.__stopped` —— 那是**桩自己**在 `stop()` 里挂到 `svc` 上的属性，与 service 的 `state().stopped` 无半点关系；Task 22 的扫描条吃的正是 `state().stopped` | 桩改成往 `stoppedCalls` 里记一笔，断 `stoppedCalls.length === 1` **且** `svc.state().stopped === true` |
+| **T15-G**（Minor） | `ex-9` 一条用例里同时验「stash 成功带 dest」与「stash 失败判 skipped + why」两个分支（违反本仓库「一个用例一个分支」） | 拆成 `ex-9`（成功，断 `dest` 与 `state:'ok'`）与 `ex-9b`（失败，断 `skipped` + `errnoText` 含原因 + **源文件仍在**） |
+| **T15-H**（Minor） | Step 4 引用的用例名 `csb-7` 不存在（⑤段是 `cs-1..cs-7`）；`ex-8` 一条用例 for 循环三种 errno —— 这是**同一个分支的三种拼写**，与 T15-G 不同，保留 | `csb-7` 改 `cs-7`；`ex-8` 不动，但每轮要多断一句 `sum.skipped === 1`，免得循环里第二次迭代继承了第一次的计数 |
+
+现采补证（本轮 `node tmp/t14g.mjs` → `tmp/t14g.txt`）：`check()` 对仓库内绝对 F: 路径 `allow=true`、对相对路径 `GUARD_NO_DRIVE`、对折半畸形串 `allow=true` ⇒ 凡探针脚本，路径先 `path.resolve` 再交给 guard。另：`GUARD_CODE.OPERATION_DENIED` 的字面量现采为 `GUARD_OPERATION_DENIED`（`lib/clean/guard.js:37`），ex-4 的断言串成立；`RECORDS_ERROR.NOT_FOUND` 的字面值由 Task 13 定为 `SYSOPS_RECORDS_NOT_FOUND`（计划 `:4606`），ex-11 同串。
 
 - [ ] **Step 1: 写失败的测试（④段 executor）**
 
@@ -5132,7 +5159,13 @@ function exWorld(items, over = {}) {
   const planStore = createPlanStore({ getFacility: () => facility, logger: { warn() {} }, now: () => 5000, newId: () => 'p-1' });
   const logStore = createLogStore({ getFacility: () => facility, logger: { warn() {} }, now: () => 8000 });
   const events = [];
-  const quarantine = over.quarantine ?? { stash: async (p) => ({ ok: true, dest: 'Q\\' + p.split('\\').pop(), method: 'move', why: '' }) };
+  // T15-B：executor 在 move 模式下会**先**调 ensureRoot()（整批闸门），桩必须供得上这个方法；
+  // 缺了它，exWorld 造的默认桩会让 ex-1/9/9b 在闸门处 TypeError —— 红得毫无意义。
+  const quarantine = over.quarantine ?? {
+    ensureRoot: async () => 'Q',
+    stash: async (p) => ({ ok: true, dest: 'Q\\' + p.split('\\').pop(), method: 'move', why: '' }),
+    stats: async () => ({ dirs: 0, files: 0, bytes: 0, oldest: null }),
+  };
   const exec = EX.createExecutor({
     fsMod, planStore, logStore, quarantine,
     logger: { warn: (m) => events.push({ type: 'log', m }) },
@@ -5216,18 +5249,24 @@ await checkAsync('ex-8 EBUSY/EPERM/ENOTEMPTY → skipped 且只试一次（重�
     assert.equal(sum.results[0].state, 'skipped', `${errno} 应判为 skipped`);
     assert.match(sum.results[0].errnoText, new RegExp(errno));
     assert.equal(sum.failed, 0);
+    assert.equal(sum.skipped, 1, `${errno}：循环到第二种 errno 时计数不得从上一轮继承（T15-H）`);
   }
 });
 
-await checkAsync('ex-9 move-to-quarantine 走 quarantine.stash，落 dest 且失败项带原因', async () => {
+await checkAsync('ex-9 move-to-quarantine 走 quarantine.stash 并落 dest', async () => {
   const w = await seeded([PLAN_ITEM()]);
   const sum = await w.exec.apply({ planId: 'p-1', itemIds: ['temp-user-aG9tZQ'], mode: 'move-to-quarantine' });
   assert.equal(sum.results[0].state, 'ok');
   assert.match(sum.results[0].dest, /^Q\\/);
-  const bad = await seeded([PLAN_ITEM({ id: 'x-2', path: 'C:\\Users\\gongj\\AppData\\Local\\Temp\\b.log' })], { quarantine: { stash: async () => ({ ok: false, dest: '', method: 'move', why: 'EPERM 被占用' }) } });
-  const s2 = await bad.exec.apply({ planId: 'p-1', itemIds: ['x-2'], mode: 'move-to-quarantine' });
-  assert.equal(s2.results[0].state, 'skipped');
-  assert.match(s2.results[0].errnoText, /被占用/);
+});
+
+await checkAsync('ex-9b stash 返回 ok:false → skipped + 原因，且原件不得消失（T15-G：失败分支独立成例）', async () => {
+  const w = await seeded([PLAN_ITEM({ id: 'x-2', path: 'C:\\Users\\gongj\\AppData\\Local\\Temp\\b.log' })],
+    { quarantine: { stash: async () => ({ ok: false, dest: '', method: 'move', why: 'EPERM 被占用' }), ensureRoot: async () => 'Q' } });
+  const sum = await w.exec.apply({ planId: 'p-1', itemIds: ['x-2'], mode: 'move-to-quarantine' });
+  assert.equal(sum.results[0].state, 'skipped');
+  assert.match(sum.results[0].errnoText, /被占用/);
+  assert.equal(w.files.has('C:\\Users\\gongj\\AppData\\Local\\Temp\\b.log'), true, '隔离失败等于「什么都没做」，原件必须在');
 });
 
 await checkAsync('ex-10 realpath 落到受保护目录 → rejected-snapshot + guard 原因（junction 逃逸）', async () => {
@@ -5244,6 +5283,26 @@ await checkAsync('ex-11 快照不存在 → 整批拒并留一条错误，不抛
   assert.equal(sum.error, 'SYSOPS_RECORDS_NOT_FOUND');
   assert.equal(sum.results.length, 0);
 });
+
+await checkAsync('ex-12a 暂存目录配错（ensureRoot 抛）+ move 模式 → 整批拒、一个条目都不碰（T15-B：批次外层 catch）', async () => {
+  const w = await seeded([PLAN_ITEM()], {
+    quarantine: { ensureRoot: async () => { throw new Error('暂存目录落在被清理路径 C:\\Users\\gongj\\AppData\\Local\\Temp 内部'); }, stash: async () => ({ ok: true, dest: 'X', method: 'move', why: '' }) },
+  });
+  const sum = await w.exec.apply({ planId: 'p-1', itemIds: ['temp-user-aG9tZQ'], mode: 'move-to-quarantine' });
+  assert.equal(sum.error, 'SYSOPS_QUARANTINE_UNAVAILABLE');
+  assert.equal(sum.ok, 0);
+  assert.equal(sum.results.length, 0, '闸门之后一条都不该跑 —— 逐条 catch 会把「整批停」降级成「逐条失败」');
+  assert.equal(w.files.has(PLAN_ITEM().path), true, '源文件必须还完整存在');
+});
+
+await checkAsync('ex-12b 同一个配错的暂存目录，delete-file 模式不受牵连（闸门只管 move）', async () => {
+  const w = await seeded([PLAN_ITEM()], {
+    quarantine: { ensureRoot: async () => { throw new Error('暂存目录不合法'); }, stash: async () => ({ ok: true, dest: 'X', method: 'move', why: '' }) },
+  });
+  const sum = await w.exec.apply({ planId: 'p-1', itemIds: ['temp-user-aG9tZQ'], mode: 'delete-file' });
+  assert.equal(sum.error, undefined, '删除模式不该被暂存配置错拖死');
+  assert.equal(sum.ok, 1);
+});
 ```
 
 - [ ] **Step 2: 写失败的测试（⑤段 service 编排）**
@@ -5255,6 +5314,8 @@ const CS = await import('../lib/clean/service.js');
 function csWorld(over = {}) {
   const events = [];
   const execArgs = [];
+  const stoppedCalls = [];      // T15-F：cs-4 要断「stopScan 真转给了 scanner」，不能靠桩往 svc 上挂属性
+  const quarArgs = [];          // T15-A：makeQuarantine 收到的实参是这条红线唯一的可观测点
   const facility = createMemoryFacility();
   const prefStore = createPrefStore({ getFacility: () => facility, logger: { warn() {} }, now: () => 1000 });
   const ruleStore = createRuleStore({ prefStore, logger: { warn() {} } });
@@ -5272,8 +5333,18 @@ function csWorld(over = {}) {
         if (over.scanThrows) throw new Error('遍历炸了');
         return over.scanResult ?? { items: [PLAN_ITEM()], totals: { n: 1, bytes: 1000 }, walked: 10, hit: 1, skipped: [], stopped: false, truncated: false, at: 5000 };
       },
-      stop: () => { svc.__stopped = true; if (scanResolve) scanResolve(); },
+      stop: () => { stoppedCalls.push(1); if (scanResolve) scanResolve(); },
     }),
+    // T15-A：service 必须自己造 quarantine 并把 rootDir / forbiddenPrefixes 喂进去。
+    // 桩只记实参、返回一个够用的假对象，断言全部打在 quarArgs 上。
+    makeQuarantine: (a) => {
+      quarArgs.push(a);
+      return {
+        ensureRoot: async () => a.rootDir,
+        stash: async (p) => ({ ok: true, dest: 'Q\\' + p.split('\\').pop(), method: 'move', why: '' }),
+        stats: async () => ({ dirs: 2, files: 3, bytes: 38, oldest: '2026-09-26' }),
+      };
+    },
     makeExecutor: ({ onEvent }) => ({
       apply: async (args) => {
         execArgs.push(args);
@@ -5281,7 +5352,8 @@ function csWorld(over = {}) {
         return over.summary ?? { planId: args.planId, logId: 'l-1', ok: 1, skipped: 0, failed: 0, rejected: 0, bytesFreed: 1000, beforeFree: 1, afterFree: 2, results: [] };
       },
     }),
-    planStore, logStore, getPrefs: () => ({ clean: { after: over.after ?? 'log', keepDays: 7 } }),
+    planStore, logStore,
+    getPrefs: () => ({ clean: { after: over.after ?? 'log', keepDays: 7, ...(over.quarantineDir ? { quarantineDir: over.quarantineDir } : {}) } }),
     fsMod: { statfsSync: () => ({ available: 60 * 2 ** 30 }) },
     osMod: { homedir: () => 'C:\\Users\\gongj' },
     pathMod: { join: (...a) => a.join('\\') },
@@ -5289,7 +5361,7 @@ function csWorld(over = {}) {
     now: () => 5000,
   });
   svc.onEvent((e) => events.push(e));
-  return { svc, events, execArgs, scannerCalls, facility, planStore, logStore, ruleStore };
+  return { svc, events, execArgs, scannerCalls, stoppedCalls, quarArgs, facility, planStore, logStore, ruleStore };
 }
 
 await checkAsync('cs-1 startScan → 事件流有 progress 与 done，state 落 ready 且带 planId', async () => {
@@ -5322,7 +5394,10 @@ await checkAsync('cs-4 stopScan 转成 scanner.stop()，state.stopped 标出（�
   const p = w.svc.startScan();
   w.svc.stopScan();
   await p;
-  assert.equal(w.svc.__stopped, true);
+  // T15-F：断的是「真转给了 scanner」+「Task 22 渲染用的 state().stopped」，
+  // 原稿断的 svc.__stopped 是桩自己挂上去的属性，跟 service 的 state 没半点关系。
+  assert.equal(w.stoppedCalls.length, 1);
+  assert.equal(w.svc.state().stopped, true);
 });
 
 await checkAsync('cs-5 apply 只把 planId+itemIds+mode 交给 executor，前端带来的路径字段一概不转', async () => {
@@ -5353,6 +5428,29 @@ await checkAsync('cs-7 unfinished() 透出未确认完成的留痕（重启后�
   const rows = await w.svc.unfinished();
   assert.equal(rows.length, 1);
   assert.equal(rows[0].planId, 'p-0');
+});
+
+await checkAsync('cs-8 makeQuarantine 收到 prefs 的 quarantineDir 与「当前 active rules 的 dir 集」—— Task 14 那条红线的唯一真实喂入者（T15-A）', async () => {
+  const qd = 'C:\\Users\\gongj\\AppData\\Local\\dsh-plugin-sysops\\quarantine';
+  const w = csWorld({ quarantineDir: qd });
+  const s = await w.svc.quarantineStats();
+  assert.deepEqual(s, { dirs: 2, files: 3, bytes: 38, oldest: '2026-09-26' }, 'stats() 原样透出，界面才有 keepDays 到期提醒的数据');
+  assert.equal(w.quarArgs.length, 1);
+  assert.equal(w.quarArgs[0].rootDir, qd, 'prefs 设了就必须用 prefs 的');
+  const rules = await w.ruleStore.activeRules();
+  assert.deepEqual(w.quarArgs[0].forbiddenPrefixes, rules.map((r) => r.dir), '被清理路径集必须来自 activeRules()，写死一份等于两处口径');
+  assert.ok(w.quarArgs[0].forbiddenPrefixes.length > 0, '内置库有 10 条 active，空集就是没喂');
+  // 口径单点的证据：默认关的两条不在 activeRules 里 ⇒ 也不该出现在 forbidden 集里。
+  // 只断 `rules.map(r=>r.dir)` 与本表达式相等是套套逻辑，这一条才是「两处口径」的抓网。
+  const { BUILTIN_RULES, DEFAULT_OFF } = QruleMod;
+  assert.equal(w.quarArgs[0].forbiddenPrefixes.length, BUILTIN_RULES.length - DEFAULT_OFF.length);
+});
+
+await checkAsync('cs-9 prefs 没设 quarantineDir 时回落到 %LOCALAPPDATA% 下的内置默认（界面与执行器不能两套默认）', async () => {
+  const w = csWorld();                       // getPrefs 里没有 quarantineDir
+  await w.svc.quarantineStats();
+  // QUAR_ROOT 与 csWorld 的 homedir('C:\\Users\\gongj') 拼出来的回落值同源：都走 DEFAULT_QUARANTINE
+  assert.equal(w.quarArgs[0].rootDir, QU.DEFAULT_QUARANTINE('C:\\Users\\gongj\\AppData\\Local'));
 });
 
 console.log(`\n  ${passed}/${passed + failed} 通过`);
