@@ -4405,6 +4405,15 @@ Expected: 退出码 0；`walked` 与耗时同量级合理 —— 同机现采的
 > **T13-C（Minor）**：本任务的旁路读数 `alerts 29/29` 已过期，Task 10 修复轮后是 **33/33**（三处已同步改）。
 >
 > 计数随之变：②段 `rec-1..rec-9` + 新增 `rec-10` = **10** 例 ⇒ 门禁 `25/25`（①14 + 真机 1 + ②10 —— ① 段基数已由 Task 12 两轮修复抬到 14：Ruling-77/79 从 11 抬到 13，Ruling-81 再加 `cln-7c`，见 Task 12 Step 4 上方的两段回填），`SKIP_LOCAL=1` 下 `24/24` + 1 行 SKIP。
+>
+> **执行后回填（2026-09-28 Task 13 修复轮 round-1，评审 F-1..F-5）**：复评判下 1 条 Critical + 4 条 Important，本轮全部按「先补证人、再改实现」的顺序做，计数因此**再抬两级**：
+> - **F-1（Critical）** `clean_plan` 的字段声明面零证人 —— 评审把 `cleanItem` 的 8 个声明逐个删掉，`24/24` 依然全绿。`rec-3` 补三条「键集 = 上游形状」断言（`items[]` 11 键、`rulesUsed` 3 键、`totals` 2 键），`rec-2` 补一条 `items` 必填（`arrayOf` 的 `required` 标志同属声明面）。
+> - **F-2** `rec-5` 的 `p-1..p-21` 让「数值序」与「字典序」删同一条 ⇒ 改夹具为**字典序递减发号**（`p-u` 最早 … `p-a` 最新），id 与 `at` 脱钩，比较器退回字典序时最新那条会先被裁掉。
+> - **F-5** `LOG_KEEP` 的删除分支零覆盖 ⇒ 新增 `rec-11`（时钟跨 4 位→5 位，`l-9999-…` 字典序最大却时间最旧）。
+> - **F-3** 登记表在 `handle.close()` 之前摘 entry ⇒ 关域窗口里另一仓储首写撞 `already-open`。`releaseDomain` 改成「先真关完、后摘牌」，`acquireDomain` 在 `closing` 期间等新持有者醒来再重开；新增 `rec-12` 用 `createMemoryFacility({ closeDelayMs: 40 })` 把这段窗口钉住（设施桩因此多了 `stats`/`closeDelayMs` 两个可选面，默认 0 = 逐字同旧行为）。
+> - **F-4** alerts 的 `close()` 用 `facilityOf()` 而不是当初 acquire 那个对象 ⇒ WeakMap 按对象查 entry，refs 减到别人身上：域永不关（C2），下个实例再 open 撞 `already-open`（C3）。改为记 `held`，新增 `hit-6` 用「每次给新包装对象」的 `getFacility` 钉住。
+>
+> 新门禁读数（本轮现跑）：`node test/clean.test.mjs` → **`27/27`**（①14 + 真机 1 + ②12），`SKIP_LOCAL=1` → **`26/26`** + 1 行 SKIP；`node test/alerts.test.mjs` → **`34/34`**（③段 `hit-1..6`）。变异电池 `tmp/t13fmut4.mjs` 22 发全红且各有专属红点（`锚点/还原/子进程异常计数 = 0`，五个 `lib/test` 文件逐字节还原，前后 sha256 逐字相同）。下游任务书里的读数按此级联：Task 14 `34/34`→**`36/36`**、Task 15 `56/56`→**`58/58`**、Task 25 全量口径同步。
 
 
 - [ ] **Step 1: 建 records 域（改名 + 追加两表）**
@@ -4599,7 +4608,7 @@ process.exit(failed ? 1 : 0);
 - [ ] **Step 3: 跑测试确认失败**
 
 Run: `node test/clean.test.mjs`
-Expected: `rec-1` FAIL（`lib/alerts/spec.js` 已被改名 → `ERR_MODULE_NOT_FOUND`）或 schema 缺表报错。改名后 alerts 测试必须同步变绿：Run `node test/alerts.test.mjs` Expected `33/33`。
+Expected: `rec-1` FAIL（`lib/alerts/spec.js` 已被改名 → `ERR_MODULE_NOT_FOUND`）或 schema 缺表报错。改名后 alerts 测试必须同步变绿：Run `node test/alerts.test.mjs` Expected `34/34`（round-1 加 `hit-6`）。
 
 - [ ] **Step 4: 写实现**
 
@@ -4628,9 +4637,9 @@ Expected: `rec-1` FAIL（`lib/alerts/spec.js` 已被改名 → `ERR_MODULE_NOT_F
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `node test/clean.test.mjs`
-Expected: `25/25 通过`（①14 + 真机 1 + ②10 —— SKIP_LOCAL 下 24/24 + 1 SKIP）
-Run: `SKIP_LOCAL=1 node test/clean.test.mjs` → `24/24 通过` + 1 行 `SKIP cln-真机-1`
-Run: `node test/alerts.test.mjs` → `33/33 通过`（改名回归）
+Expected: `27/27 通过`（①14 + 真机 1 + ②12 —— round-1 修复轮加 `rec-11`/`rec-12`，SKIP_LOCAL 下 26/26 + 1 SKIP）
+Run: `SKIP_LOCAL=1 node test/clean.test.mjs` → `26/26 通过` + 1 行 `SKIP cln-真机-1`
+Run: `node test/alerts.test.mjs` → `34/34 通过`（改名回归；③段随 F-4 加 `hit-6`，原稿 33/33 作废）
 提交信息草稿：`refactor(sysops): 记录域改名 records 并加清单快照/执行留痕仓储`
 
 ---
@@ -4671,7 +4680,7 @@ Run: `node test/alerts.test.mjs` → `33/33 通过`（改名回归）
 | **T14-F**（Minor） | `freeDest` 生成的是 `2-name` **前缀**，文件头注释写「加 `-2` / `-3` 后缀」 | 注释跟代码（前缀对 `basename` 稳定，行为不变）；用例标题同改为「加序号前缀」 |
 | **T14-G**（Minor） | `DEFAULT_QUARANTINE` 实现直拼且形参改名，`prefq-4` 拿 `path.join` 对比 ⇒ 入参带尾分隔符时多一个反斜杠，断言红 | 实现改用 `node:path` 的 `join`，形参名回到 `appData` |
 | **T14-H**（Minor，时区耦合） | `dayDir` 取**本地**日期，原稿夹具喂 `new Date('2026-09-27T10:00:00Z')`：本机 +08 同日所以 `q-1` 的 `/2026-09-27/` 成立，换 UTC 负偏移机器会红。`q-7` 原稿的 `new Date('2026-09-07T23:30:00+08:00')` 同病（+14 机器上本地是 09-08） | 两处夹具都改本地构造：`now` 用 `new Date(2026, 8, 27, 10, 0, 0)`、`q-7` 用 `new Date(2026, 8, 7, 23, 30, 0)`，断言不动 —— 测试与所在时区解耦 |
-| **T14-I**（计数） | Step 4 原稿期望 `28/28 (①12 ②9 ③7)`：②9 已被 Task 13 的 `rec-10` 变成 ②10；③段随 T14-C/D 加 `q-8`、`q-9` ⇒ ③=9；①段又随 Task 12 两轮修复（Ruling-77/79 加 `cln-9c`/`cln-5b`，Ruling-81 加 `cln-7c`）由 12 变 **15（含真机）** | 新期望 **`34/34`**（①14 + 真机 1 + ②10 + ③9），`SKIP_LOCAL=1` 下 `33/33` + 1 行 SKIP。prefs 侧 ⑤4 ⇒ **`28/28`**（①3 ②4 ③6 ④11 ⑤4，与 Task 11 闭环后的 `24/24` 衔接） |
+| **T14-I**（计数） | Step 4 原稿期望 `28/28 (①12 ②9 ③7)`：②9 已被 Task 13 的 `rec-10` 变成 ②10；③段随 T14-C/D 加 `q-8`、`q-9` ⇒ ③=9；①段又随 Task 12 两轮修复（Ruling-77/79 加 `cln-9c`/`cln-5b`，Ruling-81 加 `cln-7c`）由 12 变 **15（含真机）**；Task 13 round-1 修复轮（F-5/F-3）再加 `rec-11`、`rec-12` ⇒ ②=12 | 新期望 **`36/36`**（①14 + 真机 1 + ②12 + ③9），`SKIP_LOCAL=1` 下 `35/35` + 1 行 SKIP。prefs 侧 ⑤4 ⇒ **`28/28`**（①3 ②4 ③6 ④11 ⑤4，与 Task 11 闭环后的 `24/24` 衔接） |
 
 **另记（已落进 Step 1）**：`prefq-1` 里 `assert.throws(…, /guard|受保护/)` 这条**必然命中** —— spec 抛的 message 前缀就含「未通过 guard」，与路径是否真被拒无关；哪天 `check()` 不再拒系统目录，这条仍然绿。收紧为 `/系统目录|b-system-dir/`。另外两条（`/盘符/`、`/变量/`）现采已证实各自 code 的 `why` 里有对应词，保留。
 
@@ -5022,9 +5031,9 @@ clean: record({
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `node test/prefs.test.mjs` → `28/28 通过`（①3 ②4 ③6 ④11 ⑤4）
-Run: `node test/clean.test.mjs` → `34/34 通过`（①14 + 真机 1 + ②10 + ③9 —— T14-I；②10 是 Task 13 的 `rec-10`，别照抄本任务书里更早的 ②9；①14 是 Task 12 两轮修复新增的 `cln-9c`/`cln-5b`/`cln-7c`）
-Run: `SKIP_LOCAL=1 node test/clean.test.mjs` → `33/33 通过` + 1 行 `SKIP cln-真机-1`
-Run: `node test/alerts.test.mjs` → `33/33 通过`；`node test/guard.test.mjs` → `19/19 通过`；`node test/collect.test.mjs` → `48/48 通过`
+Run: `node test/clean.test.mjs` → `36/36 通过`（①14 + 真机 1 + ②12 + ③9 —— T14-I 级联后；②12 = Task 13 的 `rec-1..rec-10` + round-1 的 `rec-11`/`rec-12`，别照抄本任务书里更早的 ②9/②10；①14 是 Task 12 两轮修复新增的 `cln-9c`/`cln-5b`/`cln-7c`）
+Run: `SKIP_LOCAL=1 node test/clean.test.mjs` → `35/35 通过` + 1 行 `SKIP cln-真机-1`
+Run: `node test/alerts.test.mjs` → `34/34 通过`；`node test/guard.test.mjs` → `19/19 通过`；`node test/collect.test.mjs` → `48/48 通过`
 
 - [ ] **Step 5: 真机验一次「同盘 move + stats 非零」（T14-E）**
 
@@ -5113,7 +5122,7 @@ Expected 六行：`输入形状 5 ["F:","dsh-plugins","dsh-plugin-sysops","tmp",
 |---|---|---|
 | **T15-A**（Critical） | **Task 14 的暂存红线没有任何构造者。** `createQuarantine` 在 Consumes 里列着，但 `createCleanService` 的参数表里根本没有 quarantine；Step 4 的 service 要点通篇不提它。`quarantineStats()` 同样无人实现其来源。⇒ 「暂存目录不得落在被清理路径内」这条只活在 Task 14 的测试里（Ruling-72 的「另记」预言的正是这个），`prefs.clean.quarantineDir` 存进去后运行时没人读 | service 加 `makeQuarantine` 工厂参数，**每次 `apply` / `quarantineStats` 现造**（prefs 与规则集都会在两次调用之间变）：`rootDir = getPrefs().clean?.quarantineDir ?? DEFAULT_QUARANTINE(join(osMod.homedir(),'AppData','Local'))`，`forbiddenPrefixes = (await ruleStore.activeRules()).map(r => r.dir)`。新增 **`cs-8`** 断这两样真的传进去了 |
 | **T15-B**（Critical） | **`stash()` 的抛异常没人接。** Task 14 Interfaces 明写「配置错整批停 ⇒ 批次外层 catch」，而 Step 4 的条目循环里 `await quarantine.stash(path)` 抛出的话会一路穿透 `apply()` → HTTP 层 500，用户看到的是「服务器错误」而不是「暂存目录配错了」 | executor 在 `mode === 'move-to-quarantine'` 时**先于条目循环** `await quarantine.ensureRoot()` 并 try/catch ⇒ 抛即整批返回 `{ error:'SYSOPS_QUARANTINE_UNAVAILABLE', ok:0, skipped:0, failed:0, rejected:0, results:[] }` 且**一个条目都不碰**。`delete-file` / `delete-dir` **不得**调 `ensureRoot()`（删除模式不该被暂存配置错拖死）。新增 **`ex-12`** 钉住这两半 |
-| **T15-C**（计数） | Step 5 期望 `46/46（①12 ②9 ③7 ④11 ⑤7）`、`SKIP_LOCAL 40/40` —— ②9/③7 是 Task 13/14 闭环前的旧账（②已随 `rec-10` 变 10、③已随 `q-8`/`q-9` 变 9、①已随 Task 12 两轮修复变 14+真机 1 = 15），且本任务自己还要加 `ex-9b`/`ex-12`/`cs-8`/`cs-9` | 新期望 **`56/56`**（①14 + 真机 1 = 15，加 ②10 + ③9 + ④13 + ⑤9），`SKIP_LOCAL=1` ⇒ **`55/55` + 1 行 SKIP**。两行草稿读数（46、40）都是错的，一并作废；④/⑤ 以本任务书逐段清点为准，派单前控制器会再核对一次 |
+| **T15-C**（计数） | Step 5 期望 `46/46（①12 ②9 ③7 ④11 ⑤7）`、`SKIP_LOCAL 40/40` —— ②9/③7 是 Task 13/14 闭环前的旧账（②已随 `rec-10` 变 10、Task 13 round-1 又加 `rec-11`/`rec-12` 变 **12**、③已随 `q-8`/`q-9` 变 9、①已随 Task 12 两轮修复变 14+真机 1 = 15），且本任务自己还要加 `ex-9b`/`ex-12`/`cs-8`/`cs-9` | 新期望 **`58/58`**（①14 + 真机 1 = 15，加 ②12 + ③9 + ④13 + ⑤9），`SKIP_LOCAL=1` ⇒ **`57/57` + 1 行 SKIP**。两行草稿读数（46、40）都是错的，一并作废；④/⑤ 以本任务书逐段清点为准，派单前控制器会再核对一次 |
 | **T15-D**（Critical，硬约束） | Step 6 用 `node --input-type=module -e "…"`，里面还全是字面 `\` 与 `'C:\\\\*'` 这种双层转义 —— 与本仓库硬约束冲突（同 T14-E），且派单途中 `\` 会再折半一次 | 落 `tmp/t15e2e.mjs`，反斜杠一律 `String.fromCharCode(92)`，打印段数自证。**样本根从 `%TEMP%` 挪进仓库 `tmp/sysops-clean-e2e`**：这是全仓库唯一真删文件的用例，自建自删的目录比动用户真实 Temp 更守得住「不碰范围外之物」；现采（`tmp/t14g.txt`）证明 guard 对仓库内绝对 F: 路径 `allow=true`，红线不受影响 |
 | **T15-E**（Important） | `Summary` 类型里没有 `error` 键，而 ex-4 断 `sum.error === 'GUARD_OPERATION_DENIED'`、ex-11 断 `sum.error === 'SYSOPS_RECORDS_NOT_FOUND'`；Task 18 的 `statusFor(code)` 按 code 分支 | 三个整批拒的 code 写进 Produces（Interfaces 已改），Task 18 派单时把这三条一起给它 |
 | **T15-F**（Important） | `cs-4` 标题写「state.stopped 标出」，断言却是 `svc.__stopped` —— 那是**桩自己**在 `stop()` 里挂到 `svc` 上的属性，与 service 的 `state().stopped` 无半点关系；Task 22 的扫描条吃的正是 `state().stopped` | 桩改成往 `stoppedCalls` 里记一笔，断 `stoppedCalls.length === 1` **且** `svc.state().stopped === true` |
@@ -5499,13 +5508,13 @@ Expected: `ex-1` 起 `ERR_MODULE_NOT_FOUND` 指向 `lib/clean/executor.js`。
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `node test/clean.test.mjs`
-Expected: `56/56 通过`（①15 + ②10 + ③9 + ④13 + ⑤9 = 56，与 T15-C 同行内算式一致）
+Expected: `58/58 通过`（①15 + ②12 + ③9 + ④13 + ⑤9 = 58，与 T15-C 同行内算式一致）
 > 逐段清点（Task 12 两轮修复后的实际落地数，别照抄本任务书更早的草稿）：①段 15 条 = `cln-1..10` + `cln-9b` + `cln-9c` + `cln-5b` + `cln-7c` + `cln-真机-1`；
-> ②段 10 条 = `rec-1..rec-10`（Task 13 闭环数，`25/25` 已现证）；③段 9 条 = `q-1..q-7` + `q-8` + `q-9`（T14-C/D）；
+> ②段 12 条 = `rec-1..rec-10`（Task 13 闭环数）+ `rec-11` + `rec-12`（round-1 修复轮，`27/27` 已现证）；③段 9 条 = `q-1..q-7` + `q-8` + `q-9`（T14-C/D）；
 > ④段 13 条、⑤段 9 条由本任务自己新增（`ex-9b`/`ex-12`/`cs-8`/`cs-9` 等），**以 Step 1-3 实际写出的 `await checkAsync(` 计数为准**。
-> 旧草稿的 `46/46`、`45/45 + 1 SKIP`、`40/40` 三行全部作废。
-Run: `SKIP_LOCAL=1 node test/clean.test.mjs` → `55/55 通过` + 1 行 `SKIP cln-真机-1`
-Run: `node test/alerts.test.mjs` → `33/33`；`node test/guard.test.mjs` → `19/19`；`SKIP_LOCAL=1 node test/collect.test.mjs` → `48/48`；`node test/prefs.test.mjs` → `28/28`
+> 旧草稿的 `46/46`、`45/45 + 1 SKIP`、`40/40` 三行，以及 round-1 之前的 `56/56`、`55/55` 两行全部作废。
+Run: `SKIP_LOCAL=1 node test/clean.test.mjs` → `57/57 通过` + 1 行 `SKIP cln-真机-1`
+Run: `node test/alerts.test.mjs` → `34/34`；`node test/guard.test.mjs` → `19/19`；`SKIP_LOCAL=1 node test/collect.test.mjs` → `48/48`；`node test/prefs.test.mjs` → `28/28`
 
 - [ ] **Step 6: 真机端到端（按 T15-D 落文件、样本根挪进仓库 tmp，spec §5 要求）**
 
@@ -7786,8 +7795,8 @@ SKIP_LOCAL=1 node test/search.test.mjs
 Expected：
 - `plugin.test.mjs` `90/90`（①15 rt ②8 hx ③12 cf ④16 pg1 ⑤14 pg2 ⑥12 pg3 ⑦13 pg4）
 - `host-compat.test.mjs` `8/8`（hc-1..hc-8）
-- `collect.test.mjs` `48/48`、`alerts.test.mjs` `33/33`、`clean.test.mjs` `56/56`（含 1 条真机 —— ①=14 是 Task 12 两轮修复后的基数：`cln-5b`/`cln-9c`/`cln-7c`；原稿的 46/46 作废）、`search.test.mjs` `26/26`、`prefs.test.mjs` `24/24`（①3 ②4 ③6 ④11）、`guard.test.mjs` `19/19`（另需打印「拒绝断言 61 条 / 分支命中 16/16」，见 Step 2）
-- `SKIP_LOCAL=1` 两行：`clean` → `55/55 + 1 SKIP`，`search` → Everything 相关真机用例 SKIP、walk 通路仍实跑
+- `collect.test.mjs` `48/48`、`alerts.test.mjs` `34/34`（Task 13 round-1 加 `hit-6`）、`clean.test.mjs` `58/58`（含 1 条真机 —— ①=14 是 Task 12 两轮修复后的基数：`cln-5b`/`cln-9c`/`cln-7c`；②=12 含 round-1 的 `rec-11`/`rec-12`；原稿的 46/46 与 round-1 前的 56/56 都作废）、`search.test.mjs` `26/26`、`prefs.test.mjs` `24/24`（①3 ②4 ③6 ④11）、`guard.test.mjs` `19/19`（另需打印「拒绝断言 61 条 / 分支命中 16/16」，见 Step 2）
+- `SKIP_LOCAL=1` 两行：`clean` → `57/57 + 1 SKIP`，`search` → Everything 相关真机用例 SKIP、walk 通路仍实跑
 - **任何一条 FAIL 都不算过**；出现"用例静默通过"（断言对象为空数组的 `.some()`）要按 Step 3 的变异法回查。
 
 - [ ] **Step 2: 门禁 ② —— guard 分支清单 100% 打勾（核对，不新写代码）**
