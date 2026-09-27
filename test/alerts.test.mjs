@@ -219,6 +219,23 @@ await checkAsync('hit-5 close() 是终态；换实例复用同一域仍读得到
     '记录在宿主域里，不在 store 实例的内存里 —— 换实例不许把历史丢掉');
 });
 
+await checkAsync('hit-6 close 必须减「当初 acquire 那个设施」的 refs：getFacility 每次给新对象也不许漏', async () => {
+  // F-4：宿主 Context 是代理，`getFacility()` 每读一次都可能给出新的包装对象；
+  // 而登记表按**设施对象**查 entry（WeakMap key）。close 时若重新 facilityOf()，
+  // 减的是查无此人的 refs ⇒ 域永不关闭（C2），下一个实例再 open 撞 already-open（C3）。
+  const inner = createMemoryFacility();
+  const fresh = () => ({ open: (spec) => inner.open(spec) });
+  const st = createAlertHitStore({ getFacility: fresh, logger: N });
+  await st.append(hitRow(1000));
+  await st.close();
+  assert.deepEqual(inner.stats, { opens: 1, closes: 1 }, '最后一个持有者放手时必须真的把域关掉');
+  const again = createAlertHitStore({ getFacility: fresh, logger: N });
+  assert.deepEqual((await again.list({ limit: 10 })).map((r) => r.t), [1000],
+    '名字释放后新实例要能重新 open 并读到旧行');
+  await again.close();
+  assert.deepEqual(inner.stats, { opens: 2, closes: 2 }, '两次开关配平，不留悬空持有');
+});
+
 /* ④段：prefs 阈值覆盖内置规则 */
 check('merge-1 覆盖数值与冷却，冷却按秒换算成毫秒', () => {
   const out = R.mergeRules(R.DEFAULT_RULES, { cpu: { value: 95, consecutive: 5, cooldownSec: 120 } });

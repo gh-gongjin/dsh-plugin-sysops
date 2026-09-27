@@ -425,7 +425,7 @@ function recWorld(over = {}) {
   // 时钟必须会走（Ruling-71 T13-B）：冻结在 5000 时「按 at 数值升序」与「按 planId 字典序」
   // 删掉的是同一条，rec-5 证不出裁剪究竟看了哪个字段。
   const planStore = createPlanStore({ getFacility: () => facility, logger: { warn() {} }, now: (() => { let at = 4000; return () => (at += 1000); })(), newId: () => `p-${++n}` });
-  const logStore = createLogStore({ getFacility: () => facility, logger: { warn() {} }, now: () => 6000 });
+  const logStore = createLogStore({ getFacility: () => facility, logger: { warn() {} }, now: over.logNow ?? (() => 6000) });
   return { facility, planStore, logStore, n: () => n };
 }
 
@@ -450,6 +450,10 @@ check('rec-2 clean_plan schema：riskWhy 可缺，path 必须是字符串', () =
   const t = recordsDomain.tables.clean_plan.valueSchema;
   assert.doesNotThrow(() => t.parse({ planId: 'p-1', at: 1, beforeFree: 1, modeDefault: 'delete-file', rulesUsed: [], items: [{ ...flatItemFixture(), riskWhy: undefined }], totals: { n: 1, bytes: 1 } }));
   assert.throws(() => t.parse({ planId: 'p-1', at: 1, beforeFree: 1, modeDefault: 'delete-file', rulesUsed: [], items: [{ ...flatItemFixture(), path: 123 }], totals: { n: 1, bytes: 1 } }), /path/);
+  // `arrayOf(..., { required: true })` 也是声明面的一部分（复评 F-1 同族）：少了这个标志，
+  // `items` 传 undefined 会安静落成"没有清单的清单快照"，Task 15 执行器拿不到条目却不知道出了什么事。
+  assert.throws(() => t.parse({ planId: 'p-1', at: 1, beforeFree: 1, modeDefault: 'delete-file', rulesUsed: [], totals: { n: 0, bytes: 0 } }), /items/,
+    'items 必填：连条清单都没有的快照不许落库');
 });
 
 await checkAsync('rec-3 save 冻结快照：读回的路径与条数与扫描结果逐字一致', async () => {
@@ -464,6 +468,19 @@ await checkAsync('rec-3 save 冻结快照：读回的路径与条数与扫描结
   assert.equal(back.items[0].riskLevel, 'mid', 'save 没把嵌套 risk 拍平 ⇒ 读回来根本没有这个字段');
   assert.equal(back.items[0].riskWhy, '应用可能锁文件');
   assert.equal('risk' in back.items[0], false, 'record() 静默丢弃未声明字段，读回来不该再有 risk');
+  // F-1：上面几条判的是「值对了」，这三条判的是「一个字段都没漏声明」。
+  // `record()` / `arrayOf` 是白名单语义 —— 少声明一个键不会报错，只会让那一列在读回来时
+  // 安静地不存在，界面拿到 undefined。μ1-μ8 删掉任意一条上游字段声明时必须撞红这里。
+  const expectItemKeys = Object.keys(itemFixture())
+    .filter((k) => k !== 'risk')
+    .concat(['riskLevel', 'riskWhy'])
+    .sort();
+  assert.deepEqual(Object.keys(back.items[0]).sort(), expectItemKeys,
+    `items[] 声明面必须覆盖扫描器全部 ${expectItemKeys.length} 个字段（漏一个就是静默丢数据）`);
+  assert.deepEqual(Object.keys(back.rulesUsed[0]).sort(), ['id', 'kind', 'n'],
+    'rulesUsed 三键都要声明，少一个「命中规则」列就空一半');
+  assert.deepEqual(Object.keys(back.totals).sort(), ['bytes', 'n'],
+    'totals 两键都要声明，可回收字节数靠它');
 });
 
 await checkAsync('rec-4 快照 append-only：同 planId 再写必须抛（清单不可被改写）', async () => {
@@ -477,15 +494,20 @@ await checkAsync('rec-4 快照 append-only：同 planId 再写必须抛（清单
 
 await checkAsync('rec-5 快照只留最近 20 段，第 21 段挤掉最旧', async () => {
   const w = recWorld();
-  const ids = [];
-  for (let i = 0; i < 21; i++) ids.push((await w.planStore.save(scanFixture(), { beforeFree: i, modeDefault: 'delete-file' })).planId);
+  // F-2：id 必须与时间**脱钩**。原夹具是 `p-1..p-21` 配递增 `at`，而 `p-1` 恰好既是字典序最小
+  // 也是时间最旧 —— 把 trim 的比较器改回 `String(key).localeCompare` 照样全绿（复评 μ 组 N1）。
+  // 这里按**字典序递减**发号（p-u 最早 … p-a 最新）：一旦按 key 排，被裁掉的就是最新的 `p-a`。
+  const ids = Array.from({ length: 21 }, (_, i) => `p-${String.fromCharCode(117 - i)}`);
+  for (const [i, planId] of ids.entries()) {
+    await w.planStore.save(scanFixture(), { beforeFree: i, modeDefault: 'delete-file', planId });
+  }
   const list = await w.planStore.list({ limit: 50 });
   assert.equal(list.length, PLAN_KEEP);
   // list() 是**时间倒序**（与 hits() 同契约，alert-13 已把「倒序是 store 的契约」钉死）：
   // 原稿在这里断 list[0] === ids[1]，把自家契约写反了 —— 见 Ruling-71 T13-E。
-  assert.equal(list[0].planId, ids[20], '倒序：第一条必须是最新的 p-21');
-  assert.equal(list[PLAN_KEEP - 1].planId, ids[1], '倒序：末条是剩余 20 条里最旧的 p-2');
-  assert.equal(await w.planStore.get(ids[0]), null, '最旧的 p-1 必须已被挤掉（这才是「裁最旧」的直接证据）');
+  assert.equal(list[0].planId, ids[20], '倒序：第一条必须是最新的 p-a（按 key 排的话它已经被裁掉了）');
+  assert.equal(list[PLAN_KEEP - 1].planId, ids[1], '倒序：末条是剩余 20 条里最旧的 p-t');
+  assert.equal(await w.planStore.get(ids[0]), null, '最旧的 p-u 必须已被挤掉（这才是「裁最旧」的直接证据）');
 });
 
 await checkAsync('rec-6 log.start 立刻落一条 running 记录（中断后能查出「未确认完成」）', async () => {
@@ -548,6 +570,38 @@ await checkAsync('rec-10 同一设施上多个仓储共用一个域：各自读�
   const w3 = recWorld({ facility: counting });
   assert.equal((await w3.planStore.get(plan.planId)).planId, plan.planId, '关干净后重开，数据必须还在（介质权威）');
   assert.equal(opens, 1, '最后一个持有者放手时必须真的关域 —— 否则域名字永远被占着');
+});
+
+await checkAsync('rec-11 留痕裁到 LOG_KEEP 条：挤掉的是数值最旧那条，不是 key 字典序最小那条', async () => {
+  // F-5：`LOG_KEEP` 的删除分支此前零证人 —— 只写过 1 条 start，`rows.length <= LOG_KEEP` 直接 return。
+  // 时钟故意从 4 位跨到 5 位（`l-9999-…` 是最旧的，字典序却是**最大**的）：
+  // 比较器若改成 `String(a.key).localeCompare(...)`，被删的就是次旧的 `l-10003-…`，这里必红。
+  let tick = 0;
+  const w = recWorld({ logNow: () => (tick += 1) === 1 ? 9999 : 10000 + tick });
+  const first = await w.logStore.start({ planId: 'p-1', itemIds: ['a'], mode: 'delete-file' });
+  assert.equal(first.startedAt, 10002, '夹具自证：第一条的 startedAt 必须是 4 位→5 位跨界后的首个值');
+  let last;
+  for (let i = 0; i < LOG_KEEP; i++) {
+    last = await w.logStore.start({ planId: `p-${i}`, itemIds: ['a'], mode: 'delete-file' });
+  }
+  const rows = await w.logStore.list({ limit: 500 });
+  assert.equal(rows.length, LOG_KEEP, `上限 ${LOG_KEEP} 条，多一条都得裁`);
+  assert.ok(!rows.some((r) => r.logId === first.logId), '字典序最大但时间最旧的那条必须被挤掉');
+  assert.equal(rows[0].logId, last.logId, '最新一条必须留着，且排在倒序首位');
+});
+
+await checkAsync('rec-12 关域窗口里的新持有者：等别人关完再重新 open，不许撞 already-open', async () => {
+  // F-3：登记表若在 `handle.close()` 完成**之前**摘牌，此刻另一仓储首写会自己发一发 open，
+  // 撞上尚未释放的域名 ⇒ 无辜的 `logStore` 拿到 SYSOPS_RECORDS_UNAVAILABLE（复评 S3）。
+  const facility = createMemoryFacility({ closeDelayMs: 40 });
+  const w = recWorld({ facility });
+  const plan = await w.planStore.save(scanFixture(), { beforeFree: 1, modeDefault: 'delete-file' });
+  const closing = w.planStore.close(); // 故意不 await：要的就是"关闭进行中"那段窗口
+  const log = await w.logStore.start({ planId: plan.planId, itemIds: ['a'], mode: 'delete-file' });
+  assert.equal(typeof log.logId, 'string', 'planStore 正在关域时，logStore 的首写必须成功');
+  await closing;
+  await w.logStore.close();
+  assert.deepEqual(facility.stats, { opens: 2, closes: 2 }, '必须串行：先等旧域关完，再开新域');
 });
 
 console.log(`\n  ${passed}/${passed + failed} 通过`);
