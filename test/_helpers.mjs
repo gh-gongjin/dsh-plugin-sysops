@@ -1,7 +1,7 @@
 /**
  * 测试用的内存 storageDomain 设施桩。
  *
- * 从 `test/prefs.test.mjs` 原样搬来（Task 5 交付）：全仓库只有这一份内存桩，
+ * 从 `test/prefs.test.mjs` 原样搬来（Task 3 交付）：全仓库只有这一份内存桩，
  * `prefs` 与 `alerts` 两个仓储都要用它，两处各留一份就会各自漂移 ——
  * 桩的行为（关域再开数据还在、put 过 schema）必须是单一真相。
  */

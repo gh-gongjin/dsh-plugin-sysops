@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createMemoryFacility } from './_helpers.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -115,10 +116,8 @@ check('prefs-4 clean_rules：本机新增规则的形状，glob 必填、拒绝�
   assert.throws(() => t.parse({ items: [{ id: 'u-1', n: 'x', glob: 'C:\\a\\b\\*', ageDays: -3 }] }), /ageDays/);
 });
 
-/* ③段：store 行为（内存桩） */
+/* ③段：store 行为（内存桩在 ./_helpers.mjs，与本文件顶部的 import 同一份） */
 const { createPrefStore, PREFS_ERROR } = await import('../lib/prefs/store.js');
-
-import { createMemoryFacility } from './_helpers.mjs';
 
 const fresh = (over = {}) => {
   // 判键在不在，不判值：`fresh({ facility: undefined })` 要的就是"宿主没有 storageDomain"，
