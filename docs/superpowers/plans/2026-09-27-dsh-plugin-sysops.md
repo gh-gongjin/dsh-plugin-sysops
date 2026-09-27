@@ -1749,29 +1749,42 @@ check('tp-4 parsePdTime 按本地时间解析 MM/DD/YYYY HH:mm:ss.fff', () => {
   assert.equal(d.getSeconds(), 41);
 });
 
-check('tp-5 样本解析：多实例按指标求和（界面要的是本机总吞吐）', () => {
+check('tp-5 样本解析：多实例按指标求和（界面要的是本机总吞吐），原始浮点不取整', () => {
   const { counters } = L1A.parseHeader(FIX[0]);
   const s = L1A.parseSampleLine(FIX[3], counters);
-  assert.equal(Math.round(s.values.netDown), 1048576 + 1.5);
-  assert.equal(Math.round(s.values.netUp), 131072 + 2.5);
+  // 断言字面量。`v` 是字节/秒的原始浮点，取整只在界面格式化时做。
+  // （这里原本写的是 `Math.round(s.values.netDown) === 1048576 + 1.5` —— 左边四舍五入成
+  //   1048578、右边是 1048577.5，**恒不相等**，预检实跑 tp-5 直接红。）
+  assert.equal(s.values.netDown, 1048577.5);
+  assert.equal(s.values.netUp, 131074.5);
 });
 
-check('tp-6 *_no data 列不计入和，但其它列照样出数', () => {
+check('tp-6 *_no data 列不计入和，但其它列照样出数；整行全是 *_no data 则整行不出数', () => {
   const { counters } = L1A.parseHeader(FIX[0]);
   const s = L1A.parseSampleLine(FIX[2], counters);
-  assert.equal(Math.round(s.values.netDown), 524288);
-  assert.equal(Math.round(s.values.netUp), 65536);
+  assert.equal(s.values.netDown, 524288);
+  assert.equal(s.values.netUp, 65536);
+  // 真机每窗第一行常见形态就是全部 `*_no data`（typeperf 暖身期）。这种行必须整行丢弃：
+  // 把它折成 0 会在曲线上画出一个假谷底，而 0 恰好是"没人用网"的意思，最难被发现。
+  assert.equal(L1A.parseSampleLine('"09/27/2026 12:49:41.000","*_no data","*_no data","*_no data","*_no data"', counters), null);
 });
 
-check('tp-7 半行断流（流被截断）返回 null，不抛、也不补 0', () => {
+check('tp-7 半行断流（列数不足 / 引号未闭合）返回 null，不抛、也不补 0', () => {
   const { counters } = L1A.parseHeader(FIX[0]);
   assert.equal(L1A.parseSampleLine(FIX[4], counters), null);
   assert.equal(L1A.parseSampleLine('正在退出，请稍候...', counters), null);
+  // 列数不足但每列都有值（截断正好落在两个字段之间）也要判不完整，否则出半个吞吐值。
+  assert.equal(L1A.parseSampleLine('"09/27/2026 12:49:44.093","2097152.0000"', counters), null);
 });
 
-check('tp-8 decodePd：GBK 字节解出中文，纯 ASCII 不受影响，非法字节回落 latin1', () => {
+check('tp-8 decodePd：GBK 字节解出中文，纯 ASCII 不受影响，解出替换符时回落 latin1', () => {
   assert.equal(L1A.decodePd(Buffer.from([0xce, 0xf1, 0xb9, 0xfa])), '务国');
   assert.equal(L1A.decodePd(Buffer.from('"1234.5"', 'latin1')), '"1234.5"');
+  // 真机表头实测（计划期修正 #2 复核）：`"(PDH-CSV 4.0)","\\龚进的华为笔记\Network Interface(Intel[R] Wi-Fi 6 AX201 160MHz)\Bytes Received/sec"`
+  // —— 机器名是 GBK 字节，其余全是 ASCII，所以"含高位字节就要解、纯 ASCII 不能被动过"是硬要求。
+  // 非法 GBK 序列：TextDecoder('gbk') 默认非 fatal，**不抛**而是出 U+FFFD，
+  // 所以回落必须靠检测替换符（原实现的 try/catch 是死代码，预检实测 [0x81] → '\uFFFD'）。
+  assert.equal(L1A.decodePd(Buffer.from([0x81])), '\x81');
 });
 
 check('tp-9 COUNTER_ARGS / 窗口参数是常量，界面文案要用它们而不是再抄一遍', () => {
@@ -1799,16 +1812,16 @@ Expected: `ERR_MODULE_NOT_FOUND` 指向 `lib/collect/l1a-typeperf.js`（fixture 
  *
  * 两个实测坑（计划期修正 #1 / #2）：
  *  - `-sc 0` 在无控制台管道里出一个样本就退出，所以**定窗续采**（每窗 30 个样本），
- *    由 supervisor 的 rolling 语义接下一窗；暖身约 219ms / 窗，摊薄后 <1%。
+ *    由 supervisor 的 rolling 语义接下一窗；本机实测暖身 ≈330ms / 窗（2 样本窗 2337–2373ms），
+ *    摊薄到 30 样本窗后 <1%。
  *  - 输出是 OEM 代码页（中文机器名为 GBK 字节），`TextDecoder('gbk')` 在本机 Node 24 可用；
  *    机器名前缀反正用不上，直接靠正则只取 `Network Interface(<实例>)\<计数器>`。
  *
  * 多实例（物理网卡 + isatap + loopback）按指标**求和**：界面要的是"本机下行多少"。
  */
-import { createL1aArgs } from './l1a-typeperf.js'; // ← 不存在，删掉这一行；写在这里只是提醒：不要自我 import
 ```
 
-上面那行**不要写进文件**（写完立刻按 Step 6 自查）。真正的实现要点：
+实现要点（逐段照写，`splitCsv` / `parsePdTime` 按注释里的口径自己补齐）：
 
 ```js
 export const COUNTER_ARGS = ['\\Network Interface(*)\\Bytes Received/sec', '\\Network Interface(*)\\Bytes Sent/sec'];
@@ -1835,7 +1848,13 @@ export function parseHeader(text) {
 export function parsePdTime(s) { /* MM/DD/YYYY HH:mm:ss.fff → new Date(y,mo-1,d,h,mi,sec,ms).getTime() */ }
 export function parseSampleLine(line, counters) {
   if (!line.startsWith('"')) return null;
+  // 不完整的行整行丢弃（tp-7）。typeperf 每个值都带引号，所以"行尾没有引号"= 半行；
+  // 列数下限按**表头最大列号**算，不是 `counters.length` —— 预检原实现只看
+  // `Number.isFinite(每列)`，实测把 `"…","2097152.0000` 这种半行当成了有效样本、
+  // 悄悄吐出一个只有下行没有上行的"半口吞吐"。
+  const need = counters.reduce((m, c) => Math.max(m, c.index + 1), 0);
   const cells = splitCsv(line);
+  if (!line.endsWith('"') || cells.length < need) return null;
   const t = parsePdTime(cells[0] ?? '');
   if (!Number.isFinite(t)) return null;
   const sums = {};
@@ -1843,7 +1862,7 @@ export function parseSampleLine(line, counters) {
   for (const c of counters) {
     if (!c.metric) continue;
     const n = Number(cells[c.index]);
-    if (!Number.isFinite(n) || n < 0) continue;   // *_no data / 半行 → 跳过该列
+    if (!Number.isFinite(n)) continue;   // *_no data（非数值）→ 跳过该列。速率不会有负数，不设 n<0 分支
     sums[c.metric] = (sums[c.metric] ?? 0) + n;
     seen += 1;
   }
@@ -1861,7 +1880,10 @@ export function createL1a({ sup, onPoint, intervalSec = INTERVAL_SEC, windowSamp
         intervalMs: intervalSec * 1000,
         rolling: true,
         minWindowMs: windowSamples * intervalSec * 1000 * 0.5,
-        onData: (line) => {
+        onData: (raw) => {
+          // Task 5 交付契约：`raw` 是**一整行的 Buffer**（`\r\n` 已去），解码归消费方。
+          // 每行只解一次；GBK 对纯 ASCII 是恒等的，所以不必先判断有没有高位字节。
+          const line = decodePd(raw);
           headers = parseHeader(line) ?? headers;
           if (!headers) return;
           const s = parseSampleLine(line, headers.counters);
@@ -1879,32 +1901,41 @@ export function createL1a({ sup, onPoint, intervalSec = INTERVAL_SEC, windowSamp
 `decodePd` 的实现（照写）：
 
 ```js
-let gbkDecoder = null;
-try { gbkDecoder = new TextDecoder('gbk'); } catch { gbkDecoder = null; }
+let gbk = null;
+try { gbk = new TextDecoder('gbk'); } catch { gbk = null; }   // 本机 Node 24 可用；留兜底给无 ICU 的环境
 
 export function decodePd(buf) {
   const b = Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf), 'latin1');
-  if (gbkDecoder) {
-    try {
-      return gbkDecoder.decode(b);
-    } catch {
-      /* gbk 解码失败只有"字节不是 GBK"一种可能；回落 latin1，至少数字与 ASCII 结构不丢 */
-    }
+  if (gbk) {
+    const s = gbk.decode(b);
+    // TextDecoder 默认 fatal:false —— **不会抛**，非法字节出 U+FFFD。
+    // 所以回落条件只能是"解出了替换符"（tp-8 用 [0x81] 钉住）；原实现的 try/catch 是死代码。
+    // latin1 逐字节映射，永不丢字节，数字与 ASCII 结构都还在。
+    if (!s.includes('\uFFFD')) return s;
   }
   return b.toString('latin1');
 }
 ```
 
-> 注意 supervisor 的 `onData` 收到的是**已按 `\n` 切好的行**（Task 5 里在 latin1 层切行），所以 `parseHeader` / `parseSampleLine` 拿到的是单行字符串；`decodePd` 只在含非 ASCII 的行上调用一次（`onData` 里 `const line = decodePd(Buffer.from(raw, 'latin1'))`）。把这句实现进 `createL1a` 的 `onData`，否则中文计数器名会是乱码。
+> `createL1a.onData` 收到的是 Buffer 完整行（Task 5 在**字节**上框行，见 Ruling-29 ⑥），所以解码必须写在这一层：`const line = decodePd(raw)`，之后 `parseHeader` / `parseSampleLine` 才拿到单行字符串。反过来在监督者里 `toString` 会把 GBK 尾字节变成乱码并把乱码推给 Task 7 的 UTF-8 消费方。
 
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `node test/collect.test.mjs`
 Expected: `29/29 通过`（①4 ②5 ③11 ④9），退出码 0。
 
+- [ ] **Step 5b: 变异自查（断言强度取证）**
+
+临时改实现三处，每一处都必须有红色用例，然后逐字节还原（`cp` 备份 + `cmp` 校验，别凭记忆改回去）：
+1. 删掉 `parseSampleLine` 里的完整性判定（`line.endsWith('"') || cells.length < need`）→ tp-7 必须红（预检原实现就是缺这一步，把半行当成有效样本吐出一个只有下行的"半口吞吐"）。
+2. `decodePd` 去掉 U+FFFD 检测、直接返回 GBK 解码结果 → tp-8 第三条必须红。
+3. 把 `if (!Number.isFinite(n)) continue;` 换成"当成 0 计入"：`if (!Number.isFinite(n)) { sums[c.metric] = (sums[c.metric] ?? 0) + 0; seen += 1; continue; }` → tp-6 必须红。
+   （注意别只改 `sums[...] + (Number.isFinite(n) ? n : 0)` 那一处 —— 前面已经 `continue` 掉了，那种改法是**空变异**，预检实测它 9/9 全绿。）
+三条都咬红才算这一步过；任何一条不红，说明断言没承重，先补断言再往下走。预检实测读数：变异 1 → tp-7 红；变异 2 → tp-8 红；变异 3 → tp-6 红。
+
 - [ ] **Step 6: 写探针脚本 `scripts/probe-collect.mjs`**
 
-这是验收门禁 5 的执行体（复跑 spec §1.2 的六项实测），也是本插件唯一允许 spawn 真进程的非测试文件：
+这是验收门禁 5 的执行体（复跑 spec §1.2 的六项实测，另加"首行到达"这条看门狗校准），也是本插件唯一允许 spawn 真进程的非测试文件：
 
 ```js
 #!/usr/bin/env node
@@ -1942,6 +1973,19 @@ row(`typeperf -sc 3 窗口(ms)`, warm.toFixed(0), `每窗暖身 ≈ ${warm.toFix
 row('typeperf 首行前 60 字符', decodePd(cold.stdout).split(/\r?\n/)[0].slice(0, 60), '机器名为 GBK 字节，解析层只取实例名与计数器名');
 const zero = spawnSync('typeperf', [...COUNTER_ARGS, '-sc', '0'], { windowsHide: true, timeout: 8000 });
 row('typeperf -sc 0 exitCode', zero.status, '0 且只出一个样本 = 无控制台管道下不提供无限流式（修正 #1）');
+// 启动看门狗校准：Task 5 的 STARTING 阈值是 3 × intervalMs = 3000ms。量"进程起来 → stdout 第一行"，
+// 超过 1500ms（阈值一半）就得为 l1a 单独放宽 heartbeatFactor，否则慢机器上反复误杀并累计到 exited-max。
+const firstLine = await new Promise((resolve) => {
+  const t0 = Date.now();
+  const p = spawn('typeperf', [...COUNTER_ARGS, '-sc', '5', '-si', '1'], { windowsHide: true });
+  let acc = Buffer.alloc(0);
+  p.stdout.on('data', (b) => {
+    acc = Buffer.concat([acc, b]);
+    if (acc.indexOf(0x0a) >= 0) { resolve(Date.now() - t0); p.kill(); }
+  });
+  p.on('exit', () => resolve(-1));   // 没等到行就退了 = 本机这条路不通，如实记 -1
+});
+row('typeperf 首行到达(ms)', firstLine, '看门狗 3000ms；>1500ms 要为 l1a 放宽');
 
 console.log('\n== L1b ==');
 row('Get-CimInstance Win32_Process(ms)',
@@ -1970,20 +2014,33 @@ console.log('\n探针结束。偏差 >20% 时更新 docs/superpowers/specs/2026-
 ```
 
 Run: `node scripts/probe-collect.mjs`
-Expected: 打印上表，最后一行"探针结束。"。把这六个数字抄进 Task 25 的验收记录。
+Expected: 打印上表，最后一行"探针结束。"。把这七行读数抄进 Task 25 的验收记录（`node scripts/probe-collect.mjs` 会真起 typeperf / powershell，全程约 20s，属预期）。
 
 - [ ] **Step 7: 真机端到端确认（不写进测试文件）**
 
-Run（临时脚本，跑完删除）：
-```bash
-node --input-type=module -e "
-const {createSupervisor}=await import('./lib/collect/supervisor.js');
-const {createL1a}=await import('./lib/collect/l1a-typeperf.js');
-const sup=createSupervisor({});const out=[];
-const a=createL1a({sup,onPoint:(p)=>out.push(p)});a.enable();
-setTimeout(async()=>{console.log('样本数',out.length,out.slice(0,2));await a.disable();sup.dispose();},6000);"
+Run（临时脚本 `tmp/e2e-l1a.mjs`，跑完删除；**不要**用 `node -e` 走 shell 引号）：
+```js
+const { createSupervisor } = await import('../lib/collect/supervisor.js');
+const { createL1a } = await import('../lib/collect/l1a-typeperf.js');
+const sup = createSupervisor({});
+const out = [];
+const a = createL1a({ sup, onPoint: (p) => out.push(p) });
+a.enable();
+setTimeout(() => {
+  console.log('点数', out.length, out.slice(0, 2), '状态', a.state().state, a.state().detail);
+  a.disable();
+  sup.dispose();
+}, 6000);
 ```
-Expected: `样本数 >= 3`，每个样本含 `metric: 'netDown'` 与 `netUp`，`v` 是正数。若样本数为 0，先看 `sup.state('l1a').stderrTail`（多半是计数器名在本机不存在，此时按 spec §4.2「权限不足 / 计数器名不存在」分支处理，不要改成用别的计数器凑数）。
+Expected: 点数 `>= 3`，`metric` 里 `netDown` 与 `netUp` 都有，`v` 是正数，`状态` 为 `on`。若点数为 0，先看 `a.state().stderrTail`（多半是计数器名在本机不存在，此时按 spec §4.2「权限不足 / 计数器名不存在」分支处理，不要改成用别的计数器凑数）。
+
+预检已在本机实测到的事实，照抄进结论、不要重新踩（`node scripts/probe-collect.mjs` 会复现）：
+- **英文计数器名在这台中文机器上可用**：`typeperf "\Network Interface(*)\Bytes Received/sec" "\Network Interface(*)\Bytes Sent/sec" -sc 2 -si 1` 连跑 3 次全 `status=0`，样本行如 `"09/27/2026 19:10:14.287","5168.488257","874.133584"`。
+- **`-y` 不是必需**（去掉它同样 `status=0`），它只是"退出时不提示"。别把它当成修好的原因。
+- **绝对不要用 `typeperf -q "<含 (*) 的路径>"` 排查**：实测以 `0xC0000409` 崩掉 typeperf，并在紧随其后的一次调用里报出 `错误: 没有有效计数器。`（预检第一次就是被这个连带假象骗了一下）。要验证名单用 `typeperf "<单个计数器>" -sc 1 -y`。
+- **表头实例数不固定**：本机 `(*)` 只枚举到 1 个活动网卡（列数 3），fixture 是 2 个实例（列数 5）—— 所以 tp-7 的完整性判定必须按**表头最大列号**而不是 `counters.length`。
+- 表头机器名真实形态：`"(PDH-CSV 4.0)","\\龚进的华为笔记\Network Interface(Intel[R] Wi-Fi 6 AX201 160MHz)\Bytes Received/sec"`，GBK 字节 + 前置双反斜杠，fixture 与 `HEADER_PATH_RE` 都对得上。
+- 每窗 2 样本实测 2337–2373ms ⇒ 暖身 ≈ 330ms、稳态每样本 ≈ 1s，`-sc 30` 的窗口约 30s，`minWindowMs=15s` 有 2 倍余量。
 提交信息草稿：`feat(sysops): L1a 网络吞吐采集（定窗续采 + PDH-CSV 解析）与采集实测探针`
 
 ---
