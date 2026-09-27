@@ -494,6 +494,14 @@ check('ps-3 parseProcLine 归一化：id→pid、n→name、ws→字节、cpu→
   const bad = L1B.parseProcLine(JSON.stringify({ t: 1, rows: [{ id: 'x', n: 'a.exe', ws: 5 }] }), { procCount: 8 });
   assert.equal(bad.rows[0].pid, null);
   assert.equal(bad.rows[0].ws, 5);
+  // 复审 Imp-2：`id` 是 JSON 的 null 或空串时，`Number()` 给出的是 **0**（不是 NaN），会被判成"合法 pid 0"
+  // 正好撞上真机恒有的 System Idle Process —— 上面那条 `'x'` 用例挡不住这一形，必须各钉一发。
+  const nullId = L1B.parseProcLine(JSON.stringify({ t: 2, rows: [{ id: null, n: 'b.exe', ws: 6 }, { id: '', n: 'c.exe', ws: 7 }] }), { procCount: 8 });
+  assert.equal(nullId.rows[0].pid, null, '"id":null 不是 pid 0');
+  assert.equal(nullId.rows[1].pid, null, '"id":"" 不是 pid 0');
+  assert.deepEqual(nullId.rows.map((x) => x.ws), [6, 7], '畸形 pid 的行不许被丢掉，name/ws 照样带出');
+  const real0 = L1B.parseProcLine(JSON.stringify({ t: 3, rows: [{ id: 0, n: 'System Idle Process', ws: 4096, cpu: 800 }] }), { procCount: 8 });
+  assert.equal(real0.rows[0].pid, 0, '真的 pid 0 必须是数字 0，与上面的 null 区分开');
 });
 
 check('ps-4 CPU 缺列（withCpu=false 或系统未给）时 cpuPct 为 null，不是 0', () => {
@@ -527,7 +535,7 @@ check('ps-6 单行超长（实测 391 进程 / 行 21018 字节）不影响解�
   assert.equal(t.truncated, 200);
 });
 
-check('ps-7 默认参数与实测一致：sleep 3s，但实际周期 4.6–4.9s ⇒ 心跳基准另算', () => {
+check('ps-7 默认参数与实测一致：sleep 3s，但实际周期 4.37–4.91s ⇒ 心跳基准另算', () => {
   assert.equal(L1B.INTERVAL_SEC, 3);
   assert.equal(L1B.MAX_ROWS, 400);
 });
