@@ -3345,15 +3345,19 @@ hit-3 最后一段红；④ 把 `append` 里的 `parse` 挪到 `put` 之后（�
 **Files:**
 - Create: `lib/alerts/service.js`
 - Modify: `lib/alerts/rules.js`（追加导出 `mergeRules`，不改已有函数体）
-- Modify: `test/alerts.test.mjs`（追加 ④段 `merge-*`、⑤段 `alert-*`；把末尾统计/exit 两行挪到最后）
+- Modify: `test/alerts.test.mjs`（追加 ④段 `merge-*` 4 例、⑤段 `alert-*` 10 例；把末尾统计/exit 两行挪到最后）
 
 **Interfaces:**
-- Consumes: `DEFAULT_RULES` / `ruleState` / `evaluate` / `evaluateProc`（Task 9）、`createAlertHitStore`（Task 9）、`collect.snapshot()` / `collect.onEvent()`（Task 8）、`prefs.alerts`（Task 3 的 `threshold` 形状）
+- Consumes: `DEFAULT_RULES` / `ruleState(rule, srcStates) → {dim,on,st}`（两参，Task 9 已收敛）/ `evaluate` / `evaluateProc`（Task 9）、`createAlertHitStore`（Task 9）、`collect.snapshot()` / `collect.onEvent(cb) → unsub`（Task 8）、`prefs.alerts`（Task 3 的 `threshold` 形状）
 - Produces:
   - `mergeRules(builtin, prefsAlerts) → rule[]`（纯函数：把用户阈值覆盖进内置规则，`enabled:false` 映射为 `userOff:true`，**不修改入参数组**）
   - `createAlertService({ collect, hitStore, getRulePrefs, logger, now })` → `{ start(), hits({limit}), unread(), markRead(), ruleRows(), onEvent(cb) → unsub, dispose() }`
   - `ruleRows() → { rule, st: {dim,on,st} }[]`，界面「阈值告警」卡直接吃它（原型 `renderRules` 的数据源）
-  - 事件：`{type:'alert', hit}` / `{type:'alert-store', error: string}` / `{type:'alert-rules', rows}`
+  - 事件只有两种：`{type:'alert', hit}` / `{type:'alert-store', error: string}`。
+    规则表变化**不推事件** —— `ruleRows()` 是拉取式（阈值只在 `getRulePrefs()` 里变，
+    界面每次渲染现问一次），原计划这里写的 `alert-rules` 是死契约，删（Ruling-57）。
+  - **闸门只认 `ruleState(...).on`**：`on` 同时吃掉"依赖源没开"与"用户关掉"两条分支，
+    `dim` 单条判据不够（Ruling-58）。
 
 - [ ] **Step 1: 写失败的测试（④段：mergeRules）**
 
@@ -3393,10 +3397,21 @@ check('merge-4 未知指标键忽略但可被发现；缺字段的覆盖不半�
 /* ⑤段：告警服务（假 collect + 假 hitStore + 假时钟） */
 const { createAlertService } = await import('../lib/alerts/service.js');
 
+/**
+ * 假世界三条约定，缺一条就会把编排测成假绿：
+ *  1. **每个采样点自带 1 秒推进**。`evaluate` 前面有 Task 9 的点序闸门
+ *     （`tail[i].t > tail[i-1].t` 严格递增），时钟不推进 ⇒ 三点同 `t` ⇒ 永远不报，
+ *     alert-1/2/6/8 全部只是"没测到"而不是"测错了"。
+ *  2. **订阅者存成数组**。`dispose()` 走的是 unsub 路径，桩里只留一个 `_cb` 的话
+ *     退订与重复订阅都看不见（`start()` 两次也只是覆盖同一个变量）。
+ *  3. **落库是异步的**，`alert-store` 失败事件要等一回合才到 listeners，
+ *     所以需要 `tick()`；成功分支不用（假 `append` 体里没有 await，push 在同步段就跑完了）。
+ */
 function alertWorld(over = {}) {
   let t = 0;
   const events = [];
   const appended = [];
+  const cbs = [];
   const srcStates = over.srcStates ?? { l0: 'on', l1a: 'on', l1b: 'on' };
   const series = { cpu: [], mem: [], diskFreePct: [], netDown: [], netUp: [], ...over.series };
   const collect = {
@@ -3407,7 +3422,10 @@ function alertWorld(over = {}) {
       sources: Object.entries(srcStates).map(([key, state]) => ({ key, state })),
       proc: { rows: over.procRows ?? [] },
     }),
-    onEvent: (cb) => { collect._cb = cb; return () => { collect._cb = null; }; },
+    onEvent: (cb) => {
+      cbs.push(cb);
+      return () => { const i = cbs.indexOf(cb); if (i >= 0) cbs.splice(i, 1); };
+    },
   };
   const hitStore = over.noStore ? null : {
     available: true,
@@ -3424,9 +3442,11 @@ function alertWorld(over = {}) {
   svc.onEvent((e) => events.push(e));
   svc.start();
   const adv = (ms) => { t += ms; };
-  const emitPoint = (key, v) => { series[key].push({ t, v }); collect._cb({ type: 'metrics', key, point: { t, v } }); };
-  const emitProc = (rows) => { over.procRows = rows; collect._cb({ type: 'proc', rows }); };
-  return { svc, adv, t: () => t, events, appended, emitPoint, emitProc, series, srcStates };
+  const fire = (ev) => cbs.slice().forEach((cb) => cb(ev));
+  const emitPoint = (key, v) => { t += 1000; series[key].push({ t, v }); fire({ type: 'metrics', key, point: { t, v } }); };
+  const emitProc = (rows) => { over.procRows = rows; fire({ type: 'proc', rows }); };
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  return { svc, adv, t: () => t, events, appended, cbs, emitPoint, emitProc, tick, series, srcStates };
 }
 
 await checkAsync('alert-1 CPU 连续 3 次越线 → emit alert 且落库一次', async () => {
@@ -3434,9 +3454,11 @@ await checkAsync('alert-1 CPU 连续 3 次越线 → emit alert 且落库一次'
   w.emitPoint('cpu', 90); w.emitPoint('cpu', 91);
   assert.equal(w.events.filter((e) => e.type === 'alert').length, 0, '两次不够，别提前报');
   w.emitPoint('cpu', 92);
+  await w.tick(); // record 的尾巴（append 之后）是异步的，不 settle 就数不清几次
   const hit = w.events.find((e) => e.type === 'alert').hit;
   assert.equal(hit.ruleId, 'r1');
   assert.equal(w.appended.length, 1);
+  assert.equal(w.events.filter((e) => e.type === 'alert').length, 1, '一次命中只能有一条 alert');
 });
 
 await checkAsync('alert-2 冷却内再越线不重复报（时间线会被同一次尖峰刷屏）', async () => {
@@ -3444,6 +3466,7 @@ await checkAsync('alert-2 冷却内再越线不重复报（时间线会被同一
   for (const v of [90, 91, 92]) w.emitPoint('cpu', v);
   w.adv(1000);
   w.emitPoint('cpu', 99);
+  await w.tick();
   assert.equal(w.appended.length, 1, `冷却 10 分钟，第二次不该落库，实得 ${w.appended.length}`);
 });
 
@@ -3472,6 +3495,7 @@ await checkAsync('alert-5 用户关掉规则 → 不报，但 st 是「已暂停
 await checkAsync('alert-6 未读计数：命中 +1，markRead 归零（驱动侧边栏蓝点）', async () => {
   const w = alertWorld();
   w.emitPoint('cpu', 90); w.emitPoint('cpu', 91); w.emitPoint('cpu', 92);
+  await w.tick(); // 只能在 record 全落定后断言，否则"命中 +1 且只 +1"是撞对的
   assert.equal(w.svc.unread(), 1);
   w.svc.markRead();
   assert.equal(w.svc.unread(), 0);
@@ -3488,19 +3512,36 @@ await checkAsync('alert-7 procCpu 走 rows 判定，命中后 note 是进程名'
 await checkAsync('alert-8 落库失败不静默：转成 alert-store 事件 + logger.warn', async () => {
   const w = alertWorld({ storeFails: true });
   w.emitPoint('cpu', 90); w.emitPoint('cpu', 91); w.emitPoint('cpu', 92);
+  await w.tick(); // append 的 rejection 在下一个微任务回合才落到 catch，不等就永远看不到这条事件
   const e = w.events.find((x) => x.type === 'alert-store');
   assert.ok(e, '必须有一条可见的失败事件');
   assert.match(e.error, /disk full/);
   assert.ok(w.events.some((x) => x.type === 'log'));
+  assert.equal(w.svc.unread(), 1, '落库失败不影响未读计数');
 });
 
-await checkAsync('alert-9 无 hitStore（宿主缺 storageDomain）时仍评估但仍置灰写入；dispose 后不再收事件', async () => {
+await checkAsync('alert-9 宿主没给 storageDomain：仍评估仍计未读，但写与读都是可见的降级', async () => {
+  const w = alertWorld({ noStore: true });
+  w.emitPoint('cpu', 90); w.emitPoint('cpu', 91); w.emitPoint('cpu', 92);
+  assert.equal(w.appended.length, 0);
+  assert.equal(w.svc.unread(), 1, '没库也要报到人前');
+  const e = w.events.find((x) => x.type === 'alert-store');
+  assert.ok(e && /storageDomain/.test(e.error), '不可用必须是事件，不是沉默');
+  assert.ok(w.events.some((x) => x.type === 'log'));
+  const r = await w.svc.hits({ limit: 10 });
+  assert.deepEqual(r, { rows: [], error: 'storageDomain 不可用' });
+});
+
+await checkAsync('alert-10 dispose 退订：之后的采样点不再产生任何事件，start() 两次也只订阅一次', async () => {
   const w = alertWorld();
+  w.svc.start(); // 重复 start 必须被去重，否则一次尖峰会报两遍
+  assert.equal(w.cbs.length, 1, `start() 两次不该留两条订阅，实有 ${w.cbs.length}`);
   w.emitPoint('cpu', 90); w.emitPoint('cpu', 91);
   w.svc.dispose();
+  assert.equal(w.cbs.length, 0, 'dispose 必须真的从桩里退订');
   w.emitPoint('cpu', 92);
   assert.equal(w.appended.length, 0, 'dispose 后必须退订');
-  assert.equal(w.svc.hits ? typeof w.svc.hits, 'function');
+  assert.equal(w.svc.unread(), 0);
 });
 
 console.log(`\n  ${passed}/${passed + failed} 通过`);
@@ -3510,7 +3551,7 @@ process.exit(failed ? 1 : 0);
 - [ ] **Step 3: 跑测试确认失败**
 
 Run: `node test/alerts.test.mjs`
-Expected: `merge-1` 起 4 例 FAIL（`R.mergeRules is not a function`），⑤段 `ERR_MODULE_NOT_FOUND` 在 import 阶段就让整文件红 —— 两种红都算失败确认到位。
+Expected: 先打 19 行结果（`rule-*`/`hit-*` 15 行 PASS + `merge-1..4` 4 行 FAIL，`R.mergeRules is not a function`），随后 ⑤段 的顶层 `await import('../lib/alerts/service.js')` 甩 `ERR_MODULE_NOT_FOUND` 结束进程 —— 因此**没有统计行**，退出码非 0。两种红都算失败确认到位。
 
 - [ ] **Step 4: 写实现**
 
@@ -3544,17 +3585,18 @@ export function mergeRules(builtin, prefsAlerts) {
 
 ```js
 /**
- * 告警编排：订阅采集事件 → 依赖闸门 → 纯函数判定 → 落库 + 推流 + 未读。
+ * 告警编排：订阅采集事件 → 闸门 → 纯函数判定 → 落库 + 推流 + 未读。
  *
- * 三条约定：
- *  1. **闸门在前，判定在后**（spec §3.5）：依赖源不是 `on` 的规则整条跳过，
- *     所以「关了网速采集还在报下行告警」在结构上不可能发生。
+ * 四条约定：
+ *  1. **闸门在前，判定在后**（spec §3.5）：闸门读 `ruleState(...).on`，它一次覆盖
+ *     "依赖源不是 on"与"用户把这条规则关了"两种不报的情形。只看 `dim` 的话，
+ *     关了开关的规则照样会天天往时间线里写记录（alert-5 钉死）。
  *  2. 采集服务是上游，本服务只订阅它的事件（单向依赖，service.js 不 import api.js）。
- *  3. 落库失败必须变成一条可见事件（spec §4.7 禁止静默 catch），并且不影响后续判定。
+ *  3. 一轮事件只取一次 `snapshot()`：状态与 series 必须来自同一帧，
+ *     否则真机上是两次采样之间的撕裂视图，判定结果无法复现。
+ *  4. 落库失败必须变成一条可见事件（spec §4.7 禁止静默 catch），并且不影响后续判定。
  */
 import { DEFAULT_RULES, mergeRules, ruleState, evaluate, evaluateProc } from './rules.js';
-
-const STATE_ON = 'on';
 
 export function createAlertService({ collect, hitStore, getRulePrefs, logger, now }) {
   const lastHitAt = new Map();
@@ -3564,10 +3606,7 @@ export function createAlertService({ collect, hitStore, getRulePrefs, logger, no
 
   const emit = (e) => listeners.forEach((cb) => cb(e));
   const rules = () => mergeRules(DEFAULT_RULES, getRulePrefs?.());
-  const srcStates = () => {
-    const snap = collect.snapshot();
-    return (snap?.sources ?? []).reduce((acc, r) => ({ ...acc, [r.key]: r.state }), {});
-  };
+  const srcStates = (snap) => (snap?.sources ?? []).reduce((acc, r) => ({ ...acc, [r.key]: r.state }), {});
 
   async function record(hit) {
     lastHitAt.set(hit.ruleId, hit.t);
@@ -3587,25 +3626,16 @@ export function createAlertService({ collect, hitStore, getRulePrefs, logger, no
   }
 
   function onCollectEvent(ev) {
-    if (ev?.type === 'metrics') {
-      const snap = collect.snapshot();
-      const states = srcStates();
-      for (const rule of rules()) {
-        if (rule.metric !== ev.key) continue;
-        if (ruleState(rule, states).dim) continue;
-        const hit = evaluate(rule, snap.series?.[rule.metric], now(), lastHitAt.get(rule.id) ?? null);
-        if (hit) void record(hit);
-      }
-      return;
-    }
-    if (ev?.type === 'proc') {
-      const states = srcStates();
-      for (const rule of rules()) {
-        if (rule.metric !== 'procCpu') continue;
-        if (ruleState(rule, states).dim) continue;
-        const hit = evaluateProc(rule, ev.rows, now(), lastHitAt.get(rule.id) ?? null);
-        if (hit) void record(hit);
-      }
+    if (ev?.type !== 'metrics' && ev?.type !== 'proc') return;
+    const snap = collect.snapshot();
+    const states = srcStates(snap);
+    for (const rule of rules()) {
+      if (rule.metric !== (ev.type === 'proc' ? 'procCpu' : ev.key)) continue;
+      if (!ruleState(rule, states).on) continue;
+      const hit = ev.type === 'proc'
+        ? evaluateProc(rule, ev.rows, now(), lastHitAt.get(rule.id) ?? null)
+        : evaluate(rule, snap.series?.[rule.metric], now(), lastHitAt.get(rule.id) ?? null);
+      if (hit) void record(hit);
     }
   }
 
@@ -3615,8 +3645,8 @@ export function createAlertService({ collect, hitStore, getRulePrefs, logger, no
       unsub = collect.onEvent(onCollectEvent);
     },
     ruleRows() {
-      const states = srcStates();
-      return rules().map((rule) => ({ rule, st: ruleState(rule, states, now()) }));
+      const states = srcStates(collect.snapshot());
+      return rules().map((rule) => ({ rule, st: ruleState(rule, states) }));
     },
     async hits({ limit = 50 } = {}) {
       if (!hitStore?.available) return { rows: [], error: 'storageDomain 不可用' };
@@ -3636,9 +3666,18 @@ export function createAlertService({ collect, hitStore, getRulePrefs, logger, no
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `node test/alerts.test.mjs`
-Expected: `28/28 通过`（①10 + ②5 + ④4 + ⑤9），退出码 0。
-`SKIP_LOCAL=1 node test/alerts.test.mjs` 同样 `28/28`（本文件无真机用例）。
-提交信息草稿：`feat(sysops): 告警评估编排（依赖闸门 + 未读计数 + 落库失败可见）`
+Expected: `29/29 通过`（①②③段 15 条 = `rule-1..10` + `hit-1..5`，加 ④段 4 条 `merge-*`、⑤段 10 条 `alert-*`），退出码 0。
+`SKIP_LOCAL=1 node test/alerts.test.mjs` 同样 `29/29`（本文件无真机用例）。
+
+**必须自证的四条变异**（改一行、跑一次、`git checkout` 还原；报告里要贴每条的红点用例名）：
+1. 闸门 `!ruleState(rule, states).on` 换成 `.dim` → 红在 `alert-5`（用户关掉的规则仍在报）。
+2. `unreadCount += 1` 从 `emit` 前挪到 `await hitStore.append(hit)` 之后 → 红在 `alert-6`（落定后数到 2）与 `alert-8`/`alert-9`（落库没成功就不计未读）。
+   **这条依赖 alert-1/2/6 里的 `await w.tick()`**：不 settle 的话"命中 +1 且只 +1"是撞对的，变异跑不红（预检现采）。
+3. `start()` 去掉 `if (unsub) return;` → 红在 `alert-10`（`cbs.length` 变 2）。
+4. `dispose()` 去掉 `listeners.clear()`（只留 unsub）→ 这条**不该红**，也不该由本任务补测试：退订已经切断了唯一事件源，`listeners` 留着只是内存。反过来若去掉 `unsub()` 只清 listeners → 必须红在 `alert-10`（`appended` 变 1），这一条要跑。
+
+旁路不许漂：`node test/collect.test.mjs` → `48/48`，`node test/prefs.test.mjs` → `13/13`，`node test/guard.test.mjs` → `19/19`。
+提交信息草稿：`feat(sysops): 告警评估编排（on 闸门 + 未读计数 + 落库失败可见）`
 
 ---
 
@@ -4362,7 +4401,7 @@ process.exit(failed ? 1 : 0);
 - [ ] **Step 3: 跑测试确认失败**
 
 Run: `node test/clean.test.mjs`
-Expected: `rec-1` FAIL（`lib/alerts/spec.js` 已被改名 → `ERR_MODULE_NOT_FOUND`）或 schema 缺表报错。改名后 alerts 测试必须同步变绿：Run `node test/alerts.test.mjs` Expected `28/28`。
+Expected: `rec-1` FAIL（`lib/alerts/spec.js` 已被改名 → `ERR_MODULE_NOT_FOUND`）或 schema 缺表报错。改名后 alerts 测试必须同步变绿：Run `node test/alerts.test.mjs` Expected `29/29`。
 
 - [ ] **Step 4: 写实现**
 
@@ -4389,7 +4428,7 @@ Expected: `rec-1` FAIL（`lib/alerts/spec.js` 已被改名 → `ERR_MODULE_NOT_F
 Run: `node test/clean.test.mjs`
 Expected: `21/21 通过`（①11 + 真机 1 + ②9 —— SKIP_LOCAL 下 20/20 + 1 SKIP）
 Run: `SKIP_LOCAL=1 node test/clean.test.mjs` → `20/20 通过`
-Run: `node test/alerts.test.mjs` → `28/28 通过`（改名回归）
+Run: `node test/alerts.test.mjs` → `29/29 通过`（改名回归）
 提交信息草稿：`refactor(sysops): 记录域改名 records 并加清单快照/执行留痕仓储`
 
 ---
@@ -7234,7 +7273,7 @@ SKIP_LOCAL=1 node test/search.test.mjs
 Expected：
 - `plugin.test.mjs` `90/90`（①15 rt ②8 hx ③12 cf ④16 pg1 ⑤14 pg2 ⑥12 pg3 ⑦13 pg4）
 - `host-compat.test.mjs` `8/8`（hc-1..hc-8）
-- `collect.test.mjs` `48/48`、`alerts.test.mjs` `28/28`、`clean.test.mjs` `46/46`（含 1 条真机）、`search.test.mjs` `26/26`、`prefs.test.mjs` `23/23`（①3 ②4 ③6 ④10）、`guard.test.mjs` `19/19`（另需打印「拒绝断言 61 条 / 分支命中 16/16」，见 Step 2）
+- `collect.test.mjs` `48/48`、`alerts.test.mjs` `29/29`、`clean.test.mjs` `46/46`（含 1 条真机）、`search.test.mjs` `26/26`、`prefs.test.mjs` `23/23`（①3 ②4 ③6 ④10）、`guard.test.mjs` `19/19`（另需打印「拒绝断言 61 条 / 分支命中 16/16」，见 Step 2）
 - `SKIP_LOCAL=1` 两行：`clean` → `45/45 + 1 SKIP`，`search` → Everything 相关真机用例 SKIP、walk 通路仍实跑
 - **任何一条 FAIL 都不算过**；出现"用例静默通过"（断言对象为空数组的 `.some()`）要按 Step 3 的变异法回查。
 
