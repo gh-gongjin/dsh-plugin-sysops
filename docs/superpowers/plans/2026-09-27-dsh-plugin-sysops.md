@@ -233,7 +233,7 @@ Expected: 抛 `ERR_MODULE_NOT_FOUND`，信息含 `lib/kv-schema.js`（文件还�
       name: dsh-plugin-sysops
 ```
 
-- `lib/kv-schema.js`：**逐字节复制** `../dsh-plugin-stock-analysis/lib/kv-schema.js`（239 行，含文件头说明），只把文件头第一段里的 `docs/host-capabilities.md 三` 改为 `../dsh-plugin-stock-analysis/docs/host-capabilities.md 三`，其余不动。理由（写进文件头新增的两行注释）：宿主 `storageDomain` 只调 `parse/safeParse` 且零 `instanceof` 检查，官方包不能 import（`link:` 会解析出第二份实例），所以两份实现必须**保持同源**，不要各自漂移。
+- `lib/kv-schema.js`：**逐字节复制** `../dsh-plugin-stock-analysis/lib/kv-schema.js`（250 行 / 18 个导出，含文件头说明），只把文件头第一段里的 `docs/host-capabilities.md 三` 改为 `../dsh-plugin-stock-analysis/docs/host-capabilities.md 三`，其余不动。理由（写进文件头新增的两行注释）：宿主 `storageDomain` 只调 `parse/safeParse` 且零 `instanceof` 检查，官方包不能 import（`link:` 会解析出第二份实例），所以两份实现必须**保持同源**，不要各自漂移。
 
 - [ ] **Step 4: 跑测试确认通过**
 
