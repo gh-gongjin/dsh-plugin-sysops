@@ -4229,6 +4229,7 @@ Expected: 无异常退出；`walked` 与耗时同量级合理（4 条规则约�
 **Files:**
 - Rename: `lib/alerts/spec.js` → `lib/records/spec.js`（三张表齐了才看得出它不属于 alerts；`lib/alerts/store.js` 与 `test/alerts.test.mjs` 的 import 同步改）
 - Modify: `lib/records/spec.js`（追加 `clean_plan` / `clean_log` 两表）
+- Create: `lib/kv-records-base.js`（四段共用骨架工厂 —— 见下方 Ruling-63，第三/第四份复制禁止）
 - Create: `lib/clean/plan-store.js`
 - Create: `lib/clean/log-store.js`
 - Modify: `test/clean.test.mjs`（追加 ②段）
@@ -4405,7 +4406,10 @@ Expected: `rec-1` FAIL（`lib/alerts/spec.js` 已被改名 → `ERR_MODULE_NOT_F
 
 - [ ] **Step 4: 写实现**
 
-两个仓储共用同一套骨架（`ensureDomain` 缓存 promise + 写队列串行 + 裁剪），与参照实现的差别是 **`put` 前先 `get` 查重**（`DUPLICATE`）—— 这是偏好仓储明确不做的事，所以两个仓储各写各的、不共享 helper：
+两个仓储共用同一套骨架（`ensureDomain` 缓存 promise + 写队列串行 + 裁剪），与参照实现的差别是 **`put` 前先 `get` 查重**（`DUPLICATE`）：
+
+> **Ruling-63（Task 9 评审连带，约束本任务）**：`lib/alerts/store.js` 与 `lib/prefs/store.js` 的近逐字双份是任务书明文「骨架照抄」的产物，评审定为 plan-mandated、Task 9 已签收。**本任务不得再抄出第三、第四份**：把四段共用骨架（`facilityOf` / `assertUsable` / `ensureDomain` / `available` + `close`）抽成 `lib/kv-records-base.js` 工厂，由参数注入 `domain`、表名、错误类与中文文案；`plan-store.js` / `log-store.js` 各薄包一层，各自真正独有的 `save/get/list/trim/查重` 留在自己文件里。
+> **不迁移** `lib/prefs/store.js` 与 `lib/alerts/store.js`：两者各有已钉死的变异级测试与不同错误词表，为 DRY 去重写已交付的采集/告警主路径不划算。四份是否最终归一，交全分支大评审定。
 
 ```js
 /**
