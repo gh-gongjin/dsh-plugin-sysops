@@ -1825,10 +1825,15 @@ check('tp-10 l1a 门面：onData 收 Buffer、解码一次、下游抛错不外�
   feed(FIX[1]);            // 抛错之后的下一行仍要出数，不能整条流哑掉
   assert.deepEqual(pts.map((p) => p.metric), ['netDown', 'netDown', 'netUp']);
   assert.equal(a.state().state, 'on');
+  // 这两个数值字段是 l1a 自己扩的（监督者快照里没有），Task 8 的界面直接读它们 ——
+  // 没有断言就是"与代码不符的陈述"：吞掉的那次异常必须留痕，没认出表头的行必须能累加。
+  assert.equal(a.state().dataErrors, 1);
+  assert.match(a.state().detail, /boom-downstream/);
   a.disable();
   assert.deepEqual(stops, ['l1a']);
   feed(FIX[1]);            // disable 后表头必须已清空：不许拿旧 index 去解新列布局
   assert.equal(pts.length, 3);
+  assert.equal(a.state().noHeaderRuns, 1);   // 阈值是 5，这里未到，只验计数本身在走
 });
 ```
 
@@ -1976,6 +1981,11 @@ Expected: `30/30 通过`（①4 ②5 ③11 ④10），退出码 0。
 再加两条针对返工项的变异（tp-10 必须各咬红一次）：
 4. 去掉 `onData` 的 try/catch → tp-10 必须红（`onPoint` 抛错冒出 `data` 处理器 = 真机 uncaughtException 带崩宿主）。
 5. `disable()` 里去掉 `headers = null` → tp-10 最后一条必须红（旧 index 解新列布局 = 静音错值）。
+6. 三个控制器补的断言各自咬红一项（④段计数仍为 10，只往 tp-10 体内加断言）：
+   - `dataErrors += 1` 改 `+= 0` → 只有 `dataErrors === 1` 红（实测读数 `0 == 1`）。
+   - `noHeaderRuns += 1` 改 `+= 0` → 只有 `noHeaderRuns === 1` 红（实测读数 `0 == 1`）。
+   - `if (lastError) reasons.push(...)` 改 `if (false)` → `detail` 那条正则断言红。
+   （第 3 项的改法别写成 `lastError = ''` —— 会被 `if (lastError)` 那层守卫吃掉，是**空变异**，实测 30/30 全绿。）
 
 - [ ] **Step 6: 写探针脚本 `scripts/probe-collect.mjs`**
 

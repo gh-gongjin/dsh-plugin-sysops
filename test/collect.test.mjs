@@ -441,10 +441,15 @@ check('tp-10 l1a 门面：onData 收 Buffer、解码一次、下游抛错不外�
   feed(FIX[1]);            // 抛错之后的下一行仍要出数，不能整条流哑掉
   assert.deepEqual(pts.map((p) => p.metric), ['netDown', 'netDown', 'netUp']);
   assert.equal(a.state().state, 'on');
+  // 这两个数值字段是 l1a 自己扩的（监督者快照里没有），Task 8 的界面直接读它们 ——
+  // 没有断言就是"与代码不符的陈述"：吞掉的那次异常必须留痕，没认出表头的行必须能累加。
+  assert.equal(a.state().dataErrors, 1);
+  assert.match(a.state().detail, /boom-downstream/);
   a.disable();
   assert.deepEqual(stops, ['l1a']);
   feed(FIX[1]);            // disable 后表头必须已清空：不许拿旧 index 去解新列布局
   assert.equal(pts.length, 3);
+  assert.equal(a.state().noHeaderRuns, 1);   // 阈值是 5，这里未到，只验计数本身在走
 });
 
 console.log(`\n  ${passed}/${passed + failed} 通过`);
