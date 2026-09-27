@@ -71,6 +71,11 @@ check('prefs-1 domain 名合法且两张表', () => {
   assert.equal(prefsDomain.version, 1);
   assert.deepEqual(PREF_KEYS.slice().sort(), ['clean_rules', 'prefs']);
   assert.deepEqual(Object.keys(prefsDomain.tables).sort(), ['clean_rules', 'prefs']);
+  // 字面量钉住：KV 行键 / 采集档位白名单 / 源开关集合 —— Task 5–8 与 18 按字面量对接，
+  // 今天改一个字母全套测试照样绿就是事故源头。
+  assert.equal(PREF_ROW_KEY, 'current');
+  assert.deepEqual([...COLLECT_CADENCE], ['1s', '5s', 'paused']);
+  assert.deepEqual([...SOURCE_KEYS], ['l0', 'l1a', 'l1b', 'l2']);
 });
 
 check('prefs-2 prefs 记录：采样档位白名单、源开关三态、脏字段丢弃', () => {
@@ -81,6 +86,8 @@ check('prefs-2 prefs 记录：采样档位白名单、源开关三态、脏字�
   assert.throws(() => t.parse({ collect: { cadence: '2s' } }), /cadence/);
   assert.throws(() => t.parse({ sources: { l9: true } }), /l9/);
   assert.throws(() => t.parse({ collect: { keepMinutes: 0 } }), /keepMinutes/);
+  // 非对象输入必须报"sources 必须是对象"，而不是 Object.keys('all') 误报出的源开关 '0'
+  assert.throws(() => t.parse({ sources: 'all' }), /sources 必须是对象/);
 });
 
 check('prefs-3 prefs 记录：告警阈值、搜索通路、限定目录、null 与空数组的区别', () => {
@@ -95,6 +102,8 @@ check('prefs-3 prefs 记录：告警阈值、搜索通路、限定目录、null 
   assert.throws(() => t.parse({ alerts: { cpu: { value: '85', consecutive: 3, cooldownSec: 60 } } }), /value/);
   assert.throws(() => t.parse({ alerts: { cpu: { value: 85, consecutive: 0, cooldownSec: 60 } } }), /consecutive/);
   assert.throws(() => t.parse({ alerts: { cpu: { value: 85, consecutive: 1, cooldownSec: 5 } } }), /cooldownSec/);
+  // search.mode 白名单必须有真断言：改名 mode 白名单不能无声漂掉
+  assert.throws(() => t.parse({ search: { mode: 'find' } }), /mode/);
 });
 
 check('prefs-4 clean_rules：本机新增规则的形状，glob 必填、拒绝形状进库', () => {
@@ -175,12 +184,23 @@ await checkAsync('prefs-8 未知 key 拒绝；writeMany 跳过未知键但不拖
   const { written, skipped } = await s.writeMany({ prefs: { collect: { cadence: '1s' } }, nofix: {}, clean_rules: null });
   assert.deepEqual(Object.keys(written), ['prefs']);
   assert.deepEqual(skipped.sort(), ['clean_rules', 'nofix']);
+  // 脏值写入必须以带 code 的 INVALID 失败（消息要能指明是哪一份设置）
+  await assert.rejects(
+    () => s.write('prefs', { collect: { cadence: 'nope' } }),
+    (e) => e.code === PREFS_ERROR.INVALID && /偏好 prefs 校验失败/.test(e.message),
+    '脏 prefs 写入要落成 PREFS_INVALID，不能是裸 Error',
+  );
 });
 
 await checkAsync('prefs-9 无 storageDomain 是降级不是异常：available=false 且读抛 UNAVAILABLE', async () => {
   const s = fresh({ facility: undefined });
   assert.equal(s.available, false);
   await assert.rejects(() => s.readAll(), (e) => e.code === PREFS_ERROR.UNAVAILABLE);
+  // 给了设施但 open 失败：available 仍 true（能力探测，不看上次 open 成败），
+  // 但读必须抛带 code PREFS_UNAVAILABLE 的错误，且保留原始 message 供排查。
+  const s2 = fresh({ facility: { open: () => Promise.reject(new Error('already open')) } });
+  assert.equal(s2.available, true);
+  await assert.rejects(() => s2.readAll(), { code: PREFS_ERROR.UNAVAILABLE, message: /already open/ });
 });
 
 await checkAsync('prefs-10 close() 必须可 await，且 close 后写报 CLOSED', async () => {
