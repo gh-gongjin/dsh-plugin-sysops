@@ -138,12 +138,40 @@ await checkAsync('cln-4 totals 与 items 一致；walked 统计所有 stat 过�
   assert.ok(res.walked >= 10, `walked=${res.walked}`);
 });
 
+// F-1（Ruling-77）的共用夹具：一个「第一层是目录」的候选，它内部更深的位置可以藏文件。
+// X 用假 FS 的 join 口径（`/`），断言直接与 `item.path` / `skipped[].dir` 比对，不做反斜杠归一。
+const X_OLDDIR = 'C:/Users/gongj/AppData/Local/Temp/olddir';
+
 await checkAsync('cln-5 拒绝访问的目录记进 skipped 且写日志，不静默', async () => {
   const w = world(tree(), { denied: ['C:/Users/gongj/AppData/Local/Temp/olddir/sub'] });
   const res = await w.sc.scan([rule()]);
   assert.ok(res.skipped.length >= 1);
   assert.equal(res.skipped[0].code, 'EPERM');
   assert.ok(w.log.length >= 1, '每个 catch 都要留下可见痕迹（spec §4.7）');
+});
+
+await checkAsync('cln-5b 候选内部某个条目 stat 失败 ⇒ 整条不作样本（F-1：读不到就不知道它是不是新文件）', async () => {
+  // secret.bin 是候选 olddir 内部的一个子项：只把它标成拒绝访问，olddir 的其余子项照样能读、
+  // 也照样「够老」（a.bin 是 20 天前），所以漏掉它时 olddir 看着像「整条都够老」—— 这正是 F-1。
+  const entries = tree().concat([
+    { path: `${X_OLDDIR}/secret.bin`, size: 5, atimeMs: ago(5), mtimeMs: ago(5) },
+  ]);
+  const w = world(entries, { denied: [`${X_OLDDIR}/secret.bin`] });
+  const res = await w.sc.scan([rule()]);
+  assert.ok(
+    res.skipped.some((s) => s.code === 'EPERM' && s.dir === `${X_OLDDIR}/secret.bin`),
+    `stat 失败的子项要留在 skipped：${JSON.stringify(res.skipped)}`,
+  );
+  assert.equal(
+    res.items.some((i) => i.path === X_OLDDIR),
+    false,
+    '这一条里有读不到的子项 ⇒ 本次不作为候选（不进删除清单）',
+  );
+  assert.equal(
+    res.skipped.some((s) => s.code === 'INCOMPLETE' && s.dir === X_OLDDIR),
+    true,
+    '不完整要说得出原因，而不是悄悄空掉',
+  );
 });
 
 await checkAsync('cln-6 命中红线的规则目录直接跳过（第二道闸，不依赖扫描器自觉）', async () => {
@@ -155,12 +183,45 @@ await checkAsync('cln-6 命中红线的规则目录直接跳过（第二道闸�
 
 await checkAsync('cln-7 stop() 中途收手：stopped=true，已发现的部分仍然返回（可继续查看）', async () => {
   const entries = [{ path: 'C:/Users/gongj/AppData/Local/Temp', dir: true }];
-  for (let i = 0; i < 50; i++) entries.push({ path: `C:/Users/gongj/AppData/Local/Temp/f${i}.log`, size: 10, atimeMs: ago(9), mtimeMs: ago(9) });
+  for (let i = 0; i < 49; i++) entries.push({ path: `C:/Users/gongj/AppData/Local/Temp/f${i}.log`, size: 10, atimeMs: ago(9), mtimeMs: ago(9) });
+  // d 是第一层的**目录**候选，收手点选在它的子树里：d 已经累加到一个文件（count>0），
+  // 但它的子目录 d/deep 还压在栈里没走（pending>0）—— 这就是 F-1 说的「半截候选」。
+  entries.push({ path: 'C:/Users/gongj/AppData/Local/Temp/d', dir: true });
+  entries.push({ path: 'C:/Users/gongj/AppData/Local/Temp/d/a.bin', size: 10, atimeMs: ago(9), mtimeMs: ago(9) });
+  entries.push({ path: 'C:/Users/gongj/AppData/Local/Temp/d/deep', dir: true });
+  entries.push({ path: 'C:/Users/gongj/AppData/Local/Temp/d/deep/x.bin', size: 10, atimeMs: ago(9), mtimeMs: ago(9) });
   const w = world(entries);
-  const p = w.sc.scan([rule()], { every: () => w.sc.stop() });
-  const res = await p;
+  // every() 的调用次序：49 个文件 + 目录 d 入栈 = 前 50 次；出栈进 d 后 a.bin 第 51 次；
+  // d/deep 入栈第 52 次 ⇒ 在这里收手，d 正是「有 count 但子树没排空」的那一条。
+  let ticks = 0;
+  const res = await w.sc.scan([rule()], { every: () => { ticks += 1; if (ticks === 52) w.sc.stop(); } });
   assert.equal(res.stopped, true);
   assert.ok(res.items.length < 50, '真停住了，不是跑完才标 stopped');
+  // F-1：收手时子树没排空的候选不得带着半截 size/count/newest 进清单；已定稿的部分照样交回去。
+  assert.equal(
+    res.items.some((i) => i.path === 'C:/Users/gongj/AppData/Local/Temp/d'),
+    false,
+    '中途收手时仍在栈里的候选不作样本',
+  );
+  assert.equal(
+    res.skipped.some((s) => s.code === 'INCOMPLETE' && s.dir === 'C:/Users/gongj/AppData/Local/Temp/d'),
+    true,
+    '被收手打断的候选要留下一条不完整记录',
+  );
+  assert.equal(res.items.some((i) => i.path === 'C:/Users/gongj/AppData/Local/Temp/f0.log'), true);
+  // 对照（Ruling-79）：同一棵树、不收手 ⇒ d 走完子树本来就该进清单。
+  // 缺这一句就分不清「是 pending 判据拦掉了它」还是「它本来就不进清单」，上面两条断言会是空证。
+  const full = await world(entries).sc.scan([rule()]);
+  assert.equal(
+    full.items.some((i) => i.path === 'C:/Users/gongj/AppData/Local/Temp/d'),
+    true,
+    '对照：走完整个子树时这条本来就该进清单',
+  );
+  assert.equal(
+    full.skipped.some((s) => s.code === 'INCOMPLETE'),
+    false,
+    `走完了就不该有不完整记录：${JSON.stringify(full.skipped)}`,
+  );
 });
 
 await checkAsync('cln-8 onProgress 按时间片节流（1s 推 60 帧会把 SSE 挤爆）', async () => {
@@ -191,6 +252,41 @@ await checkAsync('cln-9b maxDepth 越深的目录不再下探，计入 skipped �
   const w = world(entries, { scanner: { maxDepth: 1 } });
   const res = await w.sc.scan([rule()]);
   assert.ok(res.skipped.some((s) => s.code === 'DEPTH'), JSON.stringify(res.skipped));
+});
+
+await checkAsync('cln-9c 深度截断的子树 ⇒ 父目录本次不作候选（F-1 的主证：没走完不得当「整条都够老」）', async () => {
+  // olddir 的第一层子项 a.bin 是 20 天前（够老），更深的 sub 里藏一个**昨天**的 fresh.bin。
+  // maxDepth=2 时 sub 不被下探 ⇒ fresh.bin 进不了 newest，olddir 看着像「整条都够老」，
+  // 而 Task 15 的 delete-dir 会对它 recursive 整删 —— 清单之外的文件被删掉是本插件最重的红线。
+  const entries = [
+    { path: 'C:/Users/gongj/AppData/Local/Temp', dir: true },
+    { path: X_OLDDIR, dir: true },
+    { path: `${X_OLDDIR}/a.bin`, size: 4096, atimeMs: ago(20), mtimeMs: ago(20) },
+    { path: `${X_OLDDIR}/sub`, dir: true },
+    { path: `${X_OLDDIR}/sub/fresh.bin`, size: 100, atimeMs: ago(1), mtimeMs: ago(1) },
+  ];
+  const cut = await world(entries, { scanner: { maxDepth: 2 } }).sc.scan([rule()]);
+  assert.equal(
+    cut.items.some((i) => i.path === X_OLDDIR),
+    false,
+    '深度截断 ⇒ 这一条没走完，本次不作为候选',
+  );
+  assert.ok(cut.skipped.some((s) => s.code === 'DEPTH'), `应有 DEPTH 记录：${JSON.stringify(cut.skipped)}`);
+  assert.ok(cut.skipped.some((s) => s.code === 'INCOMPLETE' && s.dir === X_OLDDIR), '应有父候选的 INCOMPLETE 记录');
+  // 对照：同一棵树把 maxDepth 放到够深 ⇒ 走完整个子树，昨天的 fresh.bin 被 newest 抓到，
+  // 这条同样不进清单（两个方向合起来才钉住判据是「走完 + 够老」，不是「没走完就当它老」）。
+  const w = world(entries);
+  const full = await w.sc.scan([rule()]);
+  assert.equal(
+    full.items.some((i) => i.path === X_OLDDIR),
+    false,
+    '走完并发现新文件 ⇒ 按 newest 过龄判定，同样不进清单',
+  );
+  assert.equal(
+    full.skipped.some((s) => s.code === 'INCOMPLETE'),
+    false,
+    '走完了就不该有不完整记录：' + JSON.stringify(full.skipped),
+  );
 });
 
 await checkAsync('cln-10 riskOf：浏览器/IM 缓存标 mid 并说明会被锁，转储类标 low', () => {
