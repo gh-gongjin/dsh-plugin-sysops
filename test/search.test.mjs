@@ -147,5 +147,214 @@ await checkAsync('pb-9 端口取自 prefs.search.port，未配置时用 3417', a
   assert.ok(w.calls.some((c) => c.url && String(c.url).includes(':4321')), JSON.stringify(w.calls));
 });
 
+/* ②段：Everything HTTP */
+const EH = await import('../lib/search/everything-http.js');
+
+const everythingBody = (n = 2) => JSON.stringify({
+  results: Array.from({ length: n }, (_, i) => ({ name: `report ${i}.pdf`, path: `C:\\docs\\report ${i}.pdf`, size: 1024 * (i + 1), date_modified: 1760000000 })),
+  total: 1000,
+});
+
+check('sh-1 buildUrl：/fq/ 端点、count 带上限、query 走 URL 编码', () => {
+  const u = EH.buildUrl({ q: 'report .pdf', limit: 200, port: 3417 });
+  assert.match(u, /^http:\/\/127\.0\.0\.1:3417\/fq\/\?/);
+  assert.match(u, /search=report%20\.pdf|search=report\+%2E%20pdf|%20/);
+  assert.match(u, /count=200/);
+});
+
+check('sh-2 parseEverythingJson：缺字段的行为 null 而不是 0（不许把未知当"没有"）', () => {
+  const rows = EH.parseEverythingJson(JSON.stringify({ results: [{ name: 'a', path: 'C:\\a' }, { name: 'b', path: 'C:\\b', size: 5, date_modified: 1 }] }));
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].size, null);
+  assert.equal(rows[1].size, 5);
+});
+
+check('sh-3 畸形 JSON / results 不是数组 → 返回空数组并交调用方记错误', () => {
+  assert.deepEqual(EH.parseEverythingJson('<html>500</html>'), []);
+  assert.deepEqual(EH.parseEverythingJson('{"results":"x"}'), []);
+});
+
+await checkAsync('sh-4 403 单独成错并给出可执行指引（spec §4.4）', async () => {
+  const r = await EH.searchEverything({ q: 'a', limit: 10, port: 3417, requestFn: async () => ({ status: 403, body: '' }) });
+  assert.equal(r.rows.length, 0);
+  assert.equal(r.status, 403);
+  assert.match(r.error, /HTTP 服务器/);
+});
+
+await checkAsync('sh-5 超时：4s 到点取消请求，error 里点名 timeout', async () => {
+  const r = await EH.searchEverything({
+    q: 'a', limit: 10, port: 3417, timeoutMs: 20,
+    requestFn: (_u, { signal } = {}) => new Promise((_res, rej) => { signal?.addEventListener?.('abort', () => rej(Object.assign(new Error('aborted'), { name: 'AbortError' }))); }),
+  });
+  assert.equal(r.rows.length, 0);
+  assert.match(r.error, /超时|timeout|abort/i);
+});
+
+await checkAsync('sh-6 正常返回：行数、路径、来源都归一化好', async () => {
+  const r = await EH.searchEverything({ q: 'report', limit: 10, port: 3417, requestFn: async () => ({ status: 200, body: everythingBody(3) }) });
+  assert.equal(r.rows.length, 3);
+  assert.equal(r.rows[0].name, 'report 0.pdf');
+});
+
+/* ③段：es.exe */
+const ES = await import('../lib/search/es-exe.js');
+
+check('se-1 buildArgs：空 query 直接拒（es.exe 无参会吐全库）', () => {
+  assert.throws(() => ES.buildArgs({ q: '  ', limit: 10 }), /query|关键字/);
+  const a = ES.buildArgs({ q: 'report .pdf', limit: 50 });
+  assert.deepEqual(a.slice(0, 4), ['-max-count', '50', '-sort', 'path']);
+  assert.equal(a[4], 'report .pdf');
+});
+
+check('se-2 parseEsOutput：每行一条完整路径，空行与表头丢弃', () => {
+  const rows = ES.parseEsOutput('C:\\a.txt\r\n\r\nC:\\b c.md\r\n');
+  assert.equal(rows.length, 2);
+  assert.equal(rows[1].path, 'C:\\b c.md');
+  assert.equal(rows[1].name, 'b c.md');
+});
+
+await checkAsync('se-3 es.exe 不存在（ENOENT）→ error 说清未找到，不抛', async () => {
+  const r = await ES.searchEs({ q: 'a', limit: 10, execFileMod: async () => { throw Object.assign(new Error('no'), { code: 'ENOENT' }); } });
+  assert.equal(r.rows.length, 0);
+  assert.match(r.error, /es\.exe|未找到/);
+});
+
+/* ④段：walk（本机唯一实跑通路） */
+const WK = await import('../lib/search/walk.js');
+
+check('wk-1 空格分词=同时满足，大小写敏感（与原型「支持空格分词」文案一致）', () => {
+  assert.deepEqual(WK.tokensOf('东财 数据源'), ['东财', '数据源']);
+  assert.equal(WK.matchName('东财数据源.csv', ['东财', '数据源']), true);
+  assert.equal(WK.matchName('数据源东财.csv', ['东财', '数据源']), true, '词序无关');
+  assert.equal(WK.matchName('Report.pdf', ['report']), true, 'Everything 默认大小写不敏感，walk 要跟它一致');
+  assert.equal(WK.matchName('a.txt', ['b']), false);
+});
+
+function walkFs(files, opts = {}) {
+  const map = new Map(Object.entries(files));
+  return {
+    readdirSync: (dir) => {
+      if (opts.denied && dir.startsWith(opts.denied)) throw Object.assign(new Error('拒绝访问'), { code: 'EPERM' });
+      const out = [];
+      for (const p of map.keys()) {
+        if (!p.startsWith(dir + '\\')) continue;
+        const rest = p.slice(dir.length + 1);
+        if (!rest.includes('\\')) out.push(rest);
+        else if (!out.some((x) => x.split('\\')[0] === rest.split('\\')[0])) out.push(rest.split('\\')[0] + '\\');
+      }
+      return out.map((n) => ({ name: n.replace(/\\$/, ''), isDirectory: () => n.endsWith('\\'), isFile: () => !n.endsWith('\\') }));
+    },
+    statSync: (p) => { const f = map.get(p); if (!f) throw Object.assign(new Error('无'), { code: 'ENOENT' }); return { isFile: () => true, isDirectory: () => false, size: f.size ?? 1, mtimeMs: f.mtime ?? 1 }; },
+    join: (a, b) => `${a}\\${b}`,
+  };
+}
+
+await checkAsync('wk-2 命中集与 Everything 同形状（name/dir/size/mtime/path），只差 source', async () => {
+  const r = await WK.walkSearch({
+    q: 'report pdf', limit: 10, dirs: ['C:\\Users\\gongj\\AppData\\Local'],
+    fsMod: walkFs({ 'C:\\Users\\gongj\\AppData\\Local\\report a.pdf': { size: 11 }, 'C:\\Users\\gongj\\AppData\\Local\\sub\\report b.pdf': { size: 22 }, 'C:\\Users\\gongj\\AppData\\Local\\other.txt': { size: 3 } }),
+    pathMod: { join: (a, b) => `${a}\\${b}`, basename: (p) => p.split('\\').pop() }, now: () => 1000,
+  });
+  assert.equal(r.rows.length, 2);
+  assert.equal(r.rows[0].dir, 'C:\\Users\\gongj\\AppData\\Local');
+  assert.deepEqual(Object.keys(r.rows[0]).sort(), ['dir', 'mtime', 'name', 'path', 'size', 'source']);
+});
+
+await checkAsync('wk-3 无 dirs 时不假装能搜：返回空 + note 点名未选目录', async () => {
+  const r = await WK.walkSearch({ q: 'a', limit: 10, dirs: [], fsMod: walkFs({}), pathMod: { join: (a, b) => a + b, basename: (p) => p }, now: () => 1 });
+  assert.equal(r.rows.length, 0);
+  assert.match(r.note, /未选目录|设置/);
+});
+
+await checkAsync('wk-4 预算耗尽/超 limit：timedOut 与 truncated 分开标（两种"不全"原因不同）', async () => {
+  const files = {};
+  for (let i = 0; i < 500; i++) files[`C:\\d\\report ${i}.pdf`] = { size: i };
+  const fsMod = walkFs(files);
+  const r = await WK.walkSearch({ q: 'report', limit: 50, dirs: ['C:\\d'], fsMod, pathMod: { join: (a, b) => `${a}\\${b}`, basename: (p) => p.split('\\').pop() }, now: () => 1, budgetMs: 1 });
+  assert.equal(r.timedOut, true);
+  assert.equal(r.truncated, false, '预算先到就不算截断');
+  const r2 = await WK.walkSearch({ q: 'report', limit: 50, dirs: ['C:\\d'], fsMod, pathMod: { join: (a, b) => `${a}\\${b}`, basename: (p) => p.split('\\').pop() }, now: () => 1, budgetMs: 1e9 });
+  assert.equal(r2.truncated, true);
+  assert.equal(r2.rows.length, 50);
+});
+
+/* ⑤段：service 选路与诚实降级 */
+const SS = await import('../lib/search/service.js');
+
+function svWorld(probeResult, over = {}) {
+  const calls = [];
+  const adapters = {
+    everything: async (a) => { calls.push(['everything', a]); return over.everything ?? { rows: [{ name: 'a', path: 'C:\\a', size: 1, mtime: 1 }], error: null } },
+    es: async (a) => { calls.push(['es', a]); return over.es ?? { rows: [{ name: 'b', path: 'C:\\b' }], error: null } },
+    walk: async (a) => { calls.push(['walk', a]); return over.walk ?? { rows: [{ name: 'c', path: 'C:\\c', size: 3 }], truncated: false, timedOut: false, skipped: [], note: '' } },
+  };
+  const svc = SS.createSearchService({
+    probe: { probe: async () => probeResult, invalidate: () => {} },
+    getPrefs: () => ({ search: { mode: over.mode ?? 'everything', walkDirs: over.walkDirs ?? ['C:\\Users\\gongj\\AppData\\Local'], limit: over.limit, port: 3417, esPath: '' } }),
+    adapters, logger: { warn() {} }, now: () => 1000,
+  });
+  return { svc, calls };
+}
+
+const READY = { ready: true, via: 'http', degraded: false, checks: [], advice: [] };
+
+await checkAsync('sv-1 探测就绪 → 走 Everything，source 与 sourceLabel 一起返回', async () => {
+  const w = svWorld(READY);
+  const r = await w.svc.search({ q: 'a' });
+  assert.equal(r.source, 'everything');
+  assert.equal(r.sourceLabel, 'Everything HTTP');
+  assert.equal(w.calls.length, 1);
+  assert.equal(w.calls[0][0], 'everything');
+});
+
+await checkAsync('sv-2 探测不通 → 自动降级 walk，note 说清缺哪一级', async () => {
+  const w = svWorld({ ready: false, via: null, degraded: true, level: 'installed', checks: [{ key: 'http', ok: false, detail: '未开 HTTP 服务' }], advice: [] });
+  const r = await w.svc.search({ q: 'a' });
+  assert.equal(r.source, 'walk');
+  assert.match(r.note, /未开 HTTP 服务|降级/);
+});
+
+await checkAsync('sv-3 用户显式选 walk（mode=walk）时不看探测结果', async () => {
+  const w = svWorld(READY, { mode: 'walk' });
+  const r = await w.svc.search({ q: 'a' });
+  assert.equal(r.source, 'walk');
+  assert.equal(w.calls.length, 1);
+});
+
+await checkAsync('sv-4 via=es 走 es.exe（两条通路只通一条时不误判为降级）', async () => {
+  const w = svWorld({ ready: true, via: 'es', degraded: false, checks: [], advice: [] });
+  const r = await w.svc.search({ q: 'a' });
+  assert.equal(r.source, 'es');
+  assert.equal(r.sourceLabel, 'es.exe');
+});
+
+await checkAsync('sv-5 适配器报错：保留上次结果并标 stale（不拿旧结果冒充新查）', async () => {
+  const w = svWorld(READY);
+  await w.svc.search({ q: 'first' });
+  const bad = SS.createSearchService({
+    probe: { probe: async () => READY }, getPrefs: () => ({ search: { mode: 'everything', walkDirs: [], port: 3417 } }),
+    adapters: { everything: async () => ({ rows: [], error: 'HTTP 403' }) }, logger: { warn() {} }, now: () => 2000,
+  });
+  const r = await bad.search({ q: 'a' });
+  assert.equal(r.rows.length, 0);
+  assert.match(r.error, /403/);
+  const r2 = await bad.search({ q: 'b' });
+  assert.ok(typeof r2.stale === 'boolean');
+});
+
+await checkAsync('sv-6 归一化一致：三条通路的行都能喂给同一张表', async () => {
+  const norm = SS.normalize({ name: 'x', path: 'C:\\d\\x', size: null, mtime: null }, 'everything');
+  assert.equal(norm.dir, 'C:\\d');
+  assert.equal(norm.source, 'everything');
+  assert.equal(norm.size, null, '未知大小保持 null，界面显示「—」而不是 0 B');
+});
+
+await checkAsync('sv-7 空 query 拒（不发请求也不遍历）', async () => {
+  const w = svWorld(READY);
+  const r = await w.svc.search({ q: '   ' });
+  assert.equal(r.error, 'EMPTY_QUERY');
+  assert.equal(w.calls.length, 0);
+});
+
 console.log(`\n  ${passed}/${passed + failed} 通过`);
 process.exit(failed ? 1 : 0);
