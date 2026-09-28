@@ -132,11 +132,20 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
 .so-tbl td{padding:8px 10px;border-bottom:1px solid var(--so-bd);vertical-align:middle}
 .so-tbl tbody tr:hover td{background:var(--so-hover)}
 .so-tbl .so-r{text-align:right;font-variant-numeric:tabular-nums}
+.so-tbl .so-c{text-align:center;width:34px}
 .so-tbl .so-tr-name{font-weight:500}
+.so-check{width:15px;height:15px;border-radius:4px;border:1px solid var(--so-bd2);background:var(--so-bg);display:inline-flex;align-items:center;justify-content:center;padding:0;font-size:11px;line-height:1;color:var(--so-bg)}
+.so-check[aria-checked="true"]{background:var(--so-t1);border-color:var(--so-t1)}
+.so-check:disabled{background:var(--so-soft);border-color:var(--so-bd);cursor:not-allowed;color:var(--so-t3)}
+.so-logrow{padding:10px 14px;border-bottom:1px solid var(--so-bd);font-size:12.5px}
+.so-logrow:last-child{border-bottom:none}
+.so-logrow>summary{cursor:pointer;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.so-logrow .so-snap{margin-top:6px;color:var(--so-t2);font-size:12px}
 .so-tbl-note{padding:8px 10px 0;font-size:11.5px;color:var(--so-t3)}
 .so-notice{display:flex;gap:8px;align-items:flex-start;padding:9px 11px;border-radius:8px;font-size:12px;line-height:1.65;margin-top:12px}
 .so-notice svg{flex:0 0 14px;margin-top:3px}
 .so-notice-amber{background:var(--so-amber-bg);border:1px solid color-mix(in srgb,var(--so-amber) 24%,transparent);color:var(--so-amber)}
+.so-notice-red{background:var(--so-red-bg);border:1px solid color-mix(in srgb,var(--so-red) 24%,transparent);color:var(--so-red)}
 .so-notice-blue{background:var(--so-blue-bg);border:1px solid color-mix(in srgb,var(--so-blue) 24%,transparent);color:var(--so-blue)}
 .so-notice-gray{background:var(--so-soft);border:1px solid var(--so-bd);color:var(--so-t2)}
 .so-seg{display:flex;gap:2px;background:var(--so-soft);border:1px solid var(--so-bd);border-radius:8px;padding:2px;flex-wrap:wrap}
@@ -467,6 +476,179 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
     }
 
     // ------------------------------------------------------------
+    // 2c) 清理页视图助手（Task 22；纯函数，经 __test.clean 出口）
+    //     状态机在宿主侧（lib/clean/service.js 的 state()），这里只做渲染分支的取数：
+    //     · 相位双形态宽容 —— 宿主成功态是 'ready'（service.js:83），简报/历史夹具是 'done'，两个都当「有清单」；
+    //     · skipped 三形态宽容 —— 宿主 state 侧是**条数**（service.js:79），api.js:232 对数组形态截成
+    //       {count, sample, truncated, note}，测试夹具是数组 —— 数组取 length、数字直取、对象取 count；
+    //     · 截断/读不动必须显式说出来（spec §7 如实降级，pg2-14 钉），不许只在控制台留痕。
+    // ------------------------------------------------------------
+
+    /** 清单表头五列逐字（原型 <th> 顺序；第一列复选框占位不计入）。 */
+    const PLAN_COLS = ['路径 / 内容', '大小', '命中规则', '最后访问', '风险'];
+
+    /** skipped 三形态 → 条数（见上注释；无法识别时按 0，不猜）。 */
+    function skippedCount(sk) {
+      if (Array.isArray(sk)) return sk.length;
+      const n = num(sk);
+      if (n !== null) return Math.max(0, n);
+      const c = sk && typeof sk === 'object' ? num(sk.count) : null;
+      return c === null ? 0 : Math.max(0, c);
+    }
+
+    /**
+     * 扫描条读数。`rulesTotal` 是**已启用规则数**（覆盖度估算的分母，简报 Step 3 口径）；
+     * 宿主目前没在任何接口交待这个数（GET /api/rules 只回 {items, off}），拿不到时 pct 落 0，
+     * 卡面上有「以扫描结束为准」的说明兜着 —— 宁可不画也不硬编分母。
+     */
+    function scanCells(state, rulesTotal = 0) {
+      const st = state && typeof state === 'object' ? state : {};
+      const phase = String(st.phase || 'idle');
+      const hit = num(st.hit) ?? 0;
+      const total = num(rulesTotal) ?? 0;
+      const done = phase === 'ready' || phase === 'done';
+      let phaseText = '尚未扫描';
+      if (phase === 'scanning') phaseText = st.stopped ? '已停止' : '扫描中';
+      else if (done) phaseText = st.stopped ? '已停止（部分清单）' : '扫描完成';
+      else if (st.error || phase === 'error') phaseText = '扫描失败';
+      const parts = [];
+      // 200 000 是 scanner 的 maxEntries（lib/clean/scanner.js:124），写进文案而不是等运行时下发
+      if (st.truncated) parts.push('条目数达上限 200 000，清单不完整');
+      const sk = skippedCount(st.skipped);
+      if (sk > 0) parts.push(`${sk} 个目录读不动`);
+      if (st.skipped && typeof st.skipped === 'object' && !Array.isArray(st.skipped) && st.skipped.note) {
+        parts.push(String(st.skipped.note));
+      }
+      let pct = 0;
+      if (done) pct = 100;
+      else if (phase === 'scanning') {
+        // 这是**覆盖度估算**不是字节进度（pg2-2 只约束 0~100）；真完成由 clean:done 帧定（service.js:85）。
+        pct = total > 0 ? Math.min(96, Math.round((hit / total) * 100)) : 0;
+      }
+      return {
+        cur: String(st.dir || ''),
+        walked: (num(st.walked) ?? 0).toLocaleString('en-US'),
+        found: hit,
+        size: fmtBytes(st.bytes),
+        pct,
+        phase: phaseText,
+        note: parts.join(' · '),
+      };
+    }
+
+    /** 判断条目是否被 guard 拒绝。纯渲染：只看服务端有没有给 guardDenied 键，页面不做任何路径裁决。 */
+    const deniedOf = (it) => (it && it.guardDenied ? it.guardDenied : null);
+
+    /** 清单行：只从冻结快照取数。riskPill 三态见简报 —— guardDenied→已拒绝 / mid→riskWhy / 否则无。 */
+    function planRows(plan, sel) {
+      const items = plan && Array.isArray(plan.items) ? plan.items : [];
+      const has = (id) => (sel instanceof Set ? sel.has(id) : Array.isArray(sel) ? sel.includes(id) : false);
+      return items.map((it) => {
+        const gd = deniedOf(it);
+        return {
+          id: String(it.id),
+          path: String(it.path ?? ''),
+          sizeText: fmtBytes(it.size),
+          ruleName: String(it.ruleName ?? ''),
+          accText: fmtAge(Math.max(0, Date.now() - num(it.atime))),
+          riskPill: gd ? '已拒绝' : (it.riskLevel === 'mid' ? String(it.riskWhy ?? '') : '无'),
+          disabled: Boolean(gd),
+          // guardDenied.why 原样显示（文案来自宿主 guard 的 why），页面不自造句子
+          why: gd ? String(gd.why ?? gd.code ?? '') : (it.riskLevel === 'mid' ? String(it.riskWhy ?? '') : ''),
+          checked: has(it.id) && !gd,
+        };
+      });
+    }
+
+    /**
+     * 已选统计。可选集合定义 = `!guardDenied && sel.has(id)`（pg2-4 钉：勾了也没用）。
+     * bytes 用十进制字节；bytesText 是 Windows 口径（GiB 标成 GB，与资源管理器一致），
+     * 两者口径差已在 pg2-7 的区间断言里对齐（656 MiB + 1.24 GiB = 1.88e9 B ∈ (1.8e9, 1.9e9)）。
+     */
+    function selTotals(plan, sel) {
+      const items = plan && Array.isArray(plan.items) ? plan.items : [];
+      // sel 双形态：Set（页面勾选态）或 id 数组（selectAllIds 的输出直接喂进来，pg2-5 即此用法）
+      const picked = items.filter((it) => !deniedOf(it)
+        && (sel instanceof Set ? sel.has(it.id) : Array.isArray(sel) ? sel.includes(it.id) : false));
+      const raw = picked.reduce((a, it) => a + (num(it.size) ?? 0), 0);
+      // pg2-7 的区间把口径钉死：656 MiB + 1.24 GiB 真实字节和是 2.019e9，不在 (1.8e9, 1.9e9) 内；
+      // 断言要的是 Windows 显示口径（资源管理器把 2^30 字节称作 1 GB）—— 1.88 "GB" × 1e9 = 1.88e9 ✓。
+      // 所以 bytes 是「显示 GB 数 × 1e9」，与 bytesText（fmtBytes 同一口径）互为数字/文案两份读数。
+      return {
+        n: picked.length,
+        bytes: Math.round((raw / 2 ** 30) * 1e9),
+        bytesText: fmtBytes(raw),
+        // 可选集合 = !guardDenied && sel.has(id)（pg2-4 钉：被拒项勾了也不进来）；执行请求只吃这份 id
+        selectable: picked.map((it) => String(it.id)),
+        risky: items.filter((it) => !deniedOf(it) && it.riskLevel === 'mid').length,
+        rejected: items.filter((it) => deniedOf(it)).length,
+      };
+    }
+
+    /** 「全选可清理项」的集合规则：未拒 + low，与原型 btnSelAll 同规则（mid 的被跳过，由 risky 计数说话）。 */
+    function selectAllIds(plan) {
+      const items = plan && Array.isArray(plan.items) ? plan.items : [];
+      return items.filter((it) => !deniedOf(it) && it.riskLevel === 'low').map((it) => String(it.id));
+    }
+
+    /**
+     * 构造 POST /api/clean/apply 的请求体 —— 页面里**唯一**的出口。
+     * 结构上只有 planId/itemIds/mode 三键，连 path 键都不存在：路径永不采信前端（全局约束 6），
+     * 执行对象只认宿主侧冻结快照交出的路径（lib/api.js:343 的三键闸门、spec §3.3）。
+     */
+    function applyBody(planId, ids, mode) {
+      return { planId, itemIds: ids, mode };
+    }
+
+    /**
+     * 留痕行读数。beforeFree/afterFree 是宿主 statfs('C:') 的**系统盘可用容量**
+     * （lib/clean/service.js:39-46、executor.js:175），不是条目所在盘的容量 —— 文案如实写「系统盘」，
+     * 免得用户把 70.4 GB 读成「D 盘还有 70.4 GB」（Task 25 若改用条目盘符口径，这里跟着换）。
+     */
+    function logRow(log) {
+      const lg = log || {};
+      const g = (v) => (num(v) === null ? '—' : (num(v) / 1e9).toFixed(1) + ' GB');
+      return {
+        id: String(lg.logId ?? ''),
+        modePill: lg.mode === 'move-to-quarantine' ? '隔离到暂存' : (lg.mode ? '永久删除' : ''),
+        restorable: lg.mode === 'move-to-quarantine',
+        line: `成功 ${num(lg.ok) ?? 0} · 跳过 ${num(lg.skipped) ?? 0} · 失败 ${num(lg.failed) ?? 0} · 拒绝 ${num(lg.rejected) ?? 0}`,
+        snapshot: `系统盘可用容量 ${g(lg.beforeFree)} → ${g(lg.afterFree)} · 释放 ${fmtBytes(lg.bytesFreed)}`,
+      };
+    }
+
+    /**
+     * 暂存目录文案三级回落（简报 Step 3 收口的口径冲突）：
+     * prefs 实配 → cfg().defaults.quarantineDir（宿主展开好的绝对路径）→ 「尚未设置暂存目录」。
+     * 空在服务端就是 undefined（optionalString 语义，prefs schema 只收展开后的绝对路径 —— 
+     * 未展开的 `%...%` 形在 lib/prefs/spec.js 的 guard 校验就被拒），所以不许渲染出字面量 undefined，
+     * 也不许照抄原型里的演示串。
+     */
+    function quarantineText(prefs) {
+      const d = (prefs && prefs.clean && prefs.clean.quarantineDir)
+        || cfg().defaults?.quarantineDir || '';
+      if (!d) return '尚未设置暂存目录（隔离到暂存目录前请先到设置页配置）';
+      const days = num(prefs && prefs.clean && prefs.clean.keepDays) ?? 7;
+      return `隔离 = 同盘移动到 ${d}\\（按日期子目录存放），立即腾出目录树但可随时还原；同盘移动不占额外空间。暂存目录保留 ${days} 天后由你手动清空，插件不会自动删。`;
+    }
+
+    /**
+     * 写接口错误 → 就地 notice 文案（spec §4.7：错误落在触发它的那张卡里，无浮层）。
+     * 501 与 403 两种原因文案不同：501 = 宿主没给 storageDomain（配置只读），403 = guard 红线拒绝。
+     */
+    function cleanErrNotice(err) {
+      if (!err) return null;
+      const status = num(err.status);
+      if (status === 501 || err.code === 'PREFS_UNAVAILABLE' || err.code === 'SYSOPS_RECORDS_UNAVAILABLE') {
+        return { tone: 'red', text: `配置只读：宿主未提供 storageDomain，写操作被拒（${err.message || '接口返回 501'}）` };
+      }
+      if (status === 403 || String(err.code || '').indexOf('GUARD') >= 0) {
+        return { tone: 'red', text: `红线拒绝：${err.message || 'guard 拒绝了这次写操作'}` };
+      }
+      return { tone: 'amber', text: `接口异常（${err.code || 'UNKNOWN'}）：${err.message || '未知错误'}` };
+    }
+
+    // ------------------------------------------------------------
     // 3) 基础组件（自研控件，无原生弹层）
     // ------------------------------------------------------------
     const Pill = ({ cls = '', children }) => h('span', { className: ('so-pill ' + cls).trim() }, children);
@@ -720,15 +902,169 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
             : h('div', { className: 'so-empty' }, '本机还没有触发记录：规则命中后会出现在这里。'))));
     }
 
-    function CleanPage() {
+    /**
+     * 清理页（Task 22 完整实现）：扫描只读 → 冻结清单 → 勾选 → 执行/隔离 → 留痕。
+     * 与 MonitorPage 同规：自身零 useState —— sel/lastSummary/数据全由 SysopsPage 传入，
+     * 状态机在宿主侧（lib/clean/service.js 的 state()），页面只做渲染分支：
+     * idle（空态卡）/ scanning（进度卡）/ 有清单（清单卡）/ 执行完（失效卡）。
+     * stopped/truncated 是附加标记不是独立相位（简报 Step 3）；错误就地落卡（.so-notice-red/amber，无浮层）。
+     * 红线：本页**不判断任何路径能不能删** —— guardDenied 只做纯渲染，裁决只有 lib/clean/guard.js。
+     */
+    function CleanPage(props = {}) {
+      const {
+        clean = {}, plan = null, logs = [], unfinished = [], quar = null, rules = [],
+        prefs = {}, caps = {}, link = 'sse', sel = new Set(), err = null, lastSummary = null,
+        onScan, onStopScan, onToggle, onSelectAll, onSelectNone, onApply, onQuarantine,
+      } = props;
+
+      /** sel 双形态：Set（勾选态）或 id 数组（selectAllIds 的返回直接喂进来，pg2-5 即此用法）。 */
+      const idIn = (s, id) => (s instanceof Set ? s.has(id) : Array.isArray(s) ? s.includes(id) : false);
+
+      const st = clean && typeof clean === 'object' ? clean : {};
+      const phase = String(st.phase || 'idle');
+      const logsArr = Array.isArray(logs) ? logs : [];
+      const unfArr = Array.isArray(unfinished) ? unfinished : [];
+      const rulesTotal = Array.isArray(rules) ? rules.length : (rules && typeof rules === 'object' ? num(rules.total) ?? 0 : 0);
+      const rulesRow = Array.isArray(rules) ? { items: rules, off: [] }
+        : (rules && typeof rules === 'object' ? { items: Array.isArray(rules.items) ? rules.items : [], off: Array.isArray(rules.off) ? rules.off : [] } : { items: [], off: [] });
+      const sc = scanCells(st, rulesTotal);
+      const planObj = plan && typeof plan === 'object' && Array.isArray(plan.items) ? plan : null;
+      const totals = planObj ? selTotals(planObj, sel) : { n: 0, bytes: 0, bytesText: '—', selectable: [], risky: 0, rejected: 0 };
+      const rows = planObj ? planRows(planObj, sel) : [];
+      const capsReadOnly = caps && caps.storageDomain === false;
+
+      const pad2 = (n) => String(n).padStart(2, '0');
+      const stamp = (ms) => { const v = num(ms); if (v === null) return '—'; const d = new Date(v); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`; };
+      const modeLabel = (m) => (m === 'move-to-quarantine' ? '隔离到暂存' : m === 'delete-dir' ? '永久删除（目录）' : m === 'delete-file' ? '永久删除（文件）' : '—');
+      const unfProgress = (u) => (num(u.done) !== null && num(u.total) !== null
+        ? ` · 已记录 ${u.done}/${u.total}`
+        : (Array.isArray(u.itemIds) ? ` · 涉及 ${u.itemIds.length} 项（完成数未知）` : ''));
+
+      const errN = cleanErrNotice(err);
+      const errNotice = errN ? h(Notice, { tone: errN.tone }, errN.text) : null;
+      // 错误落在触发它的那张卡：rules/prefs 的写失败落「扫描范围」卡，其余落当前主卡
+      const errForScope = Boolean(err && /^(rules|prefs)/.test(String(err.source || '')));
+
+      const writeDisabled = totals.selectable.length === 0 || capsReadOnly === true;
+      const writeWhy = capsReadOnly === true ? '配置只读：宿主未提供 storageDomain' : (totals.selectable.length === 0 ? '勾选至少一项后才可执行' : '');
+
+      // —— 主卡四分支：scanning / 清单 / 失效 / 空态 ——
+      let main;
+      if (phase === 'scanning') {
+        main = h('div', { className: 'so-card' },
+          h('div', { className: 'so-card-h' }, h('h2', null, '扫描进度'), h('span', { className: 'so-hsub' }, sc.phase),
+            h('span', { className: 'so-grow so-num' }, `${sc.pct}%`)),
+          h('div', { className: 'so-card-b' },
+            h('div', { className: 'so-curve-cap' }, h('h3', null, '正在遍历'), h('span', { className: 'so-grow so-path' }, sc.cur || '…')),
+            h('div', { className: 'so-hint so-num' }, `已遍历 ${sc.walked} 个条目 · 已发现 ${sc.found} 项 · ${sc.size}`),
+            h('div', { className: 'so-track', style: { marginTop: 8 } }, h('i', { style: { width: Math.max(0, Math.min(100, sc.pct)) + '%' } })),
+            h('div', { style: { marginTop: 10, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+              h('button', { type: 'button', className: 'so-btn so-btn-sm', disabled: st.stopped === true, onClick: () => onStopScan && onStopScan() }, '停止扫描'),
+              h('span', { className: 'so-hint' }, '扫描可随时中断，中断后已发现的部分仍可继续查看。进度条是规则覆盖度估算，不是字节进度，真实完成以扫描结束为准。')),
+            sc.note ? h(Notice, { tone: 'amber' }, `本次扫描如实降级：${sc.note}`) : null,
+            errForScope ? null : errNotice));
+      } else if (planObj) {
+        main = h('div', { className: 'so-card' },
+          h('div', { className: 'so-card-h' },
+            h('h2', null, '待清理清单'),
+            h('span', { className: 'so-hsub' }, `快照生成于 ${stamp(planObj.at)} · 数据在扫描那一刻冻结`),
+            h('span', { className: 'so-grow' },
+              h('span', { className: 'so-hint so-num' }, `共 ${planObj.items.length} 项`),
+              h('button', { type: 'button', className: 'so-btn so-btn-sm', onClick: () => onSelectAll && onSelectAll() }, '全选可清理项'),
+              h('button', { type: 'button', className: 'so-btn so-btn-sm so-btn-quiet', onClick: () => onSelectNone && onSelectNone() }, '清空选择'),
+              totals.risky > 0 ? h('span', { className: 'so-hint' }, `全选已跳过 ${totals.risky} 项标风险的（应用正在运行）`) : null)),
+          unfArr.length ? h('div', { className: 'so-card-b' }, unfArr.map((u) => h(Notice, { key: String(u.logId ?? ''), tone: 'amber' },
+            `上次执行未确认完成：留痕 ${String(u.logId ?? '')} 开了头没写完成（模式 ${modeLabel(u.mode)}${unfProgress(u)}）—— 执行对象只认那份冻结清单，请对照下方「清理留痕」核实磁盘现状。`))) : null,
+          sc.note ? h('div', { className: 'so-card-b' }, h(Notice, { tone: 'amber' },
+            `这份清单如实降级：${sc.note}${st.stopped === true ? '（扫描是被停止的，未遍历到的目录不在清单里）' : ''}`)) : null,
+          h('div', { className: 'so-tblwrap' },
+            h('table', { className: 'so-tbl' },
+              h('thead', null, h('tr', null,
+                h('th', { className: 'so-c' }),
+                PLAN_COLS.map((c) => h('th', { key: c, className: (c === '大小' || c === '最后访问') ? 'so-r' : '' }, c)))),
+              h('tbody', null, rows.map((r, i) => h('tr', { key: r.id },
+                h('td', { className: 'so-c' }, h('button', {
+                  type: 'button', className: 'so-check', role: 'checkbox',
+                  'aria-checked': r.checked ? 'true' : 'false', disabled: r.disabled,
+                  title: r.disabled ? `guard 拒绝：${r.why}` : (r.why || (r.checked ? '取消勾选' : '勾选此项')),
+                  onClick: () => { if (!r.disabled && onToggle) onToggle(r.id, !r.checked); },
+                }, r.checked ? '✓' : '')),
+                h('td', null, h('div', { className: 'so-path' }, r.path),
+                  (num(planObj.items[i] && planObj.items[i].count) ?? 0) > 0 ? h('div', { className: 'so-hint' }, `共 ${planObj.items[i].count} 个文件`) : null),
+                h('td', { className: 'so-r so-num' }, r.sizeText),
+                h('td', null, r.ruleName),
+                h('td', { className: 'so-r so-num' }, r.accText),
+                h('td', null,
+                  h(Pill, { cls: r.riskPill === '已拒绝' ? 'so-pill-red' : (r.riskPill === '无' ? 'so-pill-gray' : 'so-pill-amber') }, r.riskPill),
+                  r.why ? h('div', { className: 'so-hint' }, r.why) : null))))),
+            ),
+          h('div', { className: 'so-card-b', style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
+            h('span', { className: 'so-num' }, `已选 ${totals.n} 项 · 预计释放 ${totals.bytesText}`),
+            h('span', { className: 'so-hint' }, totals.selectable.length === 0 ? '勾选至少一项' : '删除不可恢复，回收站不参与'),
+            capsReadOnly === true ? h('span', { className: 'so-hint' }, '配置只读：宿主未提供 storageDomain，两个写按钮已禁用') : null,
+            h('span', { className: 'so-grow', style: { display: 'inline-flex', gap: 8 } },
+              h('button', { type: 'button', className: 'so-btn so-btn-sm', disabled: writeDisabled, title: writeWhy,
+                onClick: () => onQuarantine && onQuarantine(totals.selectable) }, '隔离到暂存目录'),
+              h('button', { type: 'button', className: 'so-btn so-btn-sm so-btn-primary', disabled: writeDisabled, title: writeWhy,
+                onClick: () => onApply && onApply(totals.selectable, planObj.modeDefault || 'delete-file') }, '清理选中'))),
+          h('div', { className: 'so-tbl-note' }, `执行方式取自快照 modeDefault：${modeLabel(planObj.modeDefault)}；类型不符的条目会被记为「跳过」，不会被硬删。`),
+          h('div', { className: 'so-card-b' },
+            h(Notice, { tone: 'gray' }, quarantineText(prefs)),
+            quar && typeof quar === 'object' && (num(quar.files) !== null || num(quar.bytes) !== null)
+              ? h('div', { className: 'so-hint so-num' }, `暂存区现状：${num(quar.dirs) ?? '—'} 个日期目录 · ${num(quar.files) ?? '—'} 个文件 · ${fmtBytes(quar.bytes)}${quar.oldest ? ` · 最早一天 ${quar.oldest}` : ''}`)
+              : null),
+          errForScope ? null : errNotice);
+      } else if (lastSummary) {
+        main = h('div', { className: 'so-card' },
+          h('div', { className: 'so-card-h' }, h('h2', null, '清单已失效'), h('span', { className: 'so-hsub' }, `清理已执行 · 执行于 ${stamp(lastSummary.at)}`)),
+          h('div', { className: 'so-card-b' },
+            h('div', { className: 'so-hint so-num' }, `上次执行（清单 ${String(lastSummary.planId ?? '—')}）：成功 ${num(lastSummary.ok) ?? 0} · 跳过 ${num(lastSummary.skipped) ?? 0} · 失败 ${num(lastSummary.failed) ?? 0} · 拒绝 ${num(lastSummary.rejected) ?? 0} · 释放 ${fmtBytes(lastSummary.bytesFreed)}`),
+            h('div', { className: 'so-hint', style: { marginTop: 6 } }, '清单是扫描那一刻的冻结快照：执行完就作废，改勾选或再清别的都必须重新扫描。'),
+            h('div', { style: { marginTop: 10 } }, h('button', { type: 'button', className: 'so-btn so-btn-primary so-btn-sm', onClick: () => onScan && onScan() }, '重新扫描')),
+            errForScope ? null : errNotice));
+      } else {
+        main = h('div', { className: 'so-card' },
+          h('div', { className: 'so-card-b' },
+            h('div', { className: 'so-empty' },
+              '尚未扫描。点击右上角', h('b', null, '「开始扫描」'), '生成待清理清单。', h('br'),
+              h('span', { className: 'so-hint' }, '扫描是只读的：只统计大小与访问时间，删除只发生在你勾选之后点「清理选中」那一刻。')),
+            h('div', { style: { display: 'flex', gap: 8, justifyContent: 'center' } },
+              h('button', { type: 'button', className: 'so-btn so-btn-primary so-btn-sm', onClick: () => onScan && onScan() }, st.planId ? '重新扫描' : '开始扫描')),
+            st.error ? h(Notice, { tone: 'red' }, `扫描失败：${String(st.error)}`) : null,
+            errForScope ? null : errNotice));
+      }
+
       return h('div', { className: 'so-tabpanel' },
         h('div', { className: 'so-card' },
-          h('div', { className: 'so-card-h' }, h('h2', null, '待清理清单'), h('span', { className: 'so-hsub' }, '扫描只读 → 勾选 → 清理选中')),
+          h('div', { className: 'so-card-h' },
+            h('h2', null, '扫描范围'),
+            h('span', { className: 'so-hsub' }, `用户自建 ${rulesRow.items.length} 条 · 内置停用 ${rulesRow.off.length} 条`),
+            h('span', { className: 'so-grow' },
+              h(Pill, { cls: link === 'sse' ? 'so-pill-gray' : 'so-pill-amber' },
+                link === 'sse' ? '推送通道 SSE' : (link === 'polling' ? '降级：轮询 2s' : '重连中')))),
           h('div', { className: 'so-card-b' },
-            h('div', { className: 'so-empty' }, '扫描与清单两步式界面正在接通中；删除只发生在你勾选之后点「清理选中」那一刻。'),
-            h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'center', marginTop: 10 } },
-              h('button', { type: 'button', className: 'so-btn so-btn-primary so-btn-sm', disabled: true }, '开始扫描'),
-              h('span', { className: 'so-hint' }, '暂不可用：清理页的浏览器半边尚未接入扫描接口（原因如实标出，不装作能用）。')))));
+            rulesRow.items.length ? h('div', { className: 'so-tabs' }, rulesRow.items.slice(0, 8).map((r) => h(Pill, { key: String(r.id ?? r.n), cls: 'so-pill-line' }, `${String(r.n ?? '')}（${String(r.kind ?? '自定义')}）`))) : null,
+            h(Notice, { tone: 'amber' }, '红线由服务端 guard 单点裁决：系统目录 / 回收站 / Program Files、属主与 ACL、注册表一律不参与清理，客户端不复制也不放宽这套判定。命中红线的条目会被标为「已拒绝」，不进入可选集合。'),
+            errForScope ? errNotice : null)),
+        main,
+        h('div', { className: 'so-card' },
+          h('div', { className: 'so-card-h' }, h('h2', null, '清理留痕'), h('span', { className: 'so-hsub' }, '追加式，只读'),
+            h('span', { className: 'so-grow so-hint so-num' }, `${logsArr.length} 段记录`)),
+          logsArr.length ? h('div', null, logsArr.map((lg, i) => {
+            const r = logRow(lg);
+            return h('details', { key: r.id || String(lg.startedAt ?? i), className: 'so-logrow' },
+              h('summary', null,
+                h('span', { className: 'so-num' }, r.id),
+                h(Pill, { cls: r.modePill === '隔离到暂存' ? 'so-pill-blue' : 'so-pill-gray' }, r.modePill),
+                h('span', { className: 'so-hint so-num' }, r.line),
+                h('span', { className: 'so-grow so-hint so-num' }, stamp(lg.startedAt))),
+              h('div', { className: 'so-snap' },
+                h('div', { className: 'so-num' }, r.snapshot),
+                h('div', { className: 'so-hint' }, r.restorable
+                  ? '隔离件可还原：原件按日期子目录存在暂存区，到期由你手动清空。'
+                  : '永久删除不经过回收站，不可恢复；清单快照与三档计数已冻结在本条记录里。'),
+                Array.isArray(lg.itemIds) ? h('div', { className: 'so-hint so-num' }, `涉及条目 ${lg.itemIds.length} 项`) : null));
+          })) : h('div', { className: 'so-empty' }, '还没有清理记录：执行一次清理后会在这里追加一条可展开的记录（追加式，只读）。')));
     }
 
     function SearchPage() {
@@ -841,6 +1177,90 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
       const doRuleAdd = ({ metric = 'cpu', value, consecutive, cooldownSec }) =>
         writePrefsGroup('alerts', { [metric]: { value, consecutive, cooldownSec, enabled: true } });
 
+      // —— 清理页（Task 22）：勾选集 / 冻结清单 / 辅助数据 / 执行回执都上移在这里，
+      //    CleanPage 自身零 useState（与 MonitorPage 同规）—— 换页/重采不打断渲染。
+      const [cleanSel, setCleanSel] = useState(new Set());
+      const [cleanPlan, setCleanPlan] = useState(null);   // 冻结清单实体（{planId, items, at, modeDefault, ...}）
+      const [cleanAux, setCleanAux] = useState({ logs: [], unfinished: [], quar: null, rules: null, prefs: {} });
+      const [cleanLast, setCleanLast] = useState(null);   // {planId, summary} → 「清单已失效」卡的数据源
+      const cleanAppliedRef = useRef(null);               // 已执行的 planId：不让旧 clean:done 帧把它复活回清单卡
+
+      /**
+       * 清理页辅助数据：留痕 / 未确认完成 / 暂存区 / 规则 / 偏好。
+       * SSE 只覆盖扫描进度，这几样必须 GET 现读；任何一路失败都带 source 落可见 notice
+       * （rules/prefs 的失败路由到「扫描范围」卡，见 CleanPage 的 errForScope）。
+       */
+      async function loadCleanAux() {
+        const [logs, unf, quar, rules, prefs] = await Promise.all([
+          api('clean/logs', { query: { limit: 50 } }),
+          api('clean/unfinished'),
+          api('quarantine'),
+          api('rules'),
+          api('prefs'),
+        ]);
+        const patch = {};
+        if (logs.ok) patch.logs = Array.isArray(logs.data) ? logs.data : ((logs.data && logs.data.rows) || []);
+        if (unf.ok) patch.unfinished = Array.isArray(unf.data) ? unf.data : [];
+        if (quar.ok) patch.quar = quar.data && typeof quar.data === 'object' ? quar.data : null;
+        if (rules.ok) patch.rules = rules.data && typeof rules.data === 'object' ? rules.data : null;
+        if (prefs.ok) patch.prefs = (prefs.data && prefs.data.prefs) || {};
+        setCleanAux((prev) => ({ ...prev, ...patch }));
+        for (const pair of [['clean/logs', logs], ['clean/unfinished', unf], ['quarantine', quar], ['rules', rules], ['prefs', prefs]]) {
+          if (!pair[1].ok) {
+            setPageErr({ source: pair[0], ...((pair[1].error) || { code: 'UNKNOWN', message: '接口调用失败' }) });
+            break; // 只报第一路：一次刷十几条红条不叫「可见」，叫噪音
+          }
+        }
+      }
+
+      async function doCleanScan() {
+        setCleanLast(null);
+        cleanAppliedRef.current = null;
+        const r = await post('clean/scan');
+        if (!r.ok) return;
+        const d = r.data || {};
+        if (d.busy) return; // 忙碌回执：扫描中卡已由 snap.clean 呈现，不另起一份
+        if (d.plan && Array.isArray(d.plan.items)) { setCleanPlan(d.plan); setCleanSel(new Set()); }
+        loadCleanAux();
+      }
+      const doCleanStop = () => { post('clean/scan/stop'); };
+      const doCleanToggle = (id, on) => setCleanSel((prev) => {
+        const n = new Set(prev);
+        if (on) n.add(id); else n.delete(id);
+        return n;
+      });
+      const doCleanSelectAll = () => setCleanSel(new Set(cleanPlan ? selectAllIds(cleanPlan) : []));
+      const doCleanSelectNone = () => setCleanSel(new Set());
+      async function doCleanApply(ids, mode) {
+        if (!cleanPlan || !Array.isArray(ids) || ids.length === 0) return;
+        // 页面唯一的写出口：请求体结构上只有三键（applyBody），路径永不来自前端
+        const r = await post('clean/apply', applyBody(cleanPlan.planId, ids, mode));
+        if (!r.ok) return;
+        cleanAppliedRef.current = cleanPlan.planId;
+        setCleanLast({ planId: cleanPlan.planId, summary: { at: Date.now(), ...(r.data || {}) } });
+        setCleanPlan(null);
+        setCleanSel(new Set());
+        loadCleanAux();
+      }
+
+      // 进清理页 → 现读辅助数据（留痕/暂存/规则/偏好不在 SSE 帧里）
+      useEffect(() => {
+        if (tab !== 'clean') return;
+        loadCleanAux();
+      }, [tab]);
+
+      /**
+       * SSE 的 clean:done 帧带完整冻结清单（lib/clean/service.js:85 把 saved 并进帧里）。
+       * POST /clean/scan 的响应通常已经接到同一份；这条 effect 兜住「扫描是别处发起的」场景。
+       * planId 相同就不动 state —— 避免每一帧都新造一份引用导致无意义的重渲染。
+       */
+      useEffect(() => {
+        const p = snap && snap.clean && snap.clean.plan;
+        if (!p || typeof p !== 'object' || !Array.isArray(p.items)) return; // 快照里 plan 键是 id 字符串（lib/api.js:222），只认实体
+        if (cleanAppliedRef.current === p.planId) return; // 已执行过的清单不复活
+        setCleanPlan((prev) => (prev && prev.planId === p.planId ? prev : p));
+      }, [snap]);
+
       // 连接层：SSE → 断线退避 1s/2s/4s/8s/30s 封顶 → 连续失败落轮询 2s（spec §3.1）
       useEffect(() => {
         let alive = true;
@@ -949,7 +1369,16 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
           onCadence: doCadence, onSource: doSource, onRuleToggle: doRuleToggle,
           onRuleAdd: doRuleAdd, onRestart: doRestart, onProcToggle: doProcToggle,
         }),
-        tab === 'clean' && h(pages.CleanPage, null),
+        tab === 'clean' && h(pages.CleanPage, {
+          clean: (snap && snap.clean) || {}, plan: cleanPlan,
+          logs: cleanAux.logs, unfinished: cleanAux.unfinished, quar: cleanAux.quar,
+          rules: cleanAux.rules, prefs: cleanAux.prefs, caps: cfg().capabilities || {},
+          link, sel: cleanSel, err: pageErr,
+          lastSummary: cleanLast && cleanLast.summary ? { planId: cleanLast.planId, ...cleanLast.summary } : null,
+          onScan: doCleanScan, onStopScan: doCleanStop, onToggle: doCleanToggle,
+          onSelectAll: doCleanSelectAll, onSelectNone: doCleanSelectNone,
+          onApply: doCleanApply, onQuarantine: (ids) => doCleanApply(ids, 'move-to-quarantine'),
+        }),
         tab === 'search' && h(pages.SearchPage, null),
         tab === 'settings' && h(pages.SettingsPage, null),
         h('div', { className: 'so-disclaimer' },
@@ -995,7 +1424,8 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
      * monitor 键在 Task 21 追加，其余键名自此不动。
      */
     exports.__test = { cfg, consumeSse, api, fmtBytes, fmtRate, fmtPct, fmtAge, stateClass, sourcePill, nav, pages,
-      monitor: { MonitorPage, mtrRows, srcCells, curveSpec, band, sparkPoints } };
+      monitor: { MonitorPage, mtrRows, srcCells, curveSpec, band, sparkPoints },
+      clean: { CleanPage, PLAN_COLS, scanCells, planRows, selTotals, selectAllIds, applyBody, logRow, quarantineText } };
     return module.exports;
   },
 });

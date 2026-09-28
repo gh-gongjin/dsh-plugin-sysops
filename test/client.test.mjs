@@ -338,5 +338,136 @@ check('pg1-16 快照缺失（首个 snapshot 帧未到）时渲染骨架而不�
   assert.ok(!out.has('NaN'));
 });
 
+/* ⑤段：清理页 —— 两段式的界面侧 */
+CLEAN = CLIENT.__test.clean;
+globalThis.__SYSOPS__ = clientPayload();
+
+const IDLE = { phase: 'idle', dir: '', walked: 0, hit: 0, bytes: 0, stopped: false, truncated: false, skipped: [], planId: null, error: '' };
+const SCAN = { phase: 'scanning', dir: 'C:\\Users\\gongj\\AppData\\Local\\Temp', walked: 118_400, hit: 6, bytes: 2.4e9, stopped: false, truncated: false, skipped: [{ dir: 'C:\\Users\\gongj\\AppData\\Local\\Temp\\locked', code: 'EPERM', why: '拒绝访问' }], planId: null, error: '' };
+const ITEM = (over = {}) => ({ id: 'temp-user-aG9tZQ', ruleId: 'temp-user', ruleName: '用户临时目录', kind: '缓存',
+  path: 'C:\\Users\\gongj\\AppData\\Local\\Temp\\old.log', size: 656 * 2 ** 20, count: 14, atime: 1, mtime: 1,
+  riskLevel: 'low', riskWhy: '', ...over });
+const PLAN = (items) => ({ planId: 'plan-1', at: 1_700_000_000_000, beforeFree: 70.4e9, afterFree: null, modeDefault: 'delete-file',
+  rulesUsed: [{ id: 'temp-user', n: '用户临时目录', kind: '缓存' }], items, totals: { n: items.length, bytes: items.reduce((a, i) => a + i.size, 0) } });
+
+check('pg2-1 未扫描时的空态：说清扫描是只读的、删除只发生在勾选之后', () => {
+  const out = walk(CLEAN.CleanPage({ clean: IDLE, plan: null, logs: [], unfinished: [], quar: { dirs: 0, files: 0, bytes: 0, oldest: null }, rules: [], prefs: {}, caps: {}, link: 'sse', sel: new Set(), err: null }));
+  assert.ok(out.has('尚未扫描'));
+  assert.ok(out.has('扫描是只读的'));
+  assert.ok(!out.has('路径 / 内容'), '未扫描不该出现清单表');
+});
+
+check('pg2-2 扫描中：当前目录 / 已遍历 / 已发现 + 大小 / 进度条 / 停止按钮', () => {
+  const c = CLEAN.scanCells(SCAN);
+  assert.equal(c.walked, '118,400');
+  assert.equal(c.found, 6);
+  assert.match(c.size, /GB/);
+  assert.ok(Number(c.pct) >= 0 && Number(c.pct) <= 100);
+  const out = walk(CLEAN.CleanPage({ clean: SCAN, plan: null, logs: [], unfinished: [], quar: {}, rules: [], prefs: {}, caps: {}, link: 'sse', sel: new Set(), err: null }));
+  assert.ok(out.has('停止扫描'));
+  assert.ok(out.has('中断后已发现的部分仍可继续查看'));
+});
+
+check('pg2-3 清单表头五列逐字，且第一列是复选框占位', () => {
+  assert.deepEqual(CLEAN.PLAN_COLS, ['路径 / 内容', '大小', '命中规则', '最后访问', '风险']);
+  const out = walk(CLEAN.CleanPage({ clean: { ...IDLE, phase: 'done', planId: 'plan-1' }, plan: PLAN([ITEM()]), logs: [], unfinished: [], quar: {}, rules: [], prefs: {}, caps: {}, link: 'sse', sel: new Set(), err: null }));
+  for (const col of CLEAN.PLAN_COLS) assert.ok(out.has(col), `缺表头 ${col}`);
+});
+
+check('pg2-4 被 guard 拒绝的项：复选框禁用 + 「已拒绝」+ 原因，且不进可选集合', () => {
+  const items = [ITEM(), ITEM({ id: 'x1', path: 'C:\\Windows\\Temp', ruleName: '系统临时目录', guardDenied: { code: 'b-system-dir', why: '命中不可移除黑名单：C:\\Windows\\*' } })];
+  const rows = CLEAN.planRows(PLAN(items), new Set(['temp-user-aG9tZQ', 'x1']));
+  assert.equal(rows[1].disabled, true);
+  assert.equal(rows[1].riskPill, '已拒绝');
+  assert.match(rows[1].why, /不可移除黑名单/);
+  const t = CLEAN.selTotals(PLAN(items), new Set(['temp-user-aG9tZQ', 'x1']));
+  assert.equal(t.n, 1, '勾了也没用：被拒项不计入可选集合');
+});
+
+check('pg2-5 标风险的项可以被勾选，但「全选可清理项」跳过它并说明跳了几项', () => {
+  const items = [ITEM(), ITEM({ id: 'r1', riskLevel: 'mid', riskWhy: '微信正在运行' }), ITEM({ id: 'x1', guardDenied: { code: 'b-recycle-bin', why: '回收站一律不参与' } })];
+  const t = CLEAN.selTotals(PLAN(items), CLEAN.selectAllIds(PLAN(items)));
+  assert.equal(t.n, 1, '默认全选 = 低风险且未被拒的 1 项');
+  assert.equal(t.risky, 1);
+  assert.equal(t.rejected, 1);
+});
+
+check('pg2-6 未勾选时两个动作按钮都禁用，并给出原因而不是静默变灰', () => {
+  const out = walk(CLEAN.CleanPage({ clean: { ...IDLE, phase: 'done', planId: 'plan-1' }, plan: PLAN([ITEM()]), logs: [], unfinished: [], quar: {}, rules: [], prefs: {}, caps: {}, link: 'sse', sel: new Set(), err: null }));
+  const del = out.buttons.find((b) => b.text.includes('清理选中'));
+  const quar = out.buttons.find((b) => b.text.includes('隔离到暂存目录'));
+  assert.equal(del.disabled, true);
+  assert.equal(quar.disabled, true);
+  assert.ok(out.has('勾选至少一项'));
+});
+
+check('pg2-7 已选统计：项数 + 预计释放 + 「删除不可恢复，回收站不参与」', () => {
+  const plan = PLAN([ITEM(), ITEM({ id: 'b', size: 1.24 * 2 ** 30 })]);
+  const t = CLEAN.selTotals(plan, new Set(['temp-user-aG9tZQ', 'b']));
+  assert.equal(t.n, 2);
+  assert.match(t.bytesText, /GB/);
+  assert.ok(t.bytes > 1.8e9 && t.bytes < 1.9e9, String(t.bytes));
+});
+
+check('pg2-8 请求体结构上不含路径：applyBody 只出三键（与宿主 rt-6 同一条红线的界面侧）', () => {
+  const b = CLEAN.applyBody('plan-1', ['a', 'b'], 'delete-file');
+  assert.deepEqual(Object.keys(b).sort(), ['itemIds', 'mode', 'planId']);
+  assert.ok(!/path/i.test(JSON.stringify(b)));
+});
+
+check('pg2-9 暂存目录显示 prefs 的实配值，不照抄原型的演示路径', () => {
+  // 夹具必须是**展开后的绝对路径**：Task 14 的 `prefq-1` 让 prefs schema 直接拒掉未展开的 `%LOCALAPPDATA%\q`，
+  // 所以库里永远不可能出现 `%` 形 —— 拿它当 prefs 值是假夹具（界面无条件渲染 prefs 实配值）。
+  const txt = CLEAN.quarantineText({ clean: { quarantineDir: 'C:\\Users\\gongj\\AppData\\Local\\dsh-plugin-sysops\\quarantine', keepDays: 7 } });
+  assert.ok(txt.includes('dsh-plugin-sysops\\quarantine'), txt);
+  assert.ok(!txt.includes('.dsh-quarantine'), '原型里那串是演示值：' + txt);
+  assert.match(txt, /保留 7 天|7 天/);
+  assert.match(txt, /插件不会自动删/);
+});
+
+check('pg2-10 留痕：三档计数逐条可见，可展开看冻结快照与前后容量', () => {
+  const logs = [{ logId: 'CLN-2609-0003', planId: 'plan-9', startedAt: 1, finishedAt: 2, mode: 'delete-file', itemIds: ['a'],
+    ok: 5, skipped: 1, failed: 0, rejected: 2, bytesFreed: 3.12e9, beforeFree: 70.4e9, afterFree: 73.5e9, error: '' }];
+  const r = CLEAN.logRow(logs[0]);
+  assert.match(r.line, /成功 5 · 跳过 1 · 失败 0/);
+  assert.equal(r.modePill, '永久删除');
+  assert.match(r.snapshot, /70\.4 GB → 73\.5 GB/);
+  const out = walk(CLEAN.CleanPage({ clean: { ...IDLE, phase: 'done', planId: 'plan-1' }, plan: PLAN([ITEM()]), logs, unfinished: [], quar: {}, rules: [], prefs: {}, caps: {}, link: 'sse', sel: new Set(), err: null }));
+  assert.ok(out.has('清理留痕'));
+  assert.ok(out.has('追加式，只读'));
+});
+
+check('pg2-11 上次执行未确认完成要在清单顶部提示，并指向留痕（spec §4.3）', () => {
+  const out = walk(CLEAN.CleanPage({ clean: { ...IDLE, phase: 'done', planId: 'plan-1' }, plan: PLAN([ITEM()]), logs: [],
+    unfinished: [{ logId: 'CLN-2609-0004', startedAt: 1, mode: 'delete-file', done: 3, total: 6 }], quar: {}, rules: [], prefs: {}, caps: {}, link: 'sse', sel: new Set(), err: null }));
+  assert.ok(out.has('上次执行未确认完成'));
+  assert.ok(out.has('CLN-2609-0004'));
+});
+
+check('pg2-12 执行完清单即失效：盖执行时间戳并要重新扫描（改勾选必须先重扫的代价）', () => {
+  const out = walk(CLEAN.CleanPage({ clean: { ...IDLE, phase: 'done', planId: null }, plan: null, logs: [], unfinished: [], quar: {}, rules: [], prefs: {}, caps: {}, link: 'sse', sel: new Set(),
+    err: null, lastSummary: { planId: 'plan-1', ok: 2, skipped: 0, failed: 0, rejected: 0, bytesFreed: 1.9e9, at: 1_700_000_090_000 } }));
+  assert.ok(out.has('清单已失效'));
+  assert.ok(out.has('重新扫描'));
+});
+
+check('pg2-13 写接口错误就地落 notice：501 与 403 两种原因文案不同，都不弹浮层', () => {
+  const e1 = { source: 'clean/apply', status: 501, code: 'PREFS_UNAVAILABLE', message: '没有 storageDomain' };
+  const o1 = walk(CLEAN.CleanPage({ clean: IDLE, plan: null, logs: [], unfinished: [], quar: {}, rules: [], prefs: {}, caps: { storageDomain: false }, link: 'sse', sel: new Set(), err: e1 }));
+  assert.ok(o1.has('配置只读'));
+  assert.ok(o1.classHas('so-notice-red'));
+  const e2 = { source: 'rules/add', status: 403, code: 'SYSOPS_RULE_GUARD_DENY', message: '回收站一律不参与' };
+  const o2 = walk(CLEAN.CleanPage({ clean: IDLE, plan: null, logs: [], unfinished: [], quar: {}, rules: [], prefs: {}, caps: {}, link: 'sse', sel: new Set(), err: e2 }));
+  assert.ok(o2.has('回收站一律不参与'));
+  assert.ok(!/position:fixed/.test(JSON.stringify(o2.classes)), '不许出现浮层');
+});
+
+check('pg2-14 扫描被截断/有目录读不动时必须说明（spec §7 如实降级）', () => {
+  const c = CLEAN.scanCells({ ...SCAN, truncated: true, skipped: [{ dir: 'D:\\locked', code: 'EPERM', why: '拒绝访问' }], stopped: true });
+  assert.match(c.phase, /已停止/);
+  assert.match(c.note, /条目数达上限/);
+  assert.match(c.note, /1 个目录读不动/);
+});
+
 console.log(`\n  ${passed}/${passed + failed} 通过`);
 process.exit(failed ? 1 : 0);
