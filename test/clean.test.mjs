@@ -604,5 +604,156 @@ await checkAsync('rec-12 关域窗口里的新持有者：等别人关完再重�
   assert.deepEqual(facility.stats, { opens: 2, closes: 2 }, '必须串行：先等旧域关完，再开新域');
 });
 
+/* ③段：暂存目录（假 FS + 真 EXDEV 模拟） */
+function quarFs(over = {}) {
+  const files = new Map(Object.entries(over.files ?? {}));
+  const dirs = new Set(over.dirs ?? []);
+  return {
+    existsSync: (p) => files.has(p) || dirs.has(p),
+    mkdirSync: (p) => { dirs.add(p); },
+    statSync: (p) => {
+      if (over.isDir?.has?.(p) || dirs.has(p)) return { isFile: () => false, isDirectory: () => true, size: 0, mtimeMs: 0 };
+      const f = files.get(p);
+      if (!f) throw Object.assign(new Error('找不到'), { code: 'ENOENT' });
+      return { isFile: () => true, isDirectory: () => false, size: f.size ?? 10, mtimeMs: 0 };
+    },
+    renameSync: (a, b) => {
+      if (over.exdev) throw Object.assign(new Error('跨卷'), { code: 'EXDEV' });
+      if (over.renameFails) throw Object.assign(new Error('被占用'), { code: 'EBUSY' });
+      if (!files.has(a)) throw Object.assign(new Error('找不到'), { code: 'ENOENT' });
+      files.set(b, files.get(a)); files.delete(a);
+    },
+    copyFileSync: (a, b) => { if (!files.has(a)) throw Object.assign(new Error('找不到'), { code: 'ENOENT' }); files.set(b, files.get(a)); },
+    unlinkSync: (p) => { if (over.unlinkFails) throw Object.assign(new Error('被占用'), { code: 'EPERM' }); files.delete(p); },
+    rmSync: (p) => { if (over.rmFails) throw Object.assign(new Error('非空'), { code: 'ENOTEMPTY' }); dirs.delete(p); },
+    readSync: () => [],
+    // 桩里所有路径都是反斜杠 ⇒ 前缀与切分都必须用反斜杠。原稿写 `p + '/'` 会让
+    // stats() 恒拿到 `[]`（假绿），见 Step 0 的 T14-D。
+    readdirSync: (p) => {
+      const pre = `${p}\\`;
+      const names = new Set();
+      for (const d of dirs) if (d.startsWith(pre)) names.add(d.slice(pre.length).split('\\')[0]);
+      for (const f of files.keys()) if (f.startsWith(pre)) names.add(f.slice(pre.length).split('\\')[0]);
+      return [...names].filter(Boolean);
+    },
+    join: (...a) => a.join('\\'),
+    __files: files, __dirs: dirs,
+  };
+}
+
+const QU = await import('../lib/clean/quarantine.js');
+
+// T14-B：`forbiddenPrefixes` 只能由调用方喂 —— 现采证明 guard 对 Temp 是 allow=true（Temp 本来就是可清理区），
+// 不传这条则 q-6 永远绿不了，「暂存目录不得落在被清理路径内」这条红线也就没有任何执行者。
+// 缺省传 Temp：q-1..q-5 的**源**在 Temp 下（源不受这条管），rootDir 在插件目录下 ⇒ 正反两条路径都被走过。
+const TEMP_PREFIX = 'C:\\Users\\gongj\\AppData\\Local\\Temp';
+const QUAR_ROOT = 'C:\\Users\\gongj\\AppData\\Local\\dsh-plugin-sysops\\quarantine';
+
+function quarWorld(over = {}) {
+  const fsMod = over.fsMod ?? quarFs({ files: { 'C:\\Users\\gongj\\AppData\\Local\\Temp\\old.log': { size: 1000 } }, isDir: new Set() });
+  const log = [];
+  const q = QU.createQuarantine({
+    rootDir: QUAR_ROOT,
+    fsMod, pathMod: { join: (...a) => a.join('\\'), basename: (p) => p.split('\\').pop() },
+    logger: { warn: (m) => log.push(m) },
+    // T14-H：本地构造。喂 ISO 的 Z 串时，UTC 负偏移机器上 `dayDir` 的本地日期会跨到前一天 ⇒ 测试与所在时区解耦。
+    now: () => new Date(2026, 8, 27, 10, 0, 0).getTime(),
+    forbiddenPrefixes: [TEMP_PREFIX],
+    ...over.q,
+  });
+  return { q, fsMod, log };
+}
+
+await checkAsync('q-1 同盘 move 成功：落到日期子目录，源消失', async () => {
+  const w = quarWorld();
+  const r = await w.q.stash('C:\\Users\\gongj\\AppData\\Local\\Temp\\old.log');
+  assert.equal(r.ok, true);
+  assert.equal(r.method, 'move');
+  assert.match(r.dest, /quarantine\\2026-09-27\\/);
+  assert.equal(w.fsMod.__files.has('C:\\Users\\gongj\\AppData\\Local\\Temp\\old.log'), false);
+});
+
+await checkAsync('q-2 EXDEV 回退 copy+delete，且先复制成功再删源', async () => {
+  const w = quarWorld({ fsMod: quarFs({ files: { 'C:\\Users\\gongj\\AppData\\Local\\Temp\\old.log': { size: 1000 } }, exdev: true }) });
+  const r = await w.q.stash('C:\\Users\\gongj\\AppData\\Local\\Temp\\old.log');
+  assert.equal(r.method, 'copy-delete');
+  assert.equal(r.ok, true);
+  assert.equal(w.fsMod.__files.has(r.dest), true, '目标必须写成功');
+});
+
+await checkAsync('q-3 回退路径里 delete 失败：保留原件、报因，不算成功也不静默', async () => {
+  const w = quarWorld({ fsMod: quarFs({ files: { 'C:\\Users\\gongj\\AppData\\Local\\Temp\\old.log': { size: 1000 } }, exdev: true, unlinkFails: true }) });
+  const r = await w.q.stash('C:\\Users\\gongj\\AppData\\Local\\Temp\\old.log');
+  assert.equal(r.ok, false);
+  assert.match(r.why, /EPERM|被占用/);
+  assert.equal(w.fsMod.__files.has('C:\\Users\\gongj\\AppData\\Local\\Temp\\old.log'), true, '源文件必须还在');
+  assert.ok(w.log.length >= 1);
+});
+
+await checkAsync('q-4 rename 被 EBUSY 挡住：method 保持 move 但 ok=false，原因进 why', async () => {
+  const w = quarWorld({ fsMod: quarFs({ files: { 'C:\\Users\\gongj\\AppData\\Local\\Temp\\old.log': {} }, renameFails: true }) });
+  const r = await w.q.stash('C:\\Users\\gongj\\AppData\\Local\\Temp\\old.log');
+  assert.equal(r.ok, false);
+  assert.match(r.why, /EBUSY|被占用/);
+});
+
+await checkAsync('q-5 目标名撞车时加序号前缀，绝不覆盖已暂存件', async () => {
+  const fsMod = quarFs({
+    files: {
+      'C:\\Users\\gongj\\AppData\\Local\\Temp\\a\\old.log': { size: 11 },
+      'C:\\Users\\gongj\\AppData\\Local\\Temp\\b\\old.log': { size: 22 },
+    },
+  });
+  const w = quarWorld({ fsMod });
+  const r1 = await w.q.stash('C:\\Users\\gongj\\AppData\\Local\\Temp\\a\\old.log');
+  const r2 = await w.q.stash('C:\\Users\\gongj\\AppData\\Local\\Temp\\b\\old.log');
+  assert.equal(r1.ok, true);
+  assert.equal(r2.ok, true);
+  assert.notEqual(r1.dest, r2.dest, '同名条目必须落在不同路径，否则第二件会盖掉第一件');
+  assert.match(r2.dest, /\\2-old\.log$/, '撞名时加的是 2- **前缀**（T14-F：注释和标题都跟代码，不跟直觉）');
+  assert.equal(fsMod.__files.get(r1.dest).size, 11, '第一件不得被覆盖');
+  assert.equal(fsMod.__files.get(r2.dest).size, 22);
+});
+
+await checkAsync('q-6 暂存目录自身落在被清理路径下 → ensureRoot 拒绝并说清原因', async () => {
+  // 只换 rootDir，forbiddenPrefixes 沿用 quarWorld 缺省（T14-B）。
+  // 现采：guard 对 `…\Temp\q` 是 allow=true，所以这里的红必须归因到 forbiddenPrefixes 那道检查，不是 guard 先拒。
+  const w = quarWorld({ q: { rootDir: `${TEMP_PREFIX}\\q` } });
+  await assert.rejects(() => w.q.ensureRoot(), /暂存目录|不能被清理/);
+});
+
+await checkAsync('q-8 源条目已被别的程序删掉：条目级失败、说清原因，绝不走进 rename', async () => {
+  // T14-C：原稿的 isDir IIFE 在 statSync 抛错时返回**对象**并继续往下跑，
+  // 于是「源不存在」会被报成 method:'move'（同盘 rename 抛 ENOENT）或「目录跨卷复制未实现」（先抛 EXDEV 时）。
+  const w = quarWorld({ fsMod: quarFs({ files: {} }) });
+  const r = await w.q.stash(`${TEMP_PREFIX}\\gone.log`);
+  assert.equal(r.ok, false);
+  assert.equal(r.method, 'none', '不能报成 move —— 那是「已经搬走了」的意思');
+  assert.equal(r.dest, '');
+  assert.match(r.why, /ENOENT|找不到/);
+});
+
+await checkAsync('q-9 stats 汇总天数/件数/字节/最早日期（Task 24 的 keepDays 到期提醒只吃这四个数）', async () => {
+  const fsMod = quarFs({
+    files: {
+      [`${TEMP_PREFIX}\\a\\old.log`]: { size: 11 },
+      [`${TEMP_PREFIX}\\b\\old.log`]: { size: 22 },
+    },
+  });
+  // 手动造一个更早的日期目录：oldest 必须取到它，而不是只回「今天」
+  fsMod.mkdirSync(`${QUAR_ROOT}\\2026-09-26`);
+  fsMod.__files.set(`${QUAR_ROOT}\\2026-09-26\\earlier.bin`, { size: 5 });
+  const w = quarWorld({ fsMod });
+  assert.equal((await w.q.stash(`${TEMP_PREFIX}\\a\\old.log`)).ok, true);
+  assert.equal((await w.q.stash(`${TEMP_PREFIX}\\b\\old.log`)).ok, true);
+  assert.deepEqual(await w.q.stats(), { dirs: 2, files: 3, bytes: 38, oldest: '2026-09-26' });
+});
+
+// q-7 是同步断言，但必须 await：③段以它收尾，不 await 就落在汇总打印之后、进不了计数。
+await check('q-7 dayDir 用本地日期且补零', () => {
+  // T14-H：夹具本地构造，断言「按本地字段取值 + 月/日补零」，与所在时区无关。
+  assert.equal(QU.dayDir(new Date(2026, 8, 7, 23, 30, 0).getTime(), 'R'), 'R\\2026-09-07');
+});
+
 console.log(`\n  ${passed}/${passed + failed} 通过`);
 process.exit(failed ? 1 : 0);

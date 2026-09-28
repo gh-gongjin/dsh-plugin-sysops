@@ -326,5 +326,46 @@ await checkAsync('rules-11 用户规则不许占用内置 id（撞名会拆成�
   assert.equal((await w.store.userRules()).some((r) => r.id === builtinId), false, '撞名的用户规则不能落库');
 });
 
+/* ⑤段：clean 组（暂存目录 / 保留天数 / 清理后动作） */
+const Q = await import('../lib/clean/quarantine.js');
+const QruleMod = await import('../lib/clean/rules.js');
+const path0 = await import('node:path');
+// 这里不 import guard —— ⑤段断的是 schema 的拒绝形状，guard 是在 spec.js 里被调的，
+// 断言收紧到 /系统目录/ 之后，命中的是 guard 产出在 message 里的那句 `why`。
+
+check('prefq-1 quarantineDir 必须是 guard 放行的绝对路径，且不能落在被清理目录内部', () => {
+  const t = prefsMod.prefsRecord;
+  const okDir = 'C:\\Users\\gongj\\AppData\\Local\\dsh-plugin-sysops\\quarantine';
+  assert.equal(t.parse({ clean: { quarantineDir: okDir } }).clean.quarantineDir, okDir);
+  assert.throws(() => t.parse({ clean: { quarantineDir: 'C:\\Windows\\q' } }), /系统目录|b-system-dir/);
+  assert.throws(() => t.parse({ clean: { quarantineDir: 'AppData\\q' } }), /盘符/);
+  assert.throws(() => t.parse({ clean: { quarantineDir: '%LOCALAPPDATA%\\q' } }), /变量/);
+});
+
+check('prefq-2 keepDays 7~365；到期只提醒不自动删（spec §8 的判定）', () => {
+  const t = prefsMod.prefsRecord;
+  assert.equal(t.parse({ clean: { keepDays: 7 } }).clean.keepDays, 7);
+  assert.throws(() => t.parse({ clean: { keepDays: 6 } }), /keepDays/);
+  assert.throws(() => t.parse({ clean: { keepDays: 400 } }), /keepDays/);
+});
+
+check('prefq-3 after 只有两个取值，未知值拒绝', () => {
+  const t = prefsMod.prefsRecord;
+  assert.equal(t.parse({ clean: { after: 'log' } }).clean.after, 'log');
+  assert.throws(() => t.parse({ clean: { after: 'reboot' } }), /after/);
+});
+
+check('prefq-4 默认暂存路径在 %LOCALAPPDATA% 下（不落进被清理目录）', () => {
+  const d = Q.DEFAULT_QUARANTINE('C:\\Users\\gongj\\AppData\\Local');
+  assert.equal(d, path0.join('C:\\Users\\gongj\\AppData\\Local', 'dsh-plugin-sysops', 'quarantine'));
+  // T14-G：宿主很可能给带尾分隔符的 %LOCALAPPDATA%。字符串直拼在这里会多出一个反斜杠，
+  // 而这一行也是 Step 6 的 V4（把 join 换回直拼）唯一的红点来源 —— 少了它 V4 无人可抓。
+  assert.equal(Q.DEFAULT_QUARANTINE('C:\\Users\\gongj\\AppData\\Local\\'), d, '尾分隔符不得改变结果');
+  const { BUILTIN_RULES } = QruleMod;
+  for (const r of BUILTIN_RULES) {
+    assert.ok(!d.toLowerCase().includes(r.rel.toLowerCase().replace(/\//g, '\\').toLowerCase()), `暂存目录落在内置规则 ${r.id} 内部，会被自己清掉`);
+  }
+});
+
 console.log(`\n  ${passed}/${passed + failed} 通过`);
 process.exit(failed ? 1 : 0);
