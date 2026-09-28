@@ -278,6 +278,22 @@ await checkAsync('wk-4 预算耗尽/超 limit：timedOut 与 truncated 分开标
   assert.equal(r2.rows.length, 50);
 });
 
+await checkAsync('wk-5 递进时钟驱动 wall-clock 预算闸在遍历中途真实触发（超时腿的唯一证人）', async () => {
+  const files = {};
+  for (let i = 0; i < 500; i++) files[`C:\\d\\report ${i}.pdf`] = { size: i };
+  let k = 0; // 假时钟每调一次真的往前 1000ms —— 区别于 wk-2/wk-3/wk-4 全程冻结的 now
+  const r = await WK.walkSearch({
+    q: 'report', limit: 1000, dirs: ['C:\\d'], fsMod: walkFs(files),
+    pathMod: { join: (a, b) => `${a}\\${b}`, basename: (p) => p.split('\\').pop() },
+    now: () => { k += 1; return k * 1000; }, budgetMs: 999,
+  });
+  // budgetMs=999 → 条目硬上限 = trunc(999*20) = 19980，500 个文件永远够不到；timedOut 只可能来自 wall-clock 腿
+  assert.equal(r.timedOut, true, 'wall-clock 预算闸应在第 200 条目检查点因时钟超预算触发');
+  assert.equal(r.truncated, false, '标的是预算耗尽（超时），不是命中够 limit 的截断');
+  assert.equal(r.walked, 200, `硬上限不可达，只可能在首个 200 条目检查点被 wall-clock 中断，实测 walked=${r.walked}`);
+  assert.equal(r.rows.length, 199, `超时中断使命中集停在已扫的 199 条，实测 rows=${r.rows.length}`);
+});
+
 /* ⑤段：service 选路与诚实降级 */
 const SS = await import('../lib/search/service.js');
 
