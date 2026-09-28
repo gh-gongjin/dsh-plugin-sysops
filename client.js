@@ -941,13 +941,23 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
     }
 
     /**
+     * 三页只读闸门的**唯一判定**（I-6/评审清单问 3：简报 task-23-brief.md:154 要求三页同一闸门）：
+     * storageDomain 不是真 ⇒ 只读（fail-closed）。原先三页三种形状（`=== false` / `=== false` / `!== true`），
+     * 缺键时前两页放开写、搜索页禁用——同一份 cfg().capabilities 不该有两副面孔。
+     * 键缺失、载荷非对象、宿主没给 capabilities 一律落只读；禁用必须伴随可见原因（各页自己带 why 文案）。
+     */
+    function capsReadOnly(caps) {
+      const c = caps && typeof caps === 'object' ? caps : {};
+      return c.storageDomain !== true;
+    }
+
+    /**
      * 保存按钮的只读闸门，三个来源按优先级：storageDomain 缺失 → 上次保存 501 → 保存中。
      * 禁用了就一定有 `why` 显示在旁边（不允许只变灰）。第 4 参 saving 由组件传入（简报签名是 3 参，
      * saving 走默认值 false，纯函数用例只喂前 3 参即命中 storageDomain 分支）。
      */
     function SAVE_DISABLED(prefs, caps, err, saving) {
-      const c = caps && typeof caps === 'object' ? caps : {};
-      if (c.storageDomain === false) return { disabled: true, why: '配置只读：宿主未提供 storageDomain' };
+      if (capsReadOnly(caps)) return { disabled: true, why: '配置只读：宿主未提供 storageDomain' };
       const e = err && typeof err === 'object' ? err : {};
       if (e.code === 'PREFS_UNAVAILABLE' || num(e.status) === 501) {
         return { disabled: true, why: '上一次保存失败（501），原因同上：宿主未提供 storageDomain' };
@@ -1247,7 +1257,7 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
       const planObj = plan && typeof plan === 'object' && Array.isArray(plan.items) ? plan : null;
       const totals = planObj ? selTotals(planObj, sel) : { n: 0, bytes: 0, bytesText: '—', selectable: [], risky: 0, rejected: 0 };
       const rows = planObj ? planRows(planObj, sel) : [];
-      const capsReadOnly = caps && caps.storageDomain === false;
+      const capsRO = capsReadOnly(caps); // I-6：三页同一个判定（storageDomain 不为真 ⇒ 只读，fail-closed）
 
       const pad2 = (n) => String(n).padStart(2, '0');
       const stamp = (ms) => { const v = num(ms); if (v === null) return '—'; const d = new Date(v); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`; };
@@ -1261,8 +1271,8 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
       // 错误落在触发它的那张卡：rules/prefs 的写失败落「扫描范围」卡，其余落当前主卡
       const errForScope = Boolean(err && /^(rules|prefs)/.test(String(err.source || '')));
 
-      const writeDisabled = totals.selectable.length === 0 || capsReadOnly === true;
-      const writeWhy = capsReadOnly === true ? '配置只读：宿主未提供 storageDomain' : (totals.selectable.length === 0 ? '勾选至少一项后才可执行' : '');
+      const writeDisabled = totals.selectable.length === 0 || capsRO === true;
+      const writeWhy = capsRO === true ? '配置只读：宿主未提供 storageDomain' : (totals.selectable.length === 0 ? '勾选至少一项后才可执行' : '');
 
       // —— 主卡四分支：scanning / 清单 / 失效 / 空态 ——
       let main;
@@ -1318,7 +1328,7 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
           h('div', { className: 'so-card-b', style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
             h('span', { className: 'so-num' }, `已选 ${totals.n} 项 · 预计释放 ${totals.bytesText}`),
             h('span', { className: 'so-hint' }, totals.selectable.length === 0 ? '勾选至少一项' : '删除不可恢复，回收站不参与'),
-            capsReadOnly === true ? h('span', { className: 'so-hint' }, '配置只读：宿主未提供 storageDomain，两个写按钮已禁用') : null,
+            capsRO === true ? h('span', { className: 'so-hint' }, '配置只读：宿主未提供 storageDomain，两个写按钮已禁用') : null,
             h('span', { className: 'so-grow', style: { display: 'inline-flex', gap: 8 } },
               h('button', { type: 'button', className: 'so-btn so-btn-sm', disabled: writeDisabled, title: writeWhy,
                 onClick: () => onQuarantine && onQuarantine(totals.selectable) }, '隔离到暂存目录'),
@@ -1403,8 +1413,8 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
       const degrade = searchDegrade(res);
       const head = res ? resultHead(res) : null;
       const rows = res ? rowCells(res) : [];
-      // 目录覆盖范围写 prefs，没有 storageDomain 就写不进去：chips 改只读 + 注明原因（与设置页同一闸门）
-      const dirsReadOnly = !((cfg().capabilities || {}).storageDomain === true);
+      // 目录覆盖范围写 prefs，没有 storageDomain 就写不进去：chips 改只读 + 注明原因（I-6：三页同一个 capsReadOnly 判定）
+      const dirsReadOnly = capsReadOnly(cfg().capabilities || {});
 
       return h('div', { className: 'so-tabpanel' },
         err ? h(Notice, { tone: 'amber' }, `接口异常（${err.code || 'UNKNOWN'}）：${err.message || '未知错误'}`) : null,
@@ -1609,7 +1619,7 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
               h('div', { className: 'so-field' }, h('label', null, '名称'),
                 h('input', { ref: nameRef, className: 'so-input', type: 'text', placeholder: '例：pnpm 未引用包' })),
               h('div', { className: 'so-field' }, h('label', null, '路径 glob'),
-                h('input', { ref: globRef, className: 'so-input so-input-mono', type: 'text', placeholder: 'C:\\Users\\gongj\\AppData\\Local\\pnpm\\**' })),
+                h('input', { ref: globRef, className: 'so-input so-input-mono', type: 'text', placeholder: '%LocalAppData%\\pnpm\\**' })),
               h('div', { className: 'so-field' }, h('label', null, '只清早于'),
                 h('input', { ref: ageRef, className: 'so-input so-num', type: 'text', placeholder: '30 天未访问' })),
               h('div', { className: 'so-field' }, h('label', null, '类型'),
@@ -2221,7 +2231,7 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
       monitor: { MonitorPage, mtrRows, srcCells, curveSpec, band, sparkPoints },
       clean: { CleanPage, PLAN_COLS, scanCells, planRows, selTotals, selectAllIds, applyBody, logRow, quarantineText },
       search: { SearchPage, PROBE_ROWS, LIMITS, probeCells, modeOf, resultHead, rowCells, advice, searchQuery },
-      settings: { SettingsPage, SOURCE_ROWS, ruleCells, ruleStateText, patchBody, capCells, SAVE_DISABLED }, };
+      settings: { SettingsPage, SOURCE_ROWS, ruleCells, ruleStateText, patchBody, capCells, SAVE_DISABLED, capsReadOnly }, };
     return module.exports;
   },
 });

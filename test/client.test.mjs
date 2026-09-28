@@ -549,9 +549,11 @@ check('pg2-24 扫描分母拿不到时进度条走不定量，不画实心 0%（
 });
 
 check('pg2-25 404 与 503 两种整批拒的界面文案分开，都就地落 notice 不弹浮层（批 C concern-1 收口）', () => {
-  const e404 = { source: 'clean/apply', status: 404, code: 'SYSOPS_RECORDS_NOT_FOUND', message: '清理清单快照不存在或已被裁剪，本次未删除任何文件，请重新扫描后再执行' };
+  // 评审 m1：夹具 message 原先自带「已被裁剪」，而 cleanErrNotice 又把 message 回显进同一句 notice，
+  // 断言被回显满足（M15 改措辞仍 86/86）。改喂不含机制词的宿主原话形，让「已被裁剪」只能由界面自己的句子给出。
+  const e404 = { source: 'clean/apply', status: 404, code: 'SYSOPS_RECORDS_NOT_FOUND', message: 'plan snapshot not found' };
   const o404 = walkClean({ clean: IDLE, err: e404 });
-  assert.ok(o404.has('已被裁剪'), '404 要说清是清单快照被裁剪掉了：' + o404.texts.join('|'));
+  assert.ok(o404.has('已被裁剪'), '404 要说清是清单快照被裁剪掉了（这句必须由界面自己供词，不吃回显）：' + o404.texts.join('|'));
   assert.ok(o404.has('请重新扫描'), o404.texts.join('|'));
   assert.ok(!o404.has('接口异常'), '不许落到通用兜底句');
   const e503 = { source: 'clean/apply', status: 503, code: 'SYSOPS_QUARANTINE_UNAVAILABLE', message: '暂存目录不可用（配置错误或建不出来），整批停止，未删除任何文件' };
@@ -559,6 +561,19 @@ check('pg2-25 404 与 503 两种整批拒的界面文案分开，都就地落 no
   assert.ok(o503.has('暂存目录不可用或记录域已关闭'), '503 要说清是外部依赖故障：' + o503.texts.join('|'));
   assert.ok(!o503.has('接口异常'), o503.texts.join('|'));
   assert.ok(o404.has('未删除任何文件') && o503.has('未删除任何文件'), '两种都要如实说"什么都没删"');
+});
+
+check('pg2-26 清理页只读闸门与设置页同一判定：caps 缺 storageDomain 键也落只读（批 F I-6，评审 M22 清理侧）', () => {
+  // 缺键 fail-open 是评审 I-4 坐实的三页分叉之一；统一后（client.js 的 capsReadOnly）缺键=只读。
+  // 把清理页闸门改回 `=== false` 时本用例必红：有勾选、缺键却出现可用写按钮，且只读说明消失。
+  const plan = PLAN([ITEM()]);
+  const out = walkClean({ clean: { ...IDLE, phase: 'done', planId: 'plan-1' }, plan, sel: new Set(plan.items.map((i) => i.id)) });
+  const del = out.buttons.find((b) => b.text.includes('清理选中'));
+  const quar = out.buttons.find((b) => b.text.includes('隔离到暂存目录'));
+  assert.ok(plan.items.length > 0, '夹具本身必须有可勾项，否则禁用是勾选闸门而非只读闸门满足的');
+  assert.equal(del.disabled, true, '有勾选项但能力缺键时不得出现可用写按钮（fail-closed）');
+  assert.equal(quar.disabled, true, '隔离按钮同闸门');
+  assert.ok(out.has('配置只读：宿主未提供 storageDomain，两个写按钮已禁用'), '禁用必须伴随可见原因：' + out.texts.join('|'));
 });
 
 /* ⑥段：搜索页 —— 通路自检与诚实降级
@@ -611,11 +626,20 @@ check('pg3-3 指引三条只从注入载荷的 searchAdvice 取（文案单源�
   globalThis.__SYSOPS__ = clientPayload({ searchAdvice: A });
   try {
     assert.deepEqual(SRCH.advice(), A);
+    // I-4 渲染证人：三条指引逐行进引导卡（M2 变异「advice 改读自建常量 / probe.advice」必须在这里红）
+    const on = PAGE({});
+    for (const line of A) assert.ok(on.has(line), '注入的指引行该逐条渲染：' + line + '；实际：' + on.texts.join('|'));
+    assert.ok(!on.has('WINGET 诱饵：不要从 probe.advice 取文案'), 'probe.advice 里的诱饵不许上屏');
     const code = stripComments(fs.readFileSync(path.join(ROOT, 'client.js'), 'utf8'));
     assert.ok(!code.includes('voidtools.com'), 'client.js 里不该出现第二份安装指引文案');
   } finally {
     globalThis.__SYSOPS__ = clientPayload();
   }
+  // 载荷没给（默认 searchAdvice: []）⇒ 宁缺毋滥：引导卡在，但不许冒出任何自编的 winget/voidtools 文案
+  const off = PAGE({});
+  assert.ok(off.has('如何拿到全盘秒级搜索'), '未就绪仍要出引导卡');
+  assert.ok(!off.texts.some((t) => /winget|voidtools/i.test(t)),
+    '载荷缺省时不许渲染任何安装指引行（不编第二份）：' + off.texts.join('|'));
 });
 
 check('pg3-4 明说不代装：引导卡里有"由你自己执行"与三条边界（不装程序 / 不改注册表 / 不开服务）', () => {
@@ -652,6 +676,11 @@ check('pg3-7 结果头三个字段：范围说明、来源 pill、命中数与�
   const h2 = SRCH.resultHead(RES({ source: 'everything', sourceLabel: 'Everything HTTP', rows: new Array(5).fill({}), limit: 50, truncated: true }));
   assert.equal(h2.sourcePill, 'Everything HTTP');
   assert.match(h2.hitText, /已截断/);
+  // M8：陈旧标记必须落在结果头 hitText 上（变异「去掉 stale 拼接」此断言即红）
+  const h3 = SRCH.resultHead(RES({ source: 'walk', sourceLabel: '本地遍历', rows: new Array(2).fill({}), limit: 200, stale: true }));
+  assert.match(h3.hitText, /· 陈旧/, 'stale:true 时命中数后必须标「· 陈旧」：' + h3.hitText);
+  const h4 = SRCH.resultHead(RES({ source: 'walk', sourceLabel: '本地遍历', rows: new Array(2).fill({}), limit: 200 }));
+  assert.ok(!/陈旧/.test(h4.hitText), '没标 stale 的结果不许挂陈旧：' + h4.hitText);
 });
 
 check('pg3-8 每条结果自带来源 pill，缺字段显示 — 而不是 0', () => {
@@ -663,6 +692,10 @@ check('pg3-8 每条结果自带来源 pill，缺字段显示 — 而不是 0', (
   assert.deepEqual(rows.map((r) => r.sourcePill), ['es.exe', 'es.exe']);
   assert.equal(rows[1].sizeText, '—', '未知大小不许显示成 0 B');
   assert.equal(rows[1].mtimeText, '—');
+  // M6：name/dir 缺失同样落 '—'，不许空串/undefined 上屏
+  const bare = SRCH.rowCells(RES({ rows: [{ size: null, mtime: null, source: 'walk', path: 'F:\\c' }] }));
+  assert.equal(bare[0].name, '—', '缺 name 的行要显示 —：' + JSON.stringify(bare[0]));
+  assert.equal(bare[0].dir, '—', '缺 dir 的行要显示 —：' + JSON.stringify(bare[0]));
 });
 
 check('pg3-9 降级四类文案各不相同：未就绪 / 403 / 超时保留陈旧 / 空结果', () => {
@@ -703,6 +736,22 @@ check('pg3-12 「打开位置」只定位不执行：说明文案在场，且没
   assert.ok(out.has('不替你打开文件'));
   assert.ok(out.has('不执行任何程序'));
   assert.ok(!out.has('运行'));
+});
+
+check('pg3-13 I-6 只读闸门（搜索页）：caps 无 storageDomain ⇒ chips 只读 + 增删入口消失，恢复载荷后入口回来', () => {
+  globalThis.__SYSOPS__ = clientPayload({ capabilities: {} });
+  try {
+    const out = PAGE({ dirs: ['F:\\dsh-plugins'] });
+    assert.ok(out.has('配置只读：宿主未提供 storageDomain，覆盖范围不可改'),
+      '缺 storageDomain 必须落到可见原因：' + out.texts.join('|'));
+    assert.ok(!out.buttons.some((b) => b.text.includes('添加目录')), '只读态不许有「添加目录」按钮');
+    assert.ok(!out.buttons.some((b) => b.text === '×'), '只读态不许有目录移除按钮');
+  } finally {
+    globalThis.__SYSOPS__ = clientPayload();
+  }
+  const back = PAGE({ dirs: ['F:\\dsh-plugins'] });
+  assert.ok(back.buttons.some((b) => b.text.includes('添加目录')), '载荷恢复后「＋ 添加目录」必须回来（闸门翻转双向可证）');
+  assert.ok(!back.has('配置只读：宿主未提供 storageDomain，覆盖范围不可改'));
 });
 /* ⑧段：共享连接层（批 D + Ruling-98 接线）—— 带真实 useEffect/useState 的活体桩
  *    评审现证：useStream 层此前零覆盖，D-I-1 的假降级、D-I-2 的静默覆盖写、D-I-3 的连接悬挂
@@ -941,7 +990,7 @@ await checkAsync('cn-6 GET /clean/plan 回 404：补拉失败要就地留痕且�
     { url: '/sysops/api/quarantine', reply: () => jsonRes({ ok: true, data: { dirs: 0, files: 0, bytes: 0, oldest: null } }) },
     { url: '/sysops/api/rules', reply: () => jsonRes({ ok: true, data: { items: [], off: [] } }) },
     { url: '/sysops/api/prefs', reply: () => jsonRes({ ok: true, data: { prefs: {} } }) },
-    { url: '/sysops/api/clean/plan', reply: () => jsonRes({ ok: false, error: { code: 'SYSOPS_RECORDS_NOT_FOUND', message: '清单快照不存在或已被裁剪' } }, 404) },
+    { url: '/sysops/api/clean/plan', reply: () => jsonRes({ ok: false, error: { code: 'SYSOPS_RECORDS_NOT_FOUND', message: 'plan snapshot not found' } }, 404) },
   ]);
   w.render();
   await cnTick();
@@ -949,9 +998,11 @@ await checkAsync('cn-6 GET /clean/plan 回 404：补拉失败要就地留痕且�
   w.render();
   await cnTick();
   const out = w.render();
-  // 可见错误的两种落点都算数：404 走 cleanErrNotice 的「清单快照不存在…」专分支，其余走通用「接口异常」
-  assert.ok(out.has('清单快照不存在') || out.has('接口异常'), '补拉失败必须可见（约束 4）：' + out.texts.join('|'));
-  assert.ok(out.has('已被裁剪') || out.has('SYSOPS_RECORDS_NOT_FOUND'), '要带服务端给的原因，不能只说「失败了」：' + out.texts.join('|'));
+  // 评审 m1：原先两条 `||` 允许被回显的 message 满足（自证）。夹具已改成不含机制词的原话形，
+  // 断言收成单断——「清单快照不存在…已被裁剪」这句只能由 cleanErrNotice 的 404 专分支自己供词。
+  assert.ok(out.has('清单快照不存在'), '补拉失败要走 404 专分支留痕，不许落通用兜底（约束 4）：' + out.texts.join('|'));
+  assert.ok(out.has('已被裁剪'), '裁剪措辞须由界面句子给出（改「已被覆盖」本条必红）：' + out.texts.join('|'));
+  assert.ok(!out.has('接口异常'), '404 有专分支，不许落通用句：' + out.texts.join('|'));
   // 清单卡的判据用**整节点相等**：空态提示里那句「生成待清理清单。」也含这个串，includes 会误报
   assert.ok(!out.texts.includes('待清理清单'), '没补到实体就不该出现清单卡（半份数据不占位）：' + out.texts.join('|'));
   w.live.__unmount();
@@ -1303,6 +1354,43 @@ await checkAsync('cn-11b 无 storageDomain：搜索通路两输入框与保存�
   }
 });
 
+await checkAsync('cn-12 写失败分支留痕（I-5）：POST 500 后错误可见、开关不乐观翻转、saving 不放纵按钮永久禁用', async () => {
+  const w = cnSettingsWorld();
+  // 覆写 fetch：prefs GET 永远成功；prefs POST 永远 500（服务端记录保持不动 = 失败无痕不写）
+  globalThis.fetch = (async (u, init = {}) => {
+    const url = String(u); const method = init.method ?? 'GET';
+    w.log.push({ url, method, body: init.body, signal: init.signal ?? null });
+    const route = url.split('?')[0];
+    if (route === '/sysops/api/prefs' && method === 'GET') return { ok: true, status: 200, json: async () => ({ ok: true, data: { prefs: CN_FULL() } }) };
+    if (route === '/sysops/api/prefs' && method === 'POST') return { ok: false, status: 500, json: async () => ({ ok: false, error: { code: 'PREFS_WRITE_FAILED', message: '磁盘忙，写偏好被拒' } }) };
+    if (route === '/sysops/api/rules') return { ok: true, status: 200, json: async () => ({ ok: true, data: { items: [], off: [] } }) };
+    if (route === '/sysops/api/alerts/read') return { ok: true, status: 200, json: async () => ({ ok: true, data: {} }) };
+    if (route === '/sysops/api/stream') return sseRes([`event: snapshot\ndata: ${JSON.stringify(CN_SNAP)}\n\n`]);
+    return { ok: false, status: 404, json: async () => ({ ok: false, error: { code: 'TEST_NO_ROUTE', message: '没这条路由：' + url } }) };
+  });
+  await w.enterSettings();
+  const sw = findSwitchByTitle(w.live.__root, '切换 进程榜采集');
+  assert.ok(sw, 'L1b 源开关不在场');
+  assert.equal(sw['aria-checked'], 'false', '起点：L1b 默认关');
+  sw.onClick();
+  assert.ok(await cnWait(() => w.entries().includes('POST /sysops/api/prefs')), '点开关后没发写：' + JSON.stringify(w.entries()));
+  await cnTick(80);
+  const out = w.render();
+  // ① 失败要留痕：宿主原话就地可见（约束 4：写失败不许静默）
+  assert.ok(out.has('磁盘忙，写偏好被拒'), '写失败必须把宿主原因显示出来：' + out.texts.join('|'));
+  // ② 不许乐观翻转：写没成，开关必须还停在 false 位（界面读的是服务端回的全量）
+  const sw2 = findSwitchByTitle(w.live.__root, '切换 进程榜采集');
+  assert.equal(sw2['aria-checked'], 'false', 'POST 失败后开关不许自己翻成 true：' + JSON.stringify(out.texts.slice(0, 5)));
+  // ③ saving 态不许失步：失败后 setSetSaving(false) 必须到位，否则「保存设置」永久禁用（why=保存中…）
+  const saveBtn = out.buttons.find((b) => b.text === '保存设置');
+  assert.ok(saveBtn, '没找到「保存设置」按钮');
+  assert.equal(saveBtn.disabled, false, '写失败后保存按钮不许卡在禁用（saving 未复位）');
+  assert.ok(!out.has('保存中…'), '失败路径之后不许残留「保存中…」：' + out.texts.join('|'));
+  // ④ 服务端记录真的没动（500 的写不进仓储）
+  assert.equal(w.server.rec.sources.l1b, false, '失败的 POST 不该改到服务端现值');
+  w.live.__unmount();
+});
+
 /* ⑦段：设置页 —— 开关、规则、能力表与只读闸门
  *    简报把本段写在 test/plugin.test.mjs（追加 ⑦段），控制器明令页面用例落本文件（口径：用例 id、名称、断言照简报）。
  *    夹具 PREFS 逐键照 Task 3 prefsRecord（含 Task 12 的 clean 组）：sources 与 collect 同级；
@@ -1369,12 +1457,17 @@ check('pg4-4 规则行 pill 分内置/本机，guard 拒绝项标「已被 guard
 
 check('pg4-5 黑名单 notice 逐字吃注入载荷的 redlines（单源，不抄第二份）', () => {
   globalThis.__SYSOPS__ = clientPayload({ redlines: ['不碰回收站（2026-09-13 曾因按普通目录处理导致属主与 ACL 被改坏）', '不碰 C:\\Windows\\*', '不碰 Program Files', '不动注册表'] });
-  const out = SPAGE({});
-  for (const line of globalThis.__SYSOPS__.redlines) assert.ok(out.has(line.slice(0, 8)), `缺红线 ${line}`);
-  assert.ok(out.has('不可移除的黑名单'));
-  const code = stripComments(fs.readFileSync(path.join(ROOT, 'client.js'), 'utf8'));
-  assert.ok(!code.includes('takeown'), 'client.js 不该自带第二份红线文案（含事故日期那种长句）');
-  globalThis.__SYSOPS__ = clientPayload();
+  try {
+    const out = SPAGE({});
+    for (const line of globalThis.__SYSOPS__.redlines) assert.ok(out.has(line.slice(0, 8)), `缺红线 ${line}`);
+    assert.ok(out.has('不可移除的黑名单'));
+    const code = stripComments(fs.readFileSync(path.join(ROOT, 'client.js'), 'utf8'));
+    assert.ok(!code.includes('takeown'), 'client.js 不该自带第二份红线文案（含事故日期那种长句）');
+    // Minor：占位符不许带本机用户名（此前 pnpm 占位符写死 C:\Users\gongj\…）
+    assert.ok(!code.includes('gongj'), 'client.js 源码里不该出现任何个人用户名（占位符须用 %LocalAppData% 这类通用形）');
+  } finally {
+    globalThis.__SYSOPS__ = clientPayload();
+  }
 });
 
 check('pg4-6 新增规则的拒绝文案就地落，不弹浮层', () => {
@@ -1433,6 +1526,54 @@ check('pg4-12 保存只发差量：patchBody 包一层 prefs，不整包回传',
 check('pg4-13 规则三态区分 null（从未写入）与 []（用户清空）', () => {
   assert.match(SET.ruleStateText(null), /尚未配置|未写入/);
   assert.match(SET.ruleStateText([]), /已全部清空/);
+});
+
+check('pg4-14 能力表渲染证人：五行逐行消费 capRows，「宿主不提供」与「已降级」都得上屏，缺载荷走空态（N1）', () => {
+  const out = SPAGE({});
+  for (const row of CAP_ROWS) assert.ok(out.has(row.label), '能力行 label 没上屏：' + row.label + '；实际：' + out.texts.join('|'));
+  assert.equal(out.texts.filter((t) => t === '提供').length, 3, 'ok:true 三行该画「提供」pill');
+  assert.equal(out.texts.filter((t) => t === '宿主不提供').length, 2, 'NEVER_PROVIDED 两行该画「宿主不提供」灰 pill');
+  // 非 never-provided 的 ok:false ⇒ 琥珀 pill 显示 fallback 原文，detail 逐字上屏
+  const deg = SPAGE({ capRows: [{ key: 'timer', label: 'timer（ctx.interval）', ok: false, detail: '宿主无 ctx.interval，已退到 setInterval', fallback: '已降级' }] });
+  assert.ok(deg.has('已降级'), '降级态必须可见：' + deg.texts.join('|'));
+  assert.ok(deg.has('宿主无 ctx.interval，已退到 setInterval'), 'detail 必须逐字渲染');
+  // 载荷没给 ⇒ 诚实空态，不许自编五行
+  const none = SPAGE({ capRows: [] });
+  assert.ok(none.has('宿主未下发能力表。'), 'capRows 缺省该落空态而不是假数据');
+  assert.ok(!none.has('storageDomain（持久化）'), '空载荷不许残留默认行');
+});
+
+check('pg4-15 数据采集四行渲染证人：四个源名上屏、L0 无开关只有档位说明、全页开关恰 3 个（N2/M5）', () => {
+  const out = SPAGE({});
+  for (const name of ['实时曲线（CPU / 内存 / 磁盘）', '网速采集', '进程榜采集', '按需扫描 / 搜索']) {
+    assert.ok(out.has(name), '源行名称没上屏：' + name + '；实际：' + out.texts.join('|'));
+  }
+  assert.equal(out.texts.filter((t) => t === '档位由监控页控制').length, 1, 'L0 不重复开关，只留这一句说明');
+  const sw = out.buttons.filter((b) => String(b.className).includes('so-switch'));
+  assert.equal(sw.length, 3, '四源行里恰好 3 个开关（L0 排除）；实际 ' + sw.length + ' 个');
+  assert.ok(out.has('关掉某一源，依赖它的告警规则会就地标为不可用'), '卡片副题要在场（与 pg4-3 同一句话单源）');
+});
+
+check('pg4-16 I-6 统一闸门（设置页）：capsReadOnly 决策表 + 缺键 fail-closed + 保存禁用伴随可见原因', () => {
+  // 三页共用同一个判定函数 —— 决策表先钉死
+  assert.equal(SET.capsReadOnly({ storageDomain: true }), false);
+  assert.equal(SET.capsReadOnly({ storageDomain: false }), true);
+  assert.equal(SET.capsReadOnly({}), true, '缺键必须按只读处理（fail-closed），不许放开写');
+  assert.equal(SET.capsReadOnly(null), true);
+  assert.equal(SET.capsReadOnly(undefined), true);
+  assert.equal(SET.capsReadOnly('nope'), true, '载荷不是对象同样只读');
+  const s = SET.SAVE_DISABLED(PREFS(), {}, null);
+  assert.equal(s.disabled, true, 'caps 缺 storageDomain 时闸门必须关');
+  assert.match(s.why, /配置只读：宿主未提供 storageDomain/);
+  // 渲染层：按钮真禁用 + 原因真可见（变异「闸门改回 === false」在 caps:{} 下两断言同时红）
+  const out = SPAGE({ caps: {} });
+  const b = out.buttons.find((x) => x.text === '保存设置');
+  assert.ok(b, '没找到「保存设置」按钮');
+  assert.equal(b.disabled, true);
+  assert.ok(out.has('配置只读：宿主未提供 storageDomain'), '禁用必须伴随可见原因：' + out.texts.join('|'));
+  const ok = SPAGE({ caps: CAPS_OK });
+  const b2 = ok.buttons.find((x) => x.text === '保存设置');
+  assert.equal(b2.disabled, false, 'storageDomain:true 时闸门必须开（双向可证）');
 });
 
 console.log(`\n  ${passed}/${passed + failed} 通过`);
