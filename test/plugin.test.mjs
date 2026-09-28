@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import os from 'node:os';
+import path from 'node:path';
 
 let passed = 0;
 let failed = 0;
@@ -107,7 +109,9 @@ function apiWorld(over = {}) {
     writeMany: async (p) => { calls.push(['writeMany', p]); if (over.prefsFails) throw Object.assign(new Error('没有 storageDomain'), { code: 'PREFS_UNAVAILABLE' }); return { written: p, skipped: [] }; },
     available: over.noStorage === true ? false : true,
   };
-  const ruleStore = { add: async (r) => { calls.push(['ruleAdd', r]); throw Object.assign(new Error('回收站不碰'), { code: 'SYSOPS_RULE_GUARD_DENY', why: '回收站不碰' }); }, remove: async () => ({}), toggle: async () => ({}), list: async () => over.ruleRows ?? ({ items: [], off: [] }), error: null };
+  // over.ruleStore：给 rt-37 用真实规则仓储（缺 id 的体必须真的被 validate 拒掉才叫证人）。
+  // 不传时保持原桩：add 恒抛 GUARD_DENY（rt-10 钉的就是它）。
+  const ruleStore = over.ruleStore ?? { add: async (r) => { calls.push(['ruleAdd', r]); throw Object.assign(new Error('回收站不碰'), { code: 'SYSOPS_RULE_GUARD_DENY', why: '回收站不碰' }); }, remove: async () => ({}), toggle: async () => ({}), list: async () => over.ruleRows ?? ({ items: [], off: [] }), error: null };
   // probe 作为独立 dep（属搜索域，不混进 clean 的桩里）
   const handler = API.createApiHandler({ collect, alerts, clean, probe, search, prefStore: prefsMod, ruleStore, caps: over.caps ?? { read: () => ({ storageDomain: prefsMod.available, timer: false, webServer: true, notifications: false, autostart: false }) }, logger: { warn: (m) => events.push(m) }, now: () => 1000, sseTimers: over.sseTimers });
   const remote = over.remoteAddress ?? '127.0.0.1';
@@ -532,6 +536,39 @@ await checkAsync('rt-36 GET /api/rules 的 builtin 标记由宿主 BUILTIN_RULES
   assert.equal(d.builtin.find((b) => b.id === 'temp-user').enabled, true, '不在 off ⇒ enabled=true');
   // 私有路径不出接口：dir/glob 展开后含本机绝对路径，与注入载荷同口径地不透传
   for (const b of d.builtin) assert.ok(!('dir' in b) && !('glob' in b), '内置行不得带 dir/glob：' + b.id);
+});
+
+/**
+ * rt-37（简报 F2 的证人）：设置页「保存并启用」发的体是 `{n, glob, ageDays, kind}` —— **没有 id**。
+ * 旧实现把体原样交给 ruleStore.add ⇒ rules-store 的 validate 因缺 id 抛 BAD_RULE ⇒ 400，
+ * 真机上这条链路 100% 不可用。修法按 Ruling F2-a：id 由**宿主**在路由层补发。
+ *
+ * 与简报的两处偏离（以代码现状为准，已在 fix-round-1-report.md 写明）：
+ *  1. 简报给的用例名是 `rt-15`，但 `rt-15` 已被「handler 抛错 → 500」占用（:252），故顺号取 `rt-37`；
+ *  2. 简报断言 `r.json.data.id`，而 `POST /api/rules/add` 透出的是**仓储落库后的整行**
+ *     （`{items, off, updatedAt}`，见 lib/prefs/rules-store.js:79 的 write 返回），
+ *     故改断言 `data.items` 里那条的 id —— 仍逐条钉住「200 / 非空 / `u-` 前缀 / 列表可查」。
+ */
+await checkAsync('rt-37 POST /api/rules/add 不带 id → 宿主补 id 落库（缺 id 的体 = 400 红）', async () => {
+  const { createRuleStore } = await import('../lib/prefs/rules-store.js');
+  const rows = new Map();
+  // 内存版 prefStore：契约与 lib/prefs/store.js 的 read/write 同形（写口返回落库那一份）
+  const memPrefs = {
+    available: true,
+    read: async (k) => (rows.has(k) ? rows.get(k) : null),
+    write: async (k, v) => { rows.set(k, v); return v; },
+  };
+  const w = apiWorld({ ruleStore: createRuleStore({ prefStore: memPrefs, logger: { warn: () => {} } }) });
+  const glob = path.join(os.homedir(), 'AppData', 'Local', 'Temp', '*'); // 内置库同形，过 guard
+  const r = await w.run('POST', '/api/rules/add', { body: { n: 'TEMP 残留', glob, ageDays: 7, kind: '缓存' } });
+  assert.equal(r.status, 200, '设置页的体（无 id）必须能落库：' + JSON.stringify(r.json));
+  const added = r.json.data.items.find((x) => x.n === 'TEMP 残留');
+  assert.ok(added, '补 id 后必须真的落进 items：' + JSON.stringify(r.json.data));
+  assert.equal(typeof added.id, 'string');
+  assert.ok(added.id.length > 0, '宿主必须补出非空 id');
+  assert.match(added.id, /^u-/, '宿主补的 id 要有可辨识前缀');
+  const list = await w.run('GET', '/api/rules');
+  assert.ok(list.json.data.items.some((x) => x.id === added.id), '补出的 id 要能在列表里查到');
 });
 
 console.log(`\n  ${passed}/${passed + failed} 通过`);

@@ -1128,6 +1128,8 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
       const alerts = snap.alerts || {};
       const rules = Array.isArray(alerts.rules) ? alerts.rules : [];
       const hits = Array.isArray(alerts.hits) ? alerts.hits : [];
+      // 降级信息优先于"空态"：库不可用时显示"还没有触发记录"是误导（spec §7）。
+      const hitsError = alerts.hitsError || alerts.errorCode || null;
       const proc = snap.proc || { rows: [], state: 'off', note: '' };
       const procRows = (Array.isArray(proc.rows) ? proc.rows.slice() : []).sort((a, b) => (num(b.cpuPct) || 0) - (num(a.cpuPct) || 0));
       const labelOf = {};
@@ -1257,12 +1259,17 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
         h('div', { className: 'so-card' },
           h('div', { className: 'so-card-h' }, h('h2', null, '触发记录'), h('span', { className: 'so-hsub' }, '本机保留最近 200 条'),
             h('span', { className: 'so-grow so-hint so-num' }, `${hits.length} 条`)),
-          h('div', { className: 'so-card-b' }, hits.length
-            ? h('div', { className: 'so-tl so-timeline' }, hits.map((hh, i) => h('div', {
-                className: 'so-tl-item ' + (hh.kind === 'op' ? 'so-tl-op' : 'so-tl-hit'), key: String(hh.hitId || (hh.t || i)) },
-                h('div', { className: 'so-tt so-num' }, fmtAge(Math.max(0, Date.now() - (num(hh.t) || Date.now())))),
-                h('div', { className: 'so-tx' }, hitText(hh)))))
-            : h('div', { className: 'so-empty' }, '本机还没有触发记录：规则命中后会出现在这里。'))));
+          h('div', { className: 'so-card-b' },
+            hitsError
+              ? h('div', { className: 'so-empty' },
+                  `触发记录落盘不可用：${alerts.hitsError || alerts.errorCode}（规则仍在评估，命中不会写入本机记录）`)
+              : null,
+            hits.length
+              ? h('div', { className: 'so-tl so-timeline' }, hits.map((hh, i) => h('div', {
+                  className: 'so-tl-item ' + (hh.kind === 'op' ? 'so-tl-op' : 'so-tl-hit'), key: String(hh.hitId || (hh.t || i)) },
+                  h('div', { className: 'so-tt so-num' }, fmtAge(Math.max(0, Date.now() - (num(hh.t) || Date.now())))),
+                  h('div', { className: 'so-tx' }, hitText(hh)))))
+              : (hitsError ? null : h('div', { className: 'so-empty' }, '本机还没有触发记录：规则命中后会出现在这里。')))));
     }
 
     /**
@@ -1665,7 +1672,8 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
               h('b', null, '不可移除的黑名单'),
               h('span', null, '（新增规则命中即拒绝）：'),
               redlines.length
-                ? redlines.map((line, i) => h('span', { key: String(i), className: 'so-path' }, String(line)))
+                ? redlines.map((line, i) => h('span', { key: String(i), className: 'so-path' },
+                    String((line && typeof line === 'object' && line.text) || line)))
                 : h('span', null, '宿主未下发黑名单明细，判定仍以服务端 guard 为准。')))),
         // —— 暂存与默认方式：prefs 实配值 + 到期提醒不自动删 + after 两档 ——
         h('div', { className: 'so-card' },
@@ -1745,6 +1753,14 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
         if (d.hit) a.hits = [d.hit].concat(a.hits || []).slice(0, 200); // 本机保留最近 200 条
         if (typeof d.unread === 'number') { a.unread = d.unread; sidebarUnread = d.unread; }
         if (d.rules) a.rules = d.rules;
+        base.alerts = a;
+        return base;
+      }
+      if (ev === 'alert-store') {
+        // 落盘降级（lib/alerts/service.js:41/:48）：库不可用时命中仍评估，只是不写记录。
+        // 不消费这条帧 = spec §7「降级必须看得见」破功（最终评审 Important-2）。
+        const a = { ...(base.alerts || {}) };
+        a.hitsError = (d && d.error) || '触发记录未落盘';
         base.alerts = a;
         return base;
       }
@@ -2272,7 +2288,7 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
      * 测试专用出口（页面代码本身也从这里取，杜绝"测的是一份、跑的是另一份"）。
      * monitor 键在 Task 21 追加，其余键名自此不动。
      */
-    exports.__test = { cfg, consumeSse, api, fmtBytes, fmtRate, fmtPct, fmtAge, stateClass, sourcePill, nav, pages,
+    exports.__test = { cfg, consumeSse, api, fmtBytes, fmtRate, fmtPct, fmtAge, stateClass, sourcePill, nav, pages, mergeFrame,
       monitor: { MonitorPage, mtrRows, srcCells, curveSpec, band, sparkPoints },
       clean: { CleanPage, PLAN_COLS, scanCells, planRows, selTotals, selectAllIds, applyBody, logRow, quarantineText },
       search: { SearchPage, PROBE_ROWS, LIMITS, probeCells, modeOf, resultHead, rowCells, advice, searchQuery },

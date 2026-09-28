@@ -299,6 +299,43 @@ await checkAsync('hx-6 cadence 写接口 → 落到 prefs 且 collect 收到（�
   assert.equal(got.json.data.prefs.collect.cadence, '5s');
 });
 
+await checkAsync('hx-6b 改档位是读-并-写：sources/search/clean 三组不得被整行覆盖抹掉（半份写 = 红）', async () => {
+  const w = makeHost();
+  HOST.apply(w.ctx, {});
+  // 先落一份完整偏好（模拟用户已在设置页配过）
+  const seed = await callRoute(w, 'POST', '/sysops/api/prefs', { prefs: {
+    collect: { cadence: '1s', keepMinutes: 30 },
+    sources: { l1b: true },
+    search: { port: 3417 },
+    clean: { after: 'log' },
+  } });
+  assert.equal(seed.status, 200);
+  assert.equal((await callRoute(w, 'POST', '/sysops/api/collect/cadence', { cadence: '5s' })).status, 200);
+  const p = (await callRoute(w, 'GET', '/sysops/api/prefs')).json.data.prefs;
+  assert.equal(p.collect.cadence, '5s', '档位要改到');
+  assert.equal(p.sources.l1b, true, 'sources 组被抹了');
+  assert.equal(p.search.port, 3417, 'search 组被抹了');
+  assert.equal(p.clean.after, 'log', 'clean 组被抹了');
+  assert.equal(p.collect.keepMinutes, 30, 'collect 组内其他字段被抹了');
+});
+
+await checkAsync('hx-6c 源开关同规：改 sources 不得抹掉 collect/search/clean（半份写 = 红）', async () => {
+  const w = makeHost();
+  HOST.apply(w.ctx, {});
+  const seed = await callRoute(w, 'POST', '/sysops/api/prefs', { prefs: {
+    collect: { cadence: '5s', keepMinutes: 30 },
+    search: { port: 3417 },
+    clean: { after: 'log' },
+  } });
+  assert.equal(seed.status, 200);
+  assert.equal((await callRoute(w, 'POST', '/sysops/api/collect/source', { key: 'l1b', on: true })).status, 200);
+  const p = (await callRoute(w, 'GET', '/sysops/api/prefs')).json.data.prefs;
+  assert.equal(p.sources.l1b, true, '开关要落到');
+  assert.equal(p.collect.cadence, '5s', 'collect 组被抹了');
+  assert.equal(p.search.port, 3417, 'search 组被抹了');
+  assert.equal(p.clean.after, 'log', 'clean 组被抹了');
+});
+
 check('hx-7 l1b 默认关（实测代价决定默认值，spec §1.1 决策 7）', () => {
   assert.equal(HOST.DEFAULT_CONFIG.sources.l1b, false);
   assert.equal(HOST.DEFAULT_CONFIG.sources.l0, true);

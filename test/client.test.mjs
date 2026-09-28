@@ -382,6 +382,31 @@ check('pg1-17 相对时间四分档（fmtAge）：刚刚 / 分钟前 / 小时前
   assert.equal(f(undefined), '—');
 });
 
+/**
+ * pg1-18 / pg1-19（简报 F4 的证人）：落盘降级必须看得见（spec §7）。
+ * ① `lib/alerts/service.js:41/:48` 推 `type: 'alert-store'` 帧，旧 mergeFrame 落到末尾
+ *    `return base` 静默吞掉；② 快照/`GET /api/alerts` 都带 hitsError / errorCode（lib/api.js:290/:393-400），
+ *    旧触发记录卡只有「有记录 / 空态」两支 ⇒ 库不可用时显示「本机还没有触发记录」，与真的没触发过不可分辨。
+ */
+check('pg1-18 mergeFrame 消费 alert-store 帧：落进 alerts.hitsError，不再被末尾 return base 吞掉', () => {
+  const T = CLIENT.__test;
+  const s = T.mergeFrame({ alerts: { unread: 0, rules: [], hits: [] } }, 'alert-store', { error: 'storageDomain 不可用，触发记录未落盘' });
+  assert.equal(s.alerts.hitsError, 'storageDomain 不可用，触发记录未落盘');
+  assert.deepEqual(s.alerts.hits, [], '既有 hits 不得被降级帧清空');
+  const s2 = T.mergeFrame({ alerts: {} }, 'alert-store', {});
+  assert.ok(s2.alerts.hitsError, '帧里没带 error 也要给出可读文案，不许 undefined');
+});
+
+check('pg1-19 库不可用时触发记录卡显示降级文案、且不再显示"本机还没有触发记录"（spec §7）', () => {
+  const out = walk(MON.MonitorPage({ snap: SNAP({ alerts: { unread: 0, rules: [], hits: [], hitsError: 'storageDomain 不可用', errorCode: 'SYSOPS_HITS_UNAVAILABLE' } }), link: 'sse' }));
+  assert.ok(out.has('触发记录落盘不可用'), '降级必须看得见：' + out.texts.join('|'));
+  assert.ok(!out.has('本机还没有触发记录'), '库不可用时不得冒充"没有触发过"');
+  // 反向：无降级时仍是原来的空态，别把正常路径也改坏
+  const ok = walk(MON.MonitorPage({ snap: SNAP({ alerts: { unread: 0, rules: [], hits: [] } }), link: 'sse' }));
+  assert.ok(ok.has('本机还没有触发记录'), '无降级时保留原空态');
+  assert.ok(!ok.has('触发记录落盘不可用'), '无降级时不许挂降级文案');
+});
+
 /* ⑤段：清理页 —— 两段式的界面侧 */
 CLEAN = CLIENT.__test.clean;
 globalThis.__SYSOPS__ = clientPayload();
@@ -1564,12 +1589,19 @@ check('pg4-4 规则行 pill 分内置/本机，guard 拒绝项标「已被 guard
   assert.equal(out.texts.filter((t) => t === '本机').length, 2, '无标记行不许画「本机」pill');
 });
 
-check('pg4-5 黑名单 notice 逐字吃注入载荷的 redlines（单源，不抄第二份）', () => {
-  globalThis.__SYSOPS__ = clientPayload({ redlines: ['不碰回收站（2026-09-13 曾因按普通目录处理导致属主与 ACL 被改坏）', '不碰 C:\\Windows\\*', '不碰 Program Files', '不动注册表'] });
+check('pg4-5 黑名单 notice 逐字吃注入载荷的 redlines（宿主的 {id,text} 形状也得渲染成文本，不是 [object Object]）', () => {
+  const lines = [
+    { id: 'b-recycle-bin', text: '不碰回收站（2026-09-13 曾因按普通目录处理导致属主与 ACL 被改坏）' },
+    { id: 'b-system-dir', text: '不碰 C:\\Windows\\*' },
+    { id: 'b-program-files', text: '不碰 Program Files' },
+    { id: 'b-registry', text: '不动注册表' },
+  ];
+  globalThis.__SYSOPS__ = clientPayload({ redlines: lines });
   try {
-    const out = SPAGE({});
-    for (const line of globalThis.__SYSOPS__.redlines) assert.ok(out.has(line.slice(0, 8)), `缺红线 ${line}`);
+    const out = SPAGE();
+    for (const line of lines) assert.ok(out.has(line.text.slice(0, 8)), `缺红线 ${line.text}`);
     assert.ok(out.has('不可移除的黑名单'));
+    assert.ok(!out.has('[object Object]'), '对象形状不得渲染成 [object Object]：' + out.texts.join('|'));
     const code = stripComments(fs.readFileSync(path.join(ROOT, 'client.js'), 'utf8'));
     assert.ok(!code.includes('takeown'), 'client.js 不该自带第二份红线文案（含事故日期那种长句）');
     // Minor：占位符不许带本机用户名（此前 pnpm 占位符写死 C:\Users\gongj\…）

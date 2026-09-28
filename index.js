@@ -278,6 +278,9 @@ export function apply(ctx, config = {}) {
   const prefsFacade = {
     get available() { return prefStore.available; },
     readAll: () => prefStore.readAll(),
+    // read 与 readAll 并存的理由同 lib/prefs/store.js:160 —— 这里只取 `prefs` 一份做读-并-写，
+    // 打开 clean_rules 那张表没有收益（Ruling F1-a 的 patchPrefsGroup 用的就是它）。
+    read: (key) => prefStore.read(key),
     async writeMany(patch) {
       const out = await prefStore.writeMany(patch);
       await reloadPrefs();
@@ -337,10 +340,21 @@ export function apply(ctx, config = {}) {
   });
 
   /* ---- 9. api 门面：collectForApi 保证界面点档位/开关时"service + 落库"两处都动（spec §3.2）---- */
+  // 读-并-写全量：prefs 是**一行一份**（lib/prefs/store.js:191 writeMany 整行 put），
+  // 只发半份 = 把其余组静默抹掉（最终评审 Critical-1）。浏览器半边已按 Ruling-105 这么修过，
+  // 宿主半边现在补上，两侧同一口径。
+  async function patchPrefsGroup(group, fields) {
+    const cur = (await prefsFacade.read('prefs')) ?? {};
+    const base = (cur && typeof cur === 'object') ? cur : {};
+    const prev = (base[group] && typeof base[group] === 'object') ? base[group] : {};
+    const merged = { ...base, [group]: { ...prev, ...fields } };
+    delete merged.updatedAt; // 由 store 落库时重盖，带进来只会被 schema 丢
+    return prefsFacade.writeMany({ prefs: merged });
+  }
   const collectForApi = {
     ...collect,
-    setCadence: async (v) => { collect.setCadence(v); await prefsFacade.writeMany({ prefs: { collect: { cadence: v } } }); },
-    setSource: async (k, on) => { await collect.setSource(k, on); await prefsFacade.writeMany({ prefs: { sources: { [k]: on } } }); },
+    setCadence: async (v) => { collect.setCadence(v); await patchPrefsGroup('collect', { cadence: v }); },
+    setSource: async (k, on) => { await collect.setSource(k, on); await patchPrefsGroup('sources', { [k]: on }); },
   };
   const apiHandler = createApiHandler({
     collect: collectForApi,
