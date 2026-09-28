@@ -462,11 +462,302 @@ check('pg2-13 写接口错误就地落 notice：501 与 403 两种原因文案�
   assert.ok(!/position:fixed/.test(JSON.stringify(o2.classes)), '不许出现浮层');
 });
 
-check('pg2-14 扫描被截断/有目录读不动时必须说明（spec §7 如实降级）', () => {
+check('pg2-14 扫描被截断/有目录未纳入清单时必须说明（spec §7 如实降级，C-I-3 如实口径）', () => {
   const c = CLEAN.scanCells({ ...SCAN, truncated: true, skipped: [{ dir: 'D:\\locked', code: 'EPERM', why: '拒绝访问' }], stopped: true });
   assert.match(c.phase, /已停止/);
   assert.match(c.note, /条目数达上限/);
-  assert.match(c.note, /1 个目录读不动/);
+  // C-I-3：guard 红线拒绝与 EPERM 读不动同进一个 skipped 计数（lib/clean/scanner.js:154、:169-172），
+  // 界面无从分辨，就不许把两者单说成「读不动」——那是把安全设计说成权限故障。
+  assert.ok(c.note.includes('1 个目录未纳入清单（读不动或命中红线被拒）'), c.note);
+});
+
+// —— C-I-2 / C-m-3：宿主真形状的「渲染证人」（评审现证：删掉 :964、:978-979、:975、:512 四处渲染仍全绿）
+//    以下每条都走 walk 断渲染产物，不再只测纯函数返回值。
+const cleanProps = (over = {}) => ({ clean: IDLE, plan: null, logs: [], unfinished: [], quar: {}, rules: [], prefs: {}, caps: {}, link: 'sse', sel: new Set(), err: null, ...over });
+const walkClean = (over) => walk(CLEAN.CleanPage(cleanProps(over)));
+
+check('pg2-15 扫描卡把宿主对象形态的如实降级渲染出来（skipped {count,note} 透传 + 停止相位）', () => {
+  const out = walkClean({ clean: { ...SCAN, stopped: true, truncated: true, skipped: { count: 2, sample: [{ dir: 'D:\\locked' }], truncated: true, note: '跳过项明细已截断，只留前 20 条' } } });
+  assert.ok(out.has('本次扫描如实降级'), out.texts.join('|'));
+  assert.ok(out.has('跳过项明细已截断'), '宿主 normalizeCleanState 的 note 必须原样透传到卡面');
+  assert.ok(out.has('已停止'), '停止相位要标在扫描卡头');
+});
+
+check('pg2-16 清单卡：被停止的扫描要标出「已停止（部分清单）」并说明这份清单的降级', () => {
+  const out = walkClean({ clean: { ...IDLE, phase: 'ready', planId: 'plan-1', stopped: true, truncated: true, skipped: { count: 1, sample: [], truncated: false, note: '' } }, plan: PLAN([ITEM()]) });
+  assert.ok(out.has('这份清单如实降级'), out.texts.join('|'));
+  assert.ok(out.has('扫描是被停止的'), '停止原因要在清单卡里补一句');
+  assert.ok(out.has('已停止（部分清单）'), 'scanCells 的停止相位要渲染进清单卡头，不许只活在纯函数里');
+});
+
+check('pg2-17 宿主真形状 phase=ready 要被认作「扫描完成」并渲染清单卡（service.js:83）', () => {
+  const out = walkClean({ clean: { ...IDLE, phase: 'ready', planId: 'plan-1' }, plan: PLAN([ITEM()]) });
+  assert.ok(out.has('待清理清单'), out.texts.join('|'));
+  assert.ok(out.has('扫描完成'), 'phase 读数要出现在卡头');
+});
+
+check('pg2-18 清单卡要渲染「全选已跳过 N 项标风险的」说明（原型逐字）', () => {
+  const out = walkClean({ clean: { ...IDLE, phase: 'ready', planId: 'plan-1' }, plan: PLAN([ITEM(), ITEM({ id: 'r1', riskLevel: 'mid', riskWhy: '微信正在运行' })]) });
+  assert.ok(out.has('全选已跳过 1 项标风险的（应用正在运行）'), out.texts.join('|'));
+});
+
+check('pg2-19 unfinished 没有 done/total 时回落 itemIds 计数（宿主真形状，log-store.js:122-127）', () => {
+  const out = walkClean({ clean: { ...IDLE, phase: 'ready', planId: 'plan-1' }, plan: PLAN([ITEM()]), unfinished: [{ logId: 'CLN-U1', startedAt: 1, mode: 'delete-file', itemIds: ['a', 'b', 'c'] }] });
+  assert.ok(out.has('上次执行未确认完成'), out.texts.join('|'));
+  assert.ok(out.has('涉及 3 项（完成数未知）'), '无 done/total 就用 itemIds 说涉及项数，不假报进度');
+});
+
+check('pg2-20 空态卡要把 st.error 如实渲染出来（扫描失败不静默）', () => {
+  const out = walkClean({ clean: { ...IDLE, phase: 'error', error: '遍历炸了' } });
+  assert.ok(out.has('扫描失败：遍历炸了'), out.texts.join('|'));
+});
+
+check('pg2-21 暂存目录二级回落：prefs 没配时用宿主展开好的 defaults.quarantineDir', () => {
+  // clientPayload 的 defaults.quarantineDir 与真机 index.js:415 同形（宿主展开后的绝对路径）。
+  const out = walkClean({ clean: { ...IDLE, phase: 'ready', planId: 'plan-1' }, plan: PLAN([ITEM()]), prefs: {} });
+  assert.ok(out.has('dsh-plugin-sysops'), '二级回落要把宿主展开的目录显示出来：' + out.texts.filter((t) => t.includes('隔离')).join('|'));
+  assert.ok(out.has('同盘移动到'), out.texts.join('|'));
+});
+
+check('pg2-22 暂存目录第三级如实口径：内置暂存根目录照常隔离，不引导「必须先去设置页」（C-I-1）', () => {
+  globalThis.__SYSOPS__ = clientPayload({ defaults: {} }); // 真机首装形状：index.js:415 未配置时是空/缺失
+  try {
+    const txt = CLEAN.quarantineText({ clean: { keepDays: 14 } });
+    assert.ok(txt.includes('内置暂存根目录'), txt);
+    assert.ok(txt.includes('保留 14 天后由你手动清空'), txt);
+    assert.ok(txt.includes('插件不会自动删'), txt);
+    assert.ok(!txt.includes('设置页'), '执行链会用内置根目录照常隔离（lib/clean/service.js:50-53），不该引导用户去配置：' + txt);
+    assert.ok(!txt.includes('undefined'), txt);
+  } finally {
+    globalThis.__SYSOPS__ = clientPayload();
+  }
+});
+
+check('pg2-23 未写完成档的留痕行显示「计数未确认」而不是全 0（C-m-2）', () => {
+  const r = CLEAN.logRow({ logId: 'CLN-9', planId: 'plan-9', startedAt: 1, mode: 'delete-file', itemIds: ['a'] });
+  assert.ok(r.line.includes('计数未确认'), r.line);
+  assert.ok(!r.line.includes('成功 0'), 'start 行没有四档计数（log-store.js:122-127），"未知"不许说成"全 0"：' + r.line);
+});
+
+check('pg2-24 扫描分母拿不到时进度条走不定量，不画实心 0%（C-m-5）', () => {
+  const c = CLEAN.scanCells({ ...SCAN, skipped: [] }, 0);
+  assert.equal(c.pct, null, '已启用规则数拿不到时 pct 交 null，由卡面走不定量样式');
+  const out = walkClean({ clean: { ...SCAN, skipped: [] }, rules: [] });
+  assert.ok(out.has('进度未知'), out.texts.join('|'));
+  assert.ok(out.classHas('is-indeterminate'), '不定量样式类要挂上');
+  assert.ok(!out.has('0%'), '宿主任何接口都不发分母（lib/api.js 的规则列表只回 {items, off}），不许画实心 0');
+});
+
+check('pg2-25 404 与 503 两种整批拒的界面文案分开，都就地落 notice 不弹浮层（批 C concern-1 收口）', () => {
+  const e404 = { source: 'clean/apply', status: 404, code: 'SYSOPS_RECORDS_NOT_FOUND', message: '清理清单快照不存在或已被裁剪，本次未删除任何文件，请重新扫描后再执行' };
+  const o404 = walkClean({ clean: IDLE, err: e404 });
+  assert.ok(o404.has('已被覆盖'), '404 要说清是清单快照没了：' + o404.texts.join('|'));
+  assert.ok(o404.has('请重新扫描'), o404.texts.join('|'));
+  assert.ok(!o404.has('接口异常'), '不许落到通用兜底句');
+  const e503 = { source: 'clean/apply', status: 503, code: 'SYSOPS_QUARANTINE_UNAVAILABLE', message: '暂存目录不可用（配置错误或建不出来），整批停止，未删除任何文件' };
+  const o503 = walkClean({ clean: IDLE, err: e503 });
+  assert.ok(o503.has('暂存目录不可用或记录域已关闭'), '503 要说清是外部依赖故障：' + o503.texts.join('|'));
+  assert.ok(!o503.has('接口异常'), o503.texts.join('|'));
+  assert.ok(o404.has('未删除任何文件') && o503.has('未删除任何文件'), '两种都要如实说"什么都没删"');
+});
+
+/* ⑧段：共享连接层（批 D + Ruling-98 接线）—— 带真实 useEffect/useState 的活体桩
+ *    评审现证：useStream 层此前零覆盖，D-I-1 的假降级、D-I-2 的静默覆盖写、D-I-3 的连接悬挂
+ *    都长在 effect 里，纯 props 的 walk 抓不到 ⇒ 本段用活体桩真挂载、真跑 effect、真收集 cleanup。 */
+
+globalThis.__SYSOPS__ = clientPayload(); // 自足引导：本段不依赖前段 finally 的还原
+
+/**
+ * 活体桩 React：useState/useRef 按 hook 调用顺序落槽位、setter 真改槽位；
+ * useEffect 真执行并按 deps 比较重跑；__unmount 挨个执行未跑的 cleanup（真机卸载语义）。
+ * 页签与状态的推进一律走「真点击 + 重渲染」，不靠预置槽位序号 —— 避免与 hook 顺序强耦合。
+ */
+function makeLiveReact() {
+  const slots = [];
+  const effs = [];
+  let cursor = 0;
+  const R = {
+    __root: null,
+    createElement(type, props, ...children) {
+      const p = props ? { ...props } : {};
+      if (children.length) p.children = children.length === 1 ? children[0] : children;
+      return { type, props: p, children };
+    },
+    useState(init) {
+      const i = cursor; cursor += 1;
+      if (!(i in slots)) slots[i] = typeof init === 'function' ? init() : init;
+      return [slots[i], (v) => { slots[i] = typeof v === 'function' ? v(slots[i]) : v; }];
+    },
+    useRef(v) {
+      const i = cursor; cursor += 1;
+      if (!(i in slots)) slots[i] = { current: v === undefined ? null : v };
+      return slots[i];
+    },
+    useEffect(fn, deps) {
+      const i = cursor; cursor += 1;
+      const prev = effs[i];
+      const changed = !prev || !Array.isArray(prev.deps) || !Array.isArray(deps)
+        || deps.length !== prev.deps.length || deps.some((d, k) => d !== prev.deps[k]);
+      if (changed) {
+        if (prev && typeof prev.cleanup === 'function') { prev.cleanup(); prev.cleanup = null; }
+        const cleanup = fn();
+        effs[i] = { deps: Array.isArray(deps) ? deps.slice() : null, cleanup: typeof cleanup === 'function' ? cleanup : null };
+      }
+    },
+    /** 挂载或重渲染：cursor 归零重走组件树；deps 变了的 effect 会真执行。返回 walk 结果。 */
+    __render(Comp) { cursor = 0; R.__root = Comp(); return walk(R.__root); },
+    /** 卸载：执行全部未跑的 effect cleanup。 */
+    __unmount() { for (const e of effs) { if (e && typeof e.cleanup === 'function') { e.cleanup(); e.cleanup = null; } } },
+  };
+  return R;
+}
+
+/** fetch 桩：按路由表应答并记录每次调用（含 init.signal）；未登记的路由回可见错误而不是静默。 */
+function stubFetch(routes) {
+  const log = [];
+  globalThis.fetch = async (u, init = {}) => {
+    const url = String(u);
+    const method = init.method ?? 'GET';
+    log.push({ url, method, body: init.body, signal: init.signal ?? null });
+    const hit = routes.find((r) => (r.method ?? 'GET') === method && url.split('?')[0] === r.url);
+    if (!hit) return { ok: false, status: 404, json: async () => ({ ok: false, error: { code: 'TEST_NO_ROUTE', message: '测试桩没这条路由：' + method + ' ' + url } }) };
+    return hit.reply({ url, init });
+  };
+  return log;
+}
+
+/** SSE 响应体：逐帧吐出后挂住不返回 done —— 模拟真机长连接，直到 abort 或服务端关流。 */
+function sseRes(frames) {
+  const enc = new TextEncoder();
+  let i = 0;
+  return {
+    ok: true,
+    status: 200,
+    body: {
+      getReader: () => ({
+        async read() {
+          if (i < frames.length) return { done: false, value: enc.encode(frames[i++]) };
+          return new Promise(() => {});
+        },
+      }),
+    },
+  };
+}
+
+const jsonRes = (data, status = 200) => ({ ok: status < 400, status, json: async () => data });
+
+/** 真机快照形状的最小足量版（两张页都渲染得动即可，字段不多造）。 */
+const CN_SNAP = {
+  cadence: '1s', keepMinutes: 30, series: {}, latest: {}, sources: [],
+  proc: { rows: [], state: 'off', note: '' }, dropped: {}, alerts: { unread: 0, rules: [], hits: [] }, clean: {},
+};
+
+/** 在 vnode 树里按按钮文字取真 onClick（walk 的 buttons 只带"有没有"，这里要函数本身）。 */
+function findClick(node, text) {
+  if (!node || typeof node !== 'object') return null;
+  if (Array.isArray(node)) { for (const n of node) { const r = findClick(n, text); if (r) return r; } return null; }
+  if (typeof node.type === 'function') return findClick(node.type(node.props || {}), text);
+  if (node.type === 'button') {
+    const t = (node.children || []).filter((c) => typeof c === 'string').join('');
+    if (t.includes(text)) { const fn = (node.props || {}).onClick; return typeof fn === 'function' ? fn : null; }
+  }
+  const kids = Array.isArray(node.children) ? node.children : [(node.props || {}).children];
+  for (const k of kids) { const r = findClick(k, text); if (r) return r; }
+  return null;
+}
+
+/** 起一份独立模块实例（绑一份独立活体桩），返回 render/点击/cleanup 的驱动器。 */
+function cnWorld(routes) {
+  const log = stubFetch(routes);
+  const live = makeLiveReact();
+  const C = loadedClient.factory((name) => {
+    if (name === 'react') return live;
+    throw new Error('意外的 require: ' + name);
+  });
+  return { log, live, C, render: () => live.__render(C.SysopsPage), click: (t) => findClick(live.__root, t) };
+}
+const cnTick = (ms = 30) => new Promise((r) => setTimeout(r, ms));
+
+await checkAsync('cn-1 SSE 健康时 collect:refresh 补快照只换快照不改 link（D-I-1 假降级钉桩）', async () => {
+  const w = cnWorld([
+    { url: '/sysops/api/stream', reply: () => sseRes([`event: snapshot\ndata: ${JSON.stringify(CN_SNAP)}\n\n`, 'event: collect:refresh\ndata: {}\n\n']) },
+    { url: '/sysops/api/snapshot', reply: () => jsonRes({ ok: true, data: CN_SNAP }) },
+    { url: '/sysops/api/alerts/read', method: 'POST', reply: () => jsonRes({ ok: true, data: { unread: 0 } }) },
+  ]);
+  w.render();
+  await cnTick();
+  const out = w.render();
+  assert.ok(w.log.some((e) => e.method === 'GET' && e.url === '/sysops/api/snapshot'),
+    '重采完成帧必须补一次快照：' + JSON.stringify(w.log.map((e) => e.method + ' ' + e.url)));
+  assert.ok(!out.has('降级'), 'SSE 健康时补快照不许把通道打成「降级：轮询 2s」（假降级）：' + out.texts.join('|'));
+  assert.ok(!out.has('重连中'), out.texts.join('|'));
+});
+
+await checkAsync('cn-2 卸载必须 abort SSE 流请求：读循环与连接不悬挂（D-I-3）', async () => {
+  const w = cnWorld([
+    { url: '/sysops/api/stream', reply: () => sseRes([]) },
+    { url: '/sysops/api/alerts/read', method: 'POST', reply: () => jsonRes({ ok: true, data: {} }) },
+  ]);
+  w.render();
+  await cnTick();
+  const streamCall = w.log.find((e) => e.url === '/sysops/api/stream');
+  assert.ok(streamCall, '没发起流请求');
+  assert.ok(streamCall.signal, 'fetch /stream 必须带 AbortController 的 signal');
+  w.live.__unmount();
+  assert.equal(streamCall.signal.aborted, true, '卸载后必须 abort，否则读循环悬挂到服务端关流为止');
+});
+
+await checkAsync('cn-3 prefs 读失败：可见报错且不发起覆盖写（D-I-2，半份 merged 不许整域写回）', async () => {
+  const w = cnWorld([
+    { url: '/sysops/api/stream', reply: () => sseRes([`event: snapshot\ndata: ${JSON.stringify(CN_SNAP)}\n\n`]) },
+    { url: '/sysops/api/alerts/read', method: 'POST', reply: () => jsonRes({ ok: true, data: {} }) },
+    { url: '/sysops/api/prefs', reply: () => jsonRes({ ok: false, error: { code: 'PREFS_READ_FAILED', message: '读偏好失败' } }, 500) },
+    { url: '/sysops/api/prefs', method: 'POST', reply: () => jsonRes({ ok: true, data: {} }) },
+  ]);
+  w.render();
+  await cnTick();
+  w.render(); // 快照帧落进槽位后重渲染，「新建规则」输入框才在场
+  const save = w.click('保存规则');
+  assert.ok(save, '没找到「保存规则」按钮');
+  save();
+  await cnTick();
+  assert.ok(w.log.some((e) => e.method === 'GET' && e.url === '/sysops/api/prefs'), '写回前必须先读全量');
+  assert.ok(!w.log.some((e) => e.method === 'POST' && e.url === '/sysops/api/prefs'),
+    '读失败还整域写回会抹掉同域其它配置（lib/prefs/store.js:191），必须阻断');
+  const out = w.render();
+  assert.ok(out.has('接口异常'), '读失败必须可见（约束 4）：' + out.texts.join('|'));
+});
+
+await checkAsync('cn-4 快照只给 planId 字符串时按 GET /api/clean/plan 补清单并渲染（Ruling-98 接线）', async () => {
+  const PLAN_ENTITY = {
+    planId: 'plan-9', at: 1_700_000_000_000, modeDefault: 'delete-file', beforeFree: 70.4e9, afterFree: null,
+    items: [{ id: 'a1', path: 'C:\\Users\\gongj\\AppData\\Local\\Temp\\a.log', size: 4096, ruleName: '用户临时目录', kind: '缓存', atime: 1, mtime: 1, riskLevel: 'low', riskWhy: '' }],
+    totals: { n: 1, bytes: 4096 },
+  };
+  const snapWithPlanId = { ...CN_SNAP, clean: { phase: 'ready', planId: 'plan-9', plan: 'plan-9' } };
+  const w = cnWorld([
+    { url: '/sysops/api/stream', reply: () => sseRes([`event: snapshot\ndata: ${JSON.stringify(snapWithPlanId)}\n\n`]) },
+    { url: '/sysops/api/alerts/read', method: 'POST', reply: () => jsonRes({ ok: true, data: {} }) },
+    { url: '/sysops/api/clean/logs', reply: () => jsonRes({ ok: true, data: [] }) },
+    { url: '/sysops/api/clean/unfinished', reply: () => jsonRes({ ok: true, data: [] }) },
+    { url: '/sysops/api/quarantine', reply: () => jsonRes({ ok: true, data: { dirs: 0, files: 0, bytes: 0, oldest: null } }) },
+    { url: '/sysops/api/rules', reply: () => jsonRes({ ok: true, data: { items: [], off: [] } }) },
+    { url: '/sysops/api/prefs', reply: () => jsonRes({ ok: true, data: { prefs: {} } }) },
+    { url: '/sysops/api/clean/plan', reply: () => jsonRes({ ok: true, data: PLAN_ENTITY }) },
+  ]);
+  w.render();
+  await cnTick();
+  const goClean = w.click('C 盘清理');
+  assert.ok(goClean, '没找到页签按钮');
+  goClean();
+  w.render(); // tab 变 → 现读辅助数据；snap 变 → 认 clean.plan 的 effect 重跑
+  await cnTick();
+  const getPlan = w.log.find((e) => e.method === 'GET' && e.url.split('?')[0] === '/sysops/api/clean/plan');
+  assert.ok(getPlan, '快照只给 planId 字符串时必须补一次 GET /api/clean/plan：' + JSON.stringify(w.log.map((e) => e.method + ' ' + e.url)));
+  assert.ok(/planId=plan-9/.test(getPlan.url), getPlan.url);
+  const out = w.render();
+  assert.ok(out.has('待清理清单'), '补拉到的实体要渲染成清单卡：' + out.texts.join('|'));
+  assert.ok(out.has('a.log'), out.texts.join('|'));
 });
 
 console.log(`\n  ${passed}/${passed + failed} 通过`);
