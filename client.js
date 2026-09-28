@@ -828,6 +828,143 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
       const lim = LIMITS.indexOf(num(s.limit)) >= 0 ? s.limit : LIMITS[1];
       return { q: text, mode: s.mode === 'everything' ? 'everything' : 'walk', limit: lim };
     }
+
+    // ------------------------------------------------------------
+    // 2e) 设置页视图助手（Task 24；纯函数 + SettingsPage，经 __test.settings 出口）
+    //     红线 / 能力行 / 档位 / 默认值一律吃 Task 19 注入载荷（cfg()），页面不抄第二份；
+    //     guard 拒绝原因只**透传**宿主给的句子（denyWhy / err.message），客户端不做 code→中文映射
+    //     —— 再映射一遍就等于把 lib/clean/guard.js 的裁决权挪出第二份（硬约束 5、spec §4.5）。
+    // ------------------------------------------------------------
+
+    /** L1a 暖身耗时常量：来自 §1.2 实测（Task 6），改值须同步 spec —— 不写死进文案串。 */
+    const L1A_WARMUP_MS = 219;
+
+    /** 宿主**永不提供**的能力键：只报事实「宿主不提供」，不给降级 pill，更不给开关（pg4-9）。 */
+    const NEVER_PROVIDED = ['notifications', 'autostart'];
+
+    /**
+     * 四源行（恰好 L0 / L1a / L1b / L2）：tier 与 desc 逐字取原型 collectRules 的三行 + 新增 L2 行。
+     * 开关读 **prefs.sources**（与 prefsRecord 同级的键，不在 prefs.collect 里）；
+     * **L0 的 switch 是 null** —— 采样档位入口只在监控页顶部那一处，这里不重复一个 seg。
+     * `cadText` 缺数一律落「—」/如实措辞，不硬算、不渲染 undefined（L1b 刷新间隔取 cfg().defaults.procIntervalSec）。
+     */
+    function SOURCE_ROWS(prefs, snap) {
+      const p = prefs && typeof prefs === 'object' ? prefs : {};
+      const src = p.sources && typeof p.sources === 'object' ? p.sources : {};
+      const collect = p.collect && typeof p.collect === 'object' ? p.collect : {};
+      const d = cfg().defaults || {};
+      const cad = String(collect.cadence || '—');
+      const keep = num(collect.keepMinutes);
+      const procSec = num(d.procIntervalSec);
+      const sw = (key) => ({ on: src[key] === true, disabled: false, key });
+      return [
+        { key: 'l0', name: '实时曲线（CPU / 内存 / 磁盘）', tier: 'L0 · 主进程内',
+          desc: '纯 Node os + fs.statfsSync，不起任何子进程；采样档位由监控页顶部「1s / 5s / 暂停」控制',
+          cadText: `采样 ${cad} · 保留 ${keep === null ? '—' : keep + 'min'}`, switch: null },
+        { key: 'l1a', name: '网速采集', tier: 'L1a · 常驻 typeperf',
+          desc: `单进程流式读 stdout，暖身 ${L1A_WARMUP_MS}ms 之后开销可忽略`,
+          cadText: '定窗续采', switch: sw('l1a') },
+        { key: 'l1b', name: '进程榜采集', tier: 'L1b · 常驻 PowerShell',
+          // 640ms 是 §1.2 实测的单次代价；默认关（spec §1.1 决策 7）由 prefs.sources.l1b 决定
+          desc: '单次 640ms，持续开启代价明显；建议只在需要时开',
+          cadText: procSec === null ? '刷新间隔未确认' : `${procSec}s 一次`, switch: sw('l1b') },
+        { key: 'l2', name: '按需扫描 / 搜索', tier: 'L2 · 请求驱动',
+          desc: '扫描/搜索请求驱动，不常驻；遍历实测 14.5 万条目 / 7.3s，必须带进度与可停止',
+          cadText: '非常驻 · 按需触发', switch: sw('l2') },
+      ];
+    }
+
+    /**
+     * 清理规则行读数：pill 只分内置/本机；blocked 只看服务端有没有给 guardDenied 键（页面不做任何路径裁决）；
+     * denyWhy 原样透传宿主 `guardDenied.why`，命中红线的行为由界面置灰 + 禁用开关（与原型 renderCleanRules 同行为）。
+     */
+    function ruleCells(rules) {
+      const arr = Array.isArray(rules) ? rules : [];
+      return arr.map((r) => {
+        const row = r || {};
+        const gd = row.guardDenied ? row.guardDenied : null;
+        const ageDays = num(row.ageDays);
+        return {
+          n: String(row.n ?? row.name ?? ''),
+          glob: String(row.glob ?? ''),
+          ageText: ageDays === null ? '—' : (ageDays <= 0 ? '当天' : `${ageDays} 天未访问`),
+          kind: String(row.kind ?? ''),
+          pill: row.builtin === true ? '内置' : '本机',
+          blocked: Boolean(gd),
+          on: row.enabled === true,
+          denyWhy: gd ? String(gd.why ?? gd.code ?? '') : '',
+        };
+      });
+    }
+
+    /**
+     * 规则区计数三态（spec §3.2 硬要求：null ≠ []）。
+     * `null` = 从未写入 → 「本机尚未写入清理规则」；`[]` = 用户清空 → 「本机规则已全部清空」；
+     * 数组 → 「本机规则 N 条」。**未确认的计数不许渲染成 0**（非数组形状如实说未确认）。
+     */
+    function ruleStateText(v) {
+      if (v === null || v === undefined) return '本机尚未写入清理规则，当前只用内置库';
+      if (Array.isArray(v)) {
+        if (v.length === 0) return '本机规则已全部清空';
+        return `本机规则 ${v.length} 条`;
+      }
+      return '本机规则计数未确认';
+    }
+
+    /**
+     * 写偏好请求体：**只发差量** `{ prefs: patch }`（服务端 normalize 后回全量）。
+     * 不整包回传当前 prefs —— 那会把用户在别处刚改的组抹掉（读-并-写的整域覆盖风险，同 writePrefsGroup 的理由）。
+     */
+    function patchBody(patch) {
+      return { prefs: patch };
+    }
+
+    /**
+     * 能力表行读数：`ok===true`→提供（绿 pill）；`ok===false && NEVER_PROVIDED`→宿主不提供（灰 pill）；
+     * 其余 `ok===false`→fallback 文案 + 已降级（琥珀 pill）。**五行一律 hasSwitch:false** —— 能力表只报事实，
+     * 给个看着能开却永远不响的开关比不画更糟（spec §1.1 决策 8）。
+     */
+    function capCells(rows) {
+      const arr = Array.isArray(rows) ? rows : [];
+      return arr.map((r) => {
+        const row = r || {};
+        const key = String(row.key || '');
+        let value;
+        let cls;
+        if (row.ok === true) { value = '提供'; cls = 'so-pill-down'; }
+        else if (NEVER_PROVIDED.indexOf(key) >= 0) { value = '宿主不提供'; cls = 'so-pill-gray'; }
+        else { value = String(row.fallback || '已降级'); cls = 'so-pill-amber'; }
+        return { label: String(row.label || key), value, cls, detail: String(row.detail || ''), hasSwitch: false };
+      });
+    }
+
+    /**
+     * 保存按钮的只读闸门，三个来源按优先级：storageDomain 缺失 → 上次保存 501 → 保存中。
+     * 禁用了就一定有 `why` 显示在旁边（不允许只变灰）。第 4 参 saving 由组件传入（简报签名是 3 参，
+     * saving 走默认值 false，纯函数用例只喂前 3 参即命中 storageDomain 分支）。
+     */
+    function SAVE_DISABLED(prefs, caps, err, saving) {
+      const c = caps && typeof caps === 'object' ? caps : {};
+      if (c.storageDomain === false) return { disabled: true, why: '配置只读：宿主未提供 storageDomain' };
+      const e = err && typeof err === 'object' ? err : {};
+      if (e.code === 'PREFS_UNAVAILABLE' || num(e.status) === 501) {
+        return { disabled: true, why: '上一次保存失败（501），原因同上：宿主未提供 storageDomain' };
+      }
+      if (saving === true) return { disabled: true, why: '保存中…' };
+      return { disabled: false, why: '' };
+    }
+
+    /**
+     * 写接口错误 → 就地 notice（无浮层）。**只回显宿主给的句子**：403 的拒绝原因、501 的只读原因都来自
+     * 服务端 message / guardDenied，客户端不复制一份 code→中文映射表（硬约束 5）。
+     */
+    function settingsErrNotice(err) {
+      if (!err) return null;
+      const status = num(err.status);
+      const tone = (status === 403 || status === 501) ? 'red' : 'amber';
+      return { tone, text: String(err.message || err.code || '接口异常') };
+    }
+
     // ------------------------------------------------------------
     // 3) 基础组件（自研控件，无原生弹层）
     // ------------------------------------------------------------
@@ -1355,7 +1492,168 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
                 h('div', { className: 'so-tbl-note' }, SEARCH_TXT.openNote))
                 : h('div', { className: 'so-empty' }, SEARCH_TXT.emptyNote))));
     }
-    const pages = { MonitorPage, CleanPage, SearchPage };
+    /**
+     * 设置页（Task 24）：四源开关 / 清理规则（含 guard 拒绝的纯渲染）/ 暂存与默认方式 / 搜索通路 / 能力表。
+     * 与 MonitorPage / CleanPage / SearchPage 同规：自身零 useState —— prefs / rules / caps / snap 都从容器传下来。
+     * 红线：黑名单文案、能力行、档位、默认值全吃注入载荷；guard 拒绝原因只透传宿主给的句子，本页不做任何路径裁决。
+     */
+    function SettingsPage(props = {}) {
+      const {
+        prefs = {}, rules = [], caps = {}, capRows = [], snap = null, err = null, saving = false,
+        onPatch, onRuleAdd, onRuleToggle, onRuleRemove, onSave,
+      } = props;
+      const nameRef = useRef(null);
+      const globRef = useRef(null);
+      const ageRef = useRef(null);
+      const kindRef = useRef(null);
+      const portRef = useRef(null);
+      const esRef = useRef(null);
+
+      const srcRows = SOURCE_ROWS(prefs, snap);
+      const alertRules = (snap && snap.alerts && Array.isArray(snap.alerts.rules)) ? snap.alerts.rules : [];
+      const cells = ruleCells(rules);
+      const caps_ = Array.isArray(capRows) ? capRows : [];
+      const capList = capCells(caps_);
+      const save = SAVE_DISABLED(prefs, caps, err, saving);
+      const errN = settingsErrNotice(err);
+      const redlines = Array.isArray(cfg().redlines) ? cfg().redlines : [];
+
+      const p = prefs && typeof prefs === 'object' ? prefs : {};
+      const clean = p.clean && typeof p.clean === 'object' ? p.clean : {};
+      const search = p.search && typeof p.search === 'object' ? p.search : {};
+      const defaults = cfg().defaults || {};
+      // 暂存目录：prefs 只会是展开后的绝对路径（schema 拒 `%...%`），没配时回落宿主展开的 defaults —— 都不许渲染 undefined
+      const quarDir = String(clean.quarantineDir || defaults.quarantineDir || '—');
+      const keepDays = num(clean.keepDays);
+      const after = clean.after === 'log' ? 'log' : 'none';
+      // 搜索通路：生效值读 prefs.search，占位与回落读 cfg().defaults.searchPort；esPath 是 optionalString，normalize 后多半 undefined → ?? '' 防渲染出字面量 undefined
+      const portVal = num(search.port);
+      const dfltPort = num(defaults.searchPort);
+      const esVal = String(search.esPath ?? '');
+
+      const readNum = (ref, dft) => { const x = ref && ref.current ? Number(ref.current.value) : NaN; const v = num(x); return v === null || v < 0 ? dft : v; };
+      const saveRule = () => {
+        if (!onRuleAdd) return;
+        onRuleAdd({
+          n: nameRef.current && nameRef.current.value ? String(nameRef.current.value) : '',
+          glob: globRef.current && globRef.current.value ? String(globRef.current.value) : '',
+          ageDays: readNum(ageRef, 30),
+          kind: kindRef.current && kindRef.current.value ? String(kindRef.current.value) : '缓存',
+        });
+      };
+
+      return h('div', { className: 'so-tabpanel' },
+        // —— 数据采集：四源开关 + 依赖采集的告警规则可用性（与监控页同一个 st） ——
+        h('div', { className: 'so-card' },
+          h('div', { className: 'so-card-h' }, h('h2', null, '数据采集'),
+            h('span', { className: 'so-hsub' }, '关掉某一源，依赖它的告警规则会就地标为不可用')),
+          h('div', { className: 'so-card-b' },
+            srcRows.map((r) => h('div', { key: r.key, className: 'so-rule' },
+              h('div', { className: 'so-ri' },
+                h('div', { className: 'so-rn' }, r.name, h(Pill, { cls: 'so-pill-gray' }, r.tier)),
+                h('div', { className: 'so-rd' }, r.desc)),
+              h('span', { className: 'so-rt so-num' }, r.cadText),
+              r.switch === null
+                ? h('span', { className: 'so-hint' }, '档位由监控页控制')
+                : h(Switch, { on: r.switch.on, disabled: r.switch.disabled, label: `切换 ${r.name}`,
+                    onChange: (next) => onPatch && onPatch(patchBody({ sources: { [r.key]: next } })) }))),
+            alertRules.length ? h('div', { style: { marginTop: 10 } },
+              h('div', { className: 'so-hint' }, '依赖本机采集的告警规则：'),
+              alertRules.map((row) => {
+                const rl = (row && row.rule) || {};
+                const st = (row && row.st) || {};
+                return h('div', { key: String(rl.id ?? rl.n ?? ''), className: 'so-rule' },
+                  h('div', { className: 'so-ri' },
+                    h('div', { className: 'so-rn' }, String(rl.n || rl.id || '')),
+                    h('div', { className: 'so-rd' + (st.dim ? ' so-rule-dim' : '') }, String(st.st || ''))),
+                  h('span', { className: 'so-rt so-num' + (st.dim ? ' so-rule-dim' : '') }, ''),
+                  h(Switch, { on: st.on === true, disabled: st.dim === true,
+                    label: st.on ? '停用规则' : '启用规则',
+                    onChange: (next) => onRuleToggle && onRuleToggle(rl.id, next) }));
+              })) : null)),
+        // —— 清理规则：内置/本机 pill + guard 拒绝纯渲染 + 新增表单（按钮唯一）+ 黑名单 notice ——
+        h('div', { className: 'so-card' },
+          h('div', { className: 'so-card-h' }, h('h2', null, '清理规则'),
+            h('span', { className: 'so-hsub' }, '内置规则只放通用缓存路径；本机私有路径存在你机器上，不进仓库'),
+            h('span', { className: 'so-grow so-hint' }, ruleStateText(rules))),
+          errN ? h('div', { className: 'so-card-b', style: { paddingBottom: 0 } }, h(Notice, { tone: errN.tone }, errN.text)) : null,
+          h('div', { className: 'so-card-b' },
+            cells.length ? h('div', null, cells.map((c, i) => {
+              const rid = (Array.isArray(rules) && rules[i]) ? rules[i].id : null;
+              return h('div', { key: String(rid ?? i), className: 'so-rule' + (c.blocked ? ' so-rule-dim' : '') },
+                h('div', { className: 'so-ri' },
+                  h('div', { className: 'so-rn' }, c.n,
+                    h(Pill, { cls: c.pill === '内置' ? 'so-pill-gray' : 'so-pill-blue' }, c.pill),
+                    c.blocked ? h(Pill, { cls: 'so-pill-up' }, '已被 guard 拒绝') : null),
+                  h('div', { className: 'so-rd so-path' }, c.glob),
+                  c.denyWhy ? h('div', { className: 'so-hint' }, c.denyWhy) : null),
+                h('span', { className: 'so-rt so-num' }, c.ageText),
+                h(Switch, { on: c.on && !c.blocked, disabled: c.blocked,
+                  label: c.blocked ? 'guard 已拒绝，无法启用' : (c.on ? '停用规则' : '启用规则'),
+                  onChange: (next) => { if (!c.blocked && onRuleToggle) onRuleToggle(rid, next); } }));
+            })) : h('div', { className: 'so-empty' }, ruleStateText(rules)),
+            // 新增本机规则：自研控件，无原生校验气泡；保存时先过服务端 guard，命中红线的拒绝就地落 notice
+            h('div', { className: 'so-grid so-g-2', style: { marginTop: 14 } },
+              h('div', { className: 'so-field' }, h('label', null, '名称'),
+                h('input', { ref: nameRef, className: 'so-input', type: 'text', placeholder: '例：pnpm 未引用包' })),
+              h('div', { className: 'so-field' }, h('label', null, '路径 glob'),
+                h('input', { ref: globRef, className: 'so-input so-input-mono', type: 'text', placeholder: 'C:\\Users\\gongj\\AppData\\Local\\pnpm\\**' })),
+              h('div', { className: 'so-field' }, h('label', null, '只清早于'),
+                h('input', { ref: ageRef, className: 'so-input so-num', type: 'text', placeholder: '30 天未访问' })),
+              h('div', { className: 'so-field' }, h('label', null, '类型'),
+                h('input', { ref: kindRef, className: 'so-input', type: 'text', placeholder: '缓存 / 日志 / 旧版本' }))),
+            h('div', { style: { marginTop: 10, display: 'flex', gap: 8, alignItems: 'center' } },
+              h('button', { type: 'button', className: 'so-btn so-btn-primary so-btn-sm', disabled: save.disabled, title: save.why || undefined, onClick: saveRule }, '保存并启用'),
+              h('span', { className: 'so-hint' }, save.disabled ? save.why : '保存时先过 guard 校验，命中红线会直接拒绝写入。')),
+            h(Notice, { tone: 'amber' },
+              h('b', null, '不可移除的黑名单'),
+              h('span', null, '（新增规则命中即拒绝）：'),
+              redlines.length
+                ? redlines.map((line, i) => h('span', { key: String(i), className: 'so-path' }, String(line)))
+                : h('span', null, '宿主未下发黑名单明细，判定仍以服务端 guard 为准。')))),
+        // —— 暂存与默认方式：prefs 实配值 + 到期提醒不自动删 + after 两档 ——
+        h('div', { className: 'so-card' },
+          h('div', { className: 'so-card-h' }, h('h2', null, '暂存与默认方式')),
+          h('div', { className: 'so-card-b' },
+            h('div', { className: 'so-grid so-g-2' },
+              h('div', { className: 'so-field' }, h('label', null, '暂存目录'),
+                h('span', { className: 'so-path' }, quarDir)),
+              h('div', { className: 'so-field' }, h('label', null, '暂存保留'),
+                h('span', { className: 'so-num' }, `${keepDays === null ? '—' : keepDays} 天（到期提醒，不自动删）`))),
+            h('div', { className: 'so-field', style: { marginTop: 10 } }, h('label', null, '清理后动作'),
+              h(Seg, { options: [{ v: 'none', t: '什么都不做' }, { v: 'log', t: '写一条留痕并刷新曲线' }], value: after,
+                onChange: (v) => onPatch && onPatch(patchBody({ clean: { after: v } })) })),
+            h('div', { className: 'so-hint', style: { marginTop: 8 } }, '到期只提醒、不自动删：暂存件由你手动清空，插件不会替你删。'))),
+        // —— 搜索通路：两字段（生效值 prefs.search，占位回落 defaults）+ 诚实降级说明 ——
+        h('div', { className: 'so-card' },
+          h('div', { className: 'so-card-h' }, h('h2', null, '搜索通路')),
+          h('div', { className: 'so-card-b' },
+            h('div', { className: 'so-grid so-g-2' },
+              h('div', { className: 'so-field' }, h('label', null, 'HTTP 端口'),
+                h('input', { ref: portRef, className: 'so-input so-num', type: 'text',
+                  defaultValue: portVal === null ? '' : String(portVal), placeholder: dfltPort === null ? '—' : String(dfltPort) })),
+              h('div', { className: 'so-field' }, h('label', null, 'es.exe 路径'),
+                h('input', { ref: esRef, className: 'so-input so-input-mono', type: 'text', defaultValue: esVal, placeholder: '（留空 = 用 PATH）' }))),
+            h(Notice, { tone: 'gray' },
+              '两条通路都探不到时自动降级为「限定目录」模式，并在搜索页顶部写明覆盖范围 —— 与股票插件「东财不通就标腾讯」是同一套诚实降级，不静默换源、不拿旧结果冒充。'))),
+        // —— 宿主能力探测：五行只报事实，一律不给开关 ——
+        h('div', { className: 'so-card' },
+          h('div', { className: 'so-card-h' }, h('h2', null, '宿主能力探测'),
+            h('span', { className: 'so-hsub' }, 'ctx.inject 实际拿到了什么')),
+          h('div', { className: 'so-card-b' },
+            capList.length ? capList.map((c) => h('div', { key: c.label, className: 'so-rule' },
+              h('div', { className: 'so-ri' },
+                h('div', { className: 'so-rn' }, c.label),
+                c.detail ? h('div', { className: 'so-rd' }, c.detail) : null),
+              h('span', { className: 'so-rt' }, h(Pill, { cls: c.cls }, c.value)))) : h('div', { className: 'so-empty' }, '宿主未下发能力表。'))),
+        // —— 保存闸门：禁用一定伴随可见原因（不允许只变灰） ——
+        h('div', { className: 'so-card' },
+          h('div', { className: 'so-card-b', style: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' } },
+            h('button', { type: 'button', className: 'so-btn so-btn-primary', disabled: save.disabled, onClick: () => onSave && onSave() }, '保存设置'),
+            h('span', { className: 'so-hint' }, save.disabled ? save.why : '保存只提交你改动过的字段（差量），其余保持服务端现值。'))));
+    }
+
+    const pages = { MonitorPage, CleanPage, SearchPage, SettingsPage };
 
     // ------------------------------------------------------------
     // 4b) 连接层 useStream：SSE 主、轮询兜底、可见性驱动（spec §3.1）
@@ -1622,10 +1920,74 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
       };
       const doSearchDelDir = (d) => doSearchDirs((Array.isArray(srchDirs) ? srchDirs : []).filter((x) => x !== d));
 
+      // —— 设置页（Task 24）：prefs / 合并后的清理规则行 / saving 都上移在容器，
+      //    SettingsPage 自身零 useState（与其余三页同规）。
+      const [setPrefs, setSetPrefs] = useState(null);
+      const [setRules, setSetRules] = useState([]);
+      const [setSaving, setSetSaving] = useState(false);
+
+      /**
+       * 进设置页现读 prefs 与规则：偏好与规则都不在 SSE 帧里。
+       * 规则行 = 内置（enabled = 不在 off 里）+ 本机（items）合并 —— guard 拒绝项由服务端在写入时
+       * 附 guardDenied，界面只渲染、不判断路径（硬约束 5）。
+       */
+      async function loadSettingsAux() {
+        const [pf, rl] = await Promise.all([api('prefs'), api('rules')]);
+        const patch = {};
+        if (pf.ok) patch.prefs = (pf.data && pf.data.prefs) || {};
+        setSetPrefs(patch.prefs || {});
+        const row = rl.ok && rl.data && typeof rl.data === 'object' ? rl.data : null;
+        if (row) {
+          const off = Array.isArray(row.off) ? row.off : [];
+          const builtin = ((cfg().builtinRules) || []).map((b) => ({ ...b, builtin: true, enabled: off.indexOf(b.id) < 0 }));
+          const user = (Array.isArray(row.items) ? row.items : []).map((u) => ({ ...u, builtin: false, enabled: true }));
+          setSetRules(builtin.concat(user));
+        }
+        for (const pair of [['prefs', pf], ['rules', rl]]) {
+          if (!pair[1].ok) { setPageErr({ source: pair[0], ...(pair[1].error || { code: 'UNKNOWN', message: '接口调用失败' }) }); break; }
+        }
+      }
+
+      /** 差量写偏好：只发 patchBody(patch)（服务端 normalize 后回全量），成功后以回的全量刷新界面。 */
+      async function doSettingsPatch(patch) {
+        setSetSaving(true);
+        const r = await api('prefs', { method: 'POST', body: patchBody(patch) });
+        setSetSaving(false);
+        if (r.ok) setSetPrefs((r.data && r.data.prefs) || {});
+        else setPageErr({ source: 'prefs', ...(r.error || { code: 'UNKNOWN', message: '接口调用失败' }) });
+        return r;
+      }
+      async function doSettingsRuleAdd(rule) {
+        setSetSaving(true);
+        const r = await api('rules/add', { method: 'POST', body: rule });
+        setSetSaving(false);
+        if (r.ok) loadSettingsAux();
+        else setPageErr({ source: 'rules/add', ...(r.error || { code: 'UNKNOWN', message: '接口调用失败' }) });
+        return r;
+      }
+      async function doSettingsRuleToggle(id, on) {
+        const r = await api('rules/toggle', { method: 'POST', body: { id, on } });
+        if (r.ok) setSetRules((prev) => prev.map((x) => (x.id === id ? { ...x, enabled: Boolean(on) } : x)));
+        else setPageErr({ source: 'rules/toggle', ...(r.error || { code: 'UNKNOWN', message: '接口调用失败' }) });
+        return r;
+      }
+      async function doSettingsRuleRemove(id) {
+        const r = await api('rules/remove', { method: 'POST', body: { id } });
+        if (r.ok) loadSettingsAux();
+        else setPageErr({ source: 'rules/remove', ...(r.error || { code: 'UNKNOWN', message: '接口调用失败' }) });
+        return r;
+      }
+
       // 进搜索/设置页 → 现读（这两页的数据都不在 SSE 帧里）；离开不清，回来再补
       useEffect(() => {
         if (tab !== 'search') return undefined;
         loadSearchAux();
+        return undefined;
+      }, [tab]);
+
+      useEffect(() => {
+        if (tab !== 'settings') return undefined;
+        loadSettingsAux();
         return undefined;
       }, [tab]);
 
@@ -1763,6 +2125,12 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
           onSearch: doSearch, onMode: setSrchMode, onLimit: setSrchLimit, onReprobe: doSearchReprobe,
           onAddDir: doSearchAddDir, onDelDir: doSearchDelDir,
         }),
+        tab === 'settings' && h(pages.SettingsPage, {
+          prefs: setPrefs || {}, rules: setRules, caps: cfg().capabilities || {},
+          capRows: cfg().capabilityRows || [], snap, err: pageErr, saving: setSaving,
+          onPatch: doSettingsPatch, onRuleAdd: doSettingsRuleAdd, onRuleToggle: doSettingsRuleToggle,
+          onRuleRemove: doSettingsRuleRemove, onSave: loadSettingsAux,
+        }),
         h('div', { className: 'so-disclaimer' },
           '本插件对系统只读监控、对文件只删你明确勾选的项。不提供结束进程、不改注册表、不改属主与 ACL、不碰回收站与系统目录。所有清理动作都留一条可展开的追加式记录。'));
     }
@@ -1808,7 +2176,8 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
     exports.__test = { cfg, consumeSse, api, fmtBytes, fmtRate, fmtPct, fmtAge, stateClass, sourcePill, nav, pages,
       monitor: { MonitorPage, mtrRows, srcCells, curveSpec, band, sparkPoints },
       clean: { CleanPage, PLAN_COLS, scanCells, planRows, selTotals, selectAllIds, applyBody, logRow, quarantineText },
-      search: { SearchPage, PROBE_ROWS, LIMITS, probeCells, modeOf, resultHead, rowCells, advice, searchQuery }, };
+      search: { SearchPage, PROBE_ROWS, LIMITS, probeCells, modeOf, resultHead, rowCells, advice, searchQuery },
+      settings: { SettingsPage, SOURCE_ROWS, ruleCells, ruleStateText, patchBody, capCells, SAVE_DISABLED }, };
     return module.exports;
   },
 });

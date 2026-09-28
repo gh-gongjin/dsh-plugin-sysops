@@ -55,7 +55,7 @@ async function checkAsync(name, fn) {
 /* ③段：浏览器半边加载骨架 */
 // 四个页签的视图助手容器。ESM 顶层是严格模式，④~⑦段直接 `MON = …` 会抛
 // ReferenceError，所以在本段（第一个被追加进来的段）就把四个名字声明好。
-let MON = null, CLEAN = null, SRCH = null;
+let MON = null, CLEAN = null, SRCH = null, SET = null;
 let loadedClient = null;
 globalThis.window = { __ModuleLoader__: { load: (def) => { loadedClient = def; } } };
 globalThis.document = {
@@ -1088,6 +1088,135 @@ await checkAsync('cn-8 搜索页接线：进页现读探针与 prefs，点「搜
   const out3 = w.render();
   assert.ok(!out3.has('如何拿到全盘秒级搜索'), '探针真的换成就绪后引导卡该收起（不是文案没刷新）：' + out3.texts.join('|'));
   w.live.__unmount();
+});
+
+/* ⑦段：设置页 —— 开关、规则、能力表与只读闸门
+ *    简报把本段写在 test/plugin.test.mjs（追加 ⑦段），控制器明令页面用例落本文件（口径：用例 id、名称、断言照简报）。
+ *    夹具 PREFS 逐键照 Task 3 prefsRecord（含 Task 12 的 clean 组）：sources 与 collect 同级；
+ *    quarantineDir 只会是展开后的绝对路径（schema 拒 %...%），esPath 经 normalize 后是 undefined 而非 ''。 */
+SET = CLIENT.__test.settings;
+globalThis.__SYSOPS__ = clientPayload();
+
+const PREFS = (over = {}) => ({ collect: { cadence: '1s', keepMinutes: 30 },
+  sources: { l0: true, l1a: true, l1b: false, l2: true },
+  clean: { quarantineDir: 'C:\\Users\\gongj\\AppData\\Local\\dsh-plugin-sysops\\quarantine', keepDays: 7, after: 'log' },
+  search: { mode: 'everything', port: 3417, esPath: undefined, walkDirs: [], limit: 200 },
+  alerts: {}, ...over });
+const CAPS_OK = { storageDomain: true, timer: true, webServer: true, notifications: false, autostart: false };
+const CAP_ROWS = [
+  { key: 'storageDomain', label: 'storageDomain（持久化）', ok: true, detail: '', fallback: '' },
+  { key: 'timer', label: 'timer（ctx.interval）', ok: true, detail: '', fallback: '' },
+  { key: 'webServer', label: 'webServer（路由 + index-inject）', ok: true, detail: '', fallback: '' },
+  { key: 'notifications', label: '系统通知（托盘）', ok: false, detail: '', fallback: '宿主不提供' },
+  { key: 'autostart', label: '开机自启常驻', ok: false, detail: '', fallback: '宿主不提供' },
+];
+const SPAGE = (over = {}) => walk(SET.SettingsPage({ prefs: PREFS(), rules: [], caps: CAPS_OK, capRows: CAP_ROWS, snap: null, err: null, saving: false,
+  onPatch() {}, onRuleAdd() {}, onRuleToggle() {}, onRuleRemove() {}, onSave() {}, ...over }));
+
+check('pg4-1 四源行齐（L0/L1a/L1b/L2），每行带层级 pill 与代价说明', () => {
+  const rows = SET.SOURCE_ROWS(PREFS(), null);
+  assert.deepEqual(rows.map((r) => r.key), ['l0', 'l1a', 'l1b', 'l2']);
+  assert.ok(rows[0].tier.includes('L0') && rows[1].tier.includes('L1a') && rows[2].tier.includes('L1b') && rows[3].tier.includes('L2'));
+  assert.ok(rows[0].desc.includes('不起任何子进程'));
+  assert.ok(rows[1].desc.includes('暖身') && rows[1].desc.includes('219ms'));
+  assert.ok(rows[2].desc.includes('640ms'));
+});
+
+check('pg4-2 L0 没有开关（档位由监控页控），L1b 默认关', () => {
+  const rows = SET.SOURCE_ROWS(PREFS(), null);
+  assert.equal(rows[0].switch, null, 'L0 的开关是档位 seg，不在这里重复一个入口');
+  assert.equal(rows[2].switch.on, false, '实测代价决定默认关（spec §1.1 决策 7）');
+  assert.equal(rows[1].switch.on, true);
+});
+
+check('pg4-3 关掉某一源 → 依赖它的规则在设置页也标不可用（与监控页同一个 st）', () => {
+  const snap = { alerts: { rules: [{ rule: { id: 'r4', n: '下行持续 > 20 MB/s 满 1 分钟', dep: 'l1a' }, st: { dim: true, on: false, st: '依赖的采集已关闭' } }] } };
+  const out = SPAGE({ snap });
+  assert.ok(out.has('依赖的采集已关闭'));
+  assert.ok(out.has('关掉某一源，依赖它的告警规则会就地标为不可用'));
+});
+
+check('pg4-4 规则行 pill 分内置/本机，guard 拒绝项标「已被 guard 拒绝」且开关禁用', () => {
+  const rules = [
+    { id: 'temp-user', n: 'AI 助手临时目录 scoped_dir*', glob: '%TEMP%\\scoped_dir*', ageDays: 0, kind: '临时目录', builtin: true, enabled: true },
+    { id: 'u-pnpm', n: 'pnpm 未引用包', glob: '%LocalAppData%\\pnpm-store\\**', ageDays: 30, kind: '缓存', builtin: false, enabled: true },
+    { id: 'u-bin', n: '回收站', glob: 'C:\\$Recycle.Bin\\*', ageDays: 1, kind: '缓存', builtin: false, enabled: false, guardDenied: { code: 'b-recycle-bin', why: '回收站一律不参与' } },
+  ];
+  const cells = SET.ruleCells(rules);
+  assert.deepEqual(cells.map((c) => c.pill), ['内置', '本机', '本机']);
+  assert.equal(cells[2].blocked, true);
+  assert.ok(cells[2].denyWhy.includes('回收站一律不参与'));
+  const out = SPAGE({ rules });
+  assert.ok(out.has('已被 guard 拒绝'));
+  assert.ok(out.classHas('so-rule-dim'));
+});
+
+check('pg4-5 黑名单 notice 逐字吃注入载荷的 redlines（单源，不抄第二份）', () => {
+  globalThis.__SYSOPS__ = clientPayload({ redlines: ['不碰回收站（2026-09-13 曾因按普通目录处理导致属主与 ACL 被改坏）', '不碰 C:\\Windows\\*', '不碰 Program Files', '不动注册表'] });
+  const out = SPAGE({});
+  for (const line of globalThis.__SYSOPS__.redlines) assert.ok(out.has(line.slice(0, 8)), `缺红线 ${line}`);
+  assert.ok(out.has('不可移除的黑名单'));
+  const code = stripComments(fs.readFileSync(path.join(ROOT, 'client.js'), 'utf8'));
+  assert.ok(!code.includes('takeown'), 'client.js 不该自带第二份红线文案（含事故日期那种长句）');
+  globalThis.__SYSOPS__ = clientPayload();
+});
+
+check('pg4-6 新增规则的拒绝文案就地落，不弹浮层', () => {
+  const out = SPAGE({ err: { source: 'rules/add', status: 403, code: 'SYSOPS_RULE_GUARD_DENY', message: '已拒绝写入：该 glob 命中红线（系统目录 / 回收站）。guard 在校验阶段就拦下，不会进入规则库。' } });
+  assert.ok(out.has('已拒绝写入'));
+  assert.ok(out.classHas('so-notice-red'));
+  assert.ok(out.buttons.filter((b) => b.text.includes('保存并启用')).length === 1, '新增按钮只有一个');
+});
+
+check('pg4-7 暂存目录渲染 prefs 实配值 + 到期提醒不自动删 + after 两档', () => {
+  const out = SPAGE({});
+  assert.ok(out.has('C:\\Users\\gongj\\AppData\\Local\\dsh-plugin-sysops\\quarantine'), '显示 prefs 的实配值（prefs 里只会是展开后的绝对路径，`prefq-1` 已拒未展开形）');
+  assert.ok(!out.has('%LOCALAPPDATA%'), '界面不得把 `%...%` 当可配置值展示：prefs schema 里它不可能存在');
+  assert.ok(out.has('到期提醒，不自动删'));
+  assert.ok(out.has('什么都不做') && out.has('写一条留痕并刷新曲线'));
+});
+
+check('pg4-8 搜索通路两字段 + 降级说明（不静默换源）', () => {
+  const out = SPAGE({});
+  assert.ok(out.has('HTTP 端口'));
+  assert.ok(out.has('es.exe 路径'));
+  assert.ok(out.has('不静默换源'));
+  assert.ok(out.has('拿旧结果冒充') === false || out.has('不拿旧结果冒充'));
+});
+
+check('pg4-9 能力表五行齐，「宿主不提供」的两行没有开关', () => {
+  const cells = SET.capCells(CAP_ROWS);
+  assert.equal(cells.length, 5);
+  assert.deepEqual(cells.map((c) => c.hasSwitch), [false, false, false, false, false], '能力表只报事实，给开关就是假开关');
+  assert.ok(cells[3].value === '宿主不提供' && cells[4].value === '宿主不提供');
+  assert.ok(cells[0].value === '提供');
+});
+
+check('pg4-10 timer 降级那行必须把"退到 setInterval 且必须显式 stop"说出来', () => {
+  const rows = CAP_ROWS.map((r) => (r.key === 'timer' ? { ...r, ok: false, detail: '宿主无 ctx.interval，已退到 setInterval', fallback: '已降级' } : r));
+  const cells = SET.capCells(rows);
+  assert.match(cells[1].value, /已降级/);
+  assert.match(cells[1].detail, /setInterval/);
+});
+
+check('pg4-11 无 storageDomain：保存按钮禁用 + 原因，且 501 的 code 翻成中文而不是抛', () => {
+  const s = SET.SAVE_DISABLED(PREFS(), { ...CAPS_OK, storageDomain: false }, null);
+  assert.equal(s.disabled, true);
+  assert.match(s.why, /配置只读|未提供 storageDomain/);
+  const out = SPAGE({ caps: { ...CAPS_OK, storageDomain: false }, err: { source: 'prefs', status: 501, code: 'PREFS_UNAVAILABLE', message: '没有 storageDomain' } });
+  const b = out.buttons.find((x) => x.text.includes('保存设置'));
+  assert.equal(b.disabled, true);
+  assert.ok(out.has('501') || out.has('只读'));
+});
+
+check('pg4-12 保存只发差量：patchBody 包一层 prefs，不整包回传', () => {
+  assert.deepEqual(SET.patchBody({ collect: { cadence: '5s' } }), { prefs: { collect: { cadence: '5s' } } });
+  assert.ok(!('clean' in JSON.parse(JSON.stringify(SET.patchBody({ collect: { cadence: '5s' } }))).prefs));
+});
+
+check('pg4-13 规则三态区分 null（从未写入）与 []（用户清空）', () => {
+  assert.match(SET.ruleStateText(null), /尚未配置|未写入/);
+  assert.match(SET.ruleStateText([]), /已全部清空/);
 });
 
 console.log(`\n  ${passed}/${passed + failed} 通过`);
