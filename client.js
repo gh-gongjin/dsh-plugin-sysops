@@ -669,6 +669,166 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
     }
 
     // ------------------------------------------------------------
+    // 2d) 搜索页视图助手（Task 23；纯函数，经 __test.search 出口）
+    //     自检行吃宿主 lib/search/probe.js:144 的 ProbeResult，结果表吃 lib/search/service.js:122 的 Result。
+    //     两个形状的字段界面都不自己造；缺字段一律显示「—」而不是 0。
+    // ------------------------------------------------------------
+    const PROBE_ROWS = ['① 已安装 Everything', '② 有查询通路', '③ 端到端可用'];
+    /** 上限三档逐字原型 limitSeg（与宿主 lib/api.js 的 clampInt(…, 1, 1000) 同区间）。 */
+    const LIMITS = [50, 200, 1000];
+    /**
+     * 静态文案整句留在常量里（全局约束 5：只有动态值才拼接），逐字取原型
+     * guideCard / walkNotice / 空态 / searchbar 的原话；**安装指引三条不在这里** —— 那条只吃注入载荷。
+     */
+    const SEARCH_TXT = {
+      selfCheck: 'Everything 接入自检',
+      probeSub: '三级探测，卡在哪一级就告诉你缺什么',
+      guideTitle: '如何拿到全盘秒级搜索',
+      guideLead: 'Everything 是 NTFS 索引工具，直接读 USN 日志，整盘几百万文件也只占几十 MB 内存、毫秒级返回。本插件不复制它的能力，只把它的结果画成下面的表。',
+      guideOwn: '安装（任选一种，由你自己执行——本插件不会替你装程序、不会改注册表、也不会替你打开 HTTP 服务）：',
+      guidePortA: '装好后在 Everything 里勾选 工具 → 选项 → HTTP 服务器（默认端口 ',
+      guidePortB: '），或把官方的 es.exe 放进 PATH，然后点上方「重新检测」。',
+      walkA: '限定目录模式：仅覆盖下面已选目录，不是全盘索引。',
+      walkB: '实测遍历 AppData\\Local（14.5 万条目）需 7.3s，所以结果分批返回、可随时停止，且必须写明覆盖范围。',
+      openNote: '本表只给名称、路径与来源：插件不替你打开文件、不执行任何程序，也不调用资源管理器定位（宿主没有这个接口）。要打开请自己按路径取用。',
+      emptyNote: '没有匹配项。Everything 的分词规则是「空格 = 同时满足」，试试去掉扩展名或换个词。',
+      e2eNote: '拿一个必定不存在的文件名真查一次，确认返回结构能解析，而不是失败或超时。',
+      notReady: '通路未就绪 —— 暂不可选',
+      qLabel: '输入关键字',
+      // 逐字原型 index.html:649 的 q placeholder（不自造「通配 .ext、大小>100m」那种没验过的语法承诺）
+      qHint: '输入关键字，如 report .pdf、client.js、东财 数据源',
+      tokenHint: '大小写敏感 · 支持空格分词（= 同时满足）',
+      dirHint: '粘贴绝对路径，如 F:\\dsh-plugins',
+    };
+
+    /** 宿主 checks 是四条（installed / http / es / walk），按 key 取对应的取证 detail。 */
+    function probeDetail(probe, key) {
+      const hit = ((probe && probe.checks) || []).find((c) => c && c.key === key);
+      return hit && hit.detail ? String(hit.detail) : '';
+    }
+
+    /**
+     * 三级自检行。标题逐字用 PROBE_ROWS（原型 ①②③ 的措辞），状态读 ProbeResult 的三个布尔量 ——
+     * 宿主把 ②级拆成 http / es 两条 checks，所以 mark 认布尔量、detail 直吃 checks[].detail
+     * （取证口径写在 probe.js 里，界面不重述一遍）。
+     * 第三级在前两级没全过时是「未执行」（宿主压根没跑端到端探针），**不是**失败标记。
+     */
+    function probeCells(probe) {
+      const p = probe || {};
+      const ok1 = p.installed === true;
+      const ok2 = p.http === true || p.es === true;
+      const ok3 = p.e2e === true;
+      const port = num((cfg().defaults || {}).searchPort);
+      return [
+        { title: PROBE_ROWS[0], mark: ok1 ? '✓' : '!', pill: ok1 ? '已装' : '未探到',
+          pillCls: ok1 ? 'so-pill-down' : 'so-pill-up', detail: probeDetail(p, 'installed') },
+        { title: PROBE_ROWS[1], mark: ok2 ? '✓' : '!',
+          pill: p.http === true ? (port === null ? 'HTTP 通路' : 'HTTP ' + port) : (p.es === true ? 'es.exe' : '两条都没有'),
+          pillCls: ok2 ? 'so-pill-down' : 'so-pill-up',
+          detail: [probeDetail(p, 'http'), probeDetail(p, 'es')].filter(Boolean).join('；') },
+        { title: PROBE_ROWS[2], mark: ok3 ? '✓' : (ok1 && ok2 ? '!' : '·'),
+          pill: ok3 ? '试查询通过' : (ok1 && ok2 ? '试查询未通过' : '未执行'),
+          pillCls: ok3 ? 'so-pill-down' : (ok1 && ok2 ? 'so-pill-up' : 'so-pill-gray'), detail: SEARCH_TXT.e2eNote },
+      ];
+    }
+
+    /** 通路未就绪时**无条件**回落 walk：让人点一个必然失败的按钮，比直接降级更糟（简报 Step 3 的理由）。 */
+    function modeOf(probe, wanted) {
+      const p = probe || {};
+      if (p.ready === true && wanted === 'everything') return 'everything';
+      return 'walk';
+    }
+
+    /** modeOf 回落时给的原因；未就绪时它同时是「全盘索引」按钮的 title 与页面上的可见说明。 */
+    function modeWhy(probe) {
+      const p = probe || {};
+      return p.ready === true ? '' : SEARCH_TXT.notReady;
+    }
+
+    /** 页头右侧的通路提示行（原型 probeHint）：端口号取注入载荷，不写死 3417。 */
+    function probeHint(probe) {
+      const p = probe || {};
+      if (p.ready !== true) return '当前通路：未就绪 → 已降级为限定目录';
+      const port = num((cfg().defaults || {}).searchPort);
+      return '当前通路：' + (p.http === true ? ('Everything HTTP :' + (port === null ? '—' : port)) : 'es.exe') + ' · 全盘索引';
+    }
+
+    /**
+     * 失败/降级的就地 notice（spec §4.4）。四类文案各说各的，原因一律**回显宿主原话**：
+     * service.js 把适配器的 error 字符串原样带回来（例：'Everything 的 HTTP 服务未开启：…'、
+     * '请求超时（timeout，4000ms 到点已取消）'），界面只加一句定性抬头，不再映射第二份 code→中文。
+     */
+    function searchDegrade(res) {
+      const r = res || {};
+      const err = String(r.error || '');
+      if (!err || err === 'EMPTY_QUERY') return null; // 空查询是「没发请求」，不是通路故障
+      let head;
+      if (/403|HTTP 服务未开启/.test(err)) head = 'Everything 的 HTTP 服务没开，查询没走通：';
+      else if (/超时|[Tt]imeout|[Aa]bort/.test(err)) head = '本次查询已超时取消：';
+      else if (/未找到|未探到|连接被拒|ECONNREFUSED|通路/.test(err)) head = '查询通路不可用：';
+      else head = '本次查询未成功：';
+      const stale = r.stale === true ? '；表里留的是上次结果，已标陈旧，不拿旧结果冒充新结果' : '';
+      return { tone: 'red', text: head + err + stale };
+    }
+
+    /** 结果头三个字段：范围说明 / 来源 pill / 命中数与上限（截断与陈旧都写在命中数后面）。 */
+    function resultHead(res) {
+      const r = res || {};
+      const rows = Array.isArray(r.rows) ? r.rows : [];
+      const lim = num(r.limit);
+      const src = r.source === 'walk' ? '限定目录 · 非全盘索引'
+        : r.source === 'everything' ? 'Everything · 全盘索引'
+          : r.source === 'es' ? 'es.exe · 全盘索引' : '尚无结果';
+      const label = String(r.sourceLabel || '').trim();
+      return {
+        sub: src,
+        sourcePill: label === '' ? '—' : label,
+        hitText: '命中 ' + rows.length + ' 项'
+          + (lim === null ? '' : '（上限 ' + lim + '）')
+          + (r.truncated === true ? ' · 已截断' : '')
+          + (r.stale === true ? ' · 陈旧' : ''),
+      };
+    }
+
+    /** 修改时间的绝对显示：24 小时制、跟随宿主环境的 zh-CN locale，不写死 en-US。 */
+    const fmtTime = (ms) => { const v = num(ms); return v === null ? '—' : new Date(v).toLocaleString('zh-CN', { hour12: false }); };
+
+    /**
+     * 结果表行。来源 pill 取**结果级**的 sourceLabel：一次查询只走一条通路（service.js:19 的 normalize
+     * 给每行盖同一个 source 键），界面不再维护一份 code→中文映射表（SOURCE_LABEL 的单点在宿主）。
+     */
+    function rowCells(res) {
+      const r = res || {};
+      const rows = Array.isArray(r.rows) ? r.rows : [];
+      const fallback = String(r.sourceLabel || '').trim();
+      return rows.map((raw) => {
+        const it = raw || {};
+        const own = String(it.sourceLabel || '').trim();
+        return {
+          name: String(it.name ?? '—'),
+          dir: String(it.dir ?? '—'),
+          sizeText: fmtBytes(it.size),
+          mtimeText: fmtTime(it.mtime),
+          sourcePill: own === '' ? (fallback === '' ? '—' : fallback) : own,
+        };
+      });
+    }
+
+    /** 指引三条**只**从注入载荷现取（Task 20 的懒取约定）：宿主没给就不显示，界面不编第二份安装指引。 */
+    function advice() {
+      const a = cfg().searchAdvice;
+      return Array.isArray(a) ? a.map((x) => String(x)) : [];
+    }
+
+    /** 空 q 返回 null = 不发请求（宿主也会以 EMPTY_QUERY 拒，界面省一趟）。 */
+    function searchQuery(qry) {
+      const s = qry || {};
+      const text = String(s.q ?? '').trim();
+      if (!text) return null;
+      const lim = LIMITS.indexOf(num(s.limit)) >= 0 ? s.limit : LIMITS[1];
+      return { q: text, mode: s.mode === 'everything' ? 'everything' : 'walk', limit: lim };
+    }
+    // ------------------------------------------------------------
     // 3) 基础组件（自研控件，无原生弹层）
     // ------------------------------------------------------------
     const Pill = ({ cls = '', children }) => h('span', { className: ('so-pill ' + cls).trim() }, children);
@@ -1085,29 +1245,117 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
           })) : h('div', { className: 'so-empty' }, '还没有清理记录：执行一次清理后会在这里追加一条可展开的记录（追加式，只读）。')));
     }
 
-    function SearchPage() {
+    /**
+     * 搜索页（Task 23）：三级自检 → 引导卡（未就绪时）→ 通路选择 + 覆盖范围 → 结果表。
+     * 与 MonitorPage / CleanPage 同规：自身零 useState，数据与写操作全由 useStream 侧传下来。
+     */
+    function SearchPage(props = {}) {
+      const { probe = null, res = null, mode = 'walk', limit = LIMITS[1], q = '', dirs = [], err = null,
+        onSearch, onMode, onLimit, onReprobe, onAddDir, onDelDir } = props;
+      const dirRef = useRef(null);
+      const qRef = useRef(null);
+      const p = probe || {};
+      const ready = p.ready === true;
+      const effMode = modeOf(p, mode);
+      const why = modeWhy(p);
+      const port = num((cfg().defaults || {}).searchPort);
+      const adv = advice();
+      const cells = probeCells(p);
+      const degrade = searchDegrade(res);
+      const head = res ? resultHead(res) : null;
+      const rows = res ? rowCells(res) : [];
+      // 目录覆盖范围写 prefs，没有 storageDomain 就写不进去：chips 改只读 + 注明原因（与设置页同一闸门）
+      const dirsReadOnly = !((cfg().capabilities || {}).storageDomain === true);
+
       return h('div', { className: 'so-tabpanel' },
+        err ? h(Notice, { tone: 'amber' }, `接口异常（${err.code || 'UNKNOWN'}）：${err.message || '未知错误'}`) : null,
         h('div', { className: 'so-card' },
-          h('div', { className: 'so-card-h' }, h('h2', null, '搜索')),
+          h('div', { className: 'so-card-h' }, h('h2', null, SEARCH_TXT.selfCheck),
+            h('span', { className: 'so-hsub' }, SEARCH_TXT.probeSub),
+            h('span', { className: 'so-grow' },
+              h('span', { className: 'so-hint' }, probeHint(p)),
+              h('button', { type: 'button', className: 'so-btn so-btn-sm', style: { marginLeft: 8 },
+                onClick: () => onReprobe && onReprobe() }, '重新检测'))),
           h('div', { className: 'so-card-b' },
+            h('div', { className: 'so-srcs' }, cells.map((c) => h('div', { key: c.title, className: 'so-rule' },
+              h('div', { className: 'so-ri' },
+                h('div', { className: 'so-rn' }, c.title, h(Pill, { cls: c.pillCls }, c.pill)),
+                c.detail ? h('div', { className: 'so-rd' }, c.detail) : null),
+              h('span', { className: 'so-rt so-num' }, c.mark)))))),
+        ready ? null : h('div', { className: 'so-card' },
+          h('div', { className: 'so-card-h' }, h('h2', null, SEARCH_TXT.guideTitle)),
+          h('div', { className: 'so-card-b' },
+            h('div', { className: 'so-hint' }, SEARCH_TXT.guideLead),
+            h('div', { className: 'so-hint', style: { marginTop: 8 } }, SEARCH_TXT.guideOwn),
+            adv.length ? h('div', { className: 'so-snap', style: { marginTop: 8 } },
+              adv.map((line, i) => h('div', { key: String(i), className: 'so-input-mono so-num' }, line))) : null,
+            h('div', { className: 'so-hint', style: { marginTop: 9 } },
+              SEARCH_TXT.guidePortA, h('span', { className: 'so-num' }, port === null ? '—' : String(port)), SEARCH_TXT.guidePortB))),
+        h('div', { className: 'so-card' },
+          h('div', { className: 'so-card-h' }, h('h2', null, '搜索'),
+            h('span', { className: 'so-grow' },
+              h('span', { className: 'so-seg' },
+                h('button', { type: 'button', className: effMode === 'everything' ? 'is-active' : '',
+                  'aria-pressed': effMode === 'everything' ? 'true' : 'false',
+                  disabled: !ready, title: why || '用 Everything 的全盘索引查询',
+                  onClick: () => onMode && onMode('everything') }, '全盘索引'),
+                h('button', { type: 'button', className: effMode === 'walk' ? 'is-active' : '',
+                  'aria-pressed': effMode === 'walk' ? 'true' : 'false',
+                  onClick: () => onMode && onMode('walk') }, '限定目录')))),
+          h('div', { className: 'so-card-b' },
+            why ? h('div', { className: 'so-hint', style: { marginBottom: 8 } }, '全盘索引' + why) : null,
+            h('div', { className: 'so-field' }, h('label', null, SEARCH_TXT.qLabel)),
             h('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
-              h('input', { className: 'so-input', type: 'text', placeholder: '输入关键字，如 report .pdf、client.js', disabled: true, style: { height: 34 } }),
-              h('button', { type: 'button', className: 'so-btn so-btn-primary', disabled: true, style: { height: 34 } }, '搜索')),
-            h('div', { className: 'so-hint', style: { marginTop: 9 } }, '通路选择与结果表正在接通中；两条通路都探不到时会自动降级为限定目录遍历并写明覆盖范围。'))));
+              // 输入非受控：初值取 props.q；按钮读**输入框现值**（qRef）而不是 props.q ——
+              // props.q 是上一条查询的关键字，拿它发请求会让「改了关键字点搜索」跑出上一条结果。
+              h('input', { className: 'so-input', type: 'text', placeholder: SEARCH_TXT.qHint, defaultValue: q, ref: qRef, style: { height: 34, flex: 1 } }),
+              h('button', { type: 'button', className: 'so-btn so-btn-primary', style: { height: 34 },
+                onClick: () => onSearch && onSearch(qRef.current && typeof qRef.current.value === 'string' ? qRef.current.value : q) }, '搜索')),
+            h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginTop: 9 } },
+              h('span', { className: 'so-hint' }, '返回上限'),
+              h(Seg, { options: LIMITS.map((n) => ({ v: n, t: String(n) })), value: num(limit) === null ? LIMITS[1] : limit,
+                onChange: (v) => onLimit && onLimit(v) }),
+              h('span', { className: 'so-hint', style: { marginLeft: 'auto' } }, SEARCH_TXT.tokenHint)),
+            effMode === 'walk' ? h(Notice, { tone: 'amber' }, h('span', null, SEARCH_TXT.walkA), h('span', null, SEARCH_TXT.walkB)) : null,
+            effMode === 'walk' ? h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginTop: 10 } },
+              (Array.isArray(dirs) ? dirs : []).map((d) => h(Pill, { key: String(d), cls: 'so-pill-line' },
+                h('span', { className: 'so-path' }, String(d)),
+                dirsReadOnly ? null : h('button', { type: 'button', className: 'so-btn so-btn-quiet so-btn-sm',
+                  title: '把该目录移出覆盖范围', onClick: () => onDelDir && onDelDir(String(d)) }, '×'))),
+              dirsReadOnly
+                ? h('span', { className: 'so-hint' }, '配置只读：宿主未提供 storageDomain，覆盖范围不可改')
+                : h('span', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+                    h('input', { className: 'so-input so-input-mono', type: 'text', placeholder: SEARCH_TXT.dirHint, ref: dirRef, style: { height: 26, width: 260 } }),
+                    h('button', { type: 'button', className: 'so-btn so-btn-sm',
+                      onClick: () => { const v = dirRef.current && dirRef.current.value ? String(dirRef.current.value).trim() : ''; if (v) onAddDir && onAddDir(v); } }, '＋ 添加目录'))) : null)),
+        res === null
+          ? h('div', { className: 'so-card' }, h('div', { className: 'so-card-b' },
+              h('div', { className: 'so-empty' }, '还没有查询：输入关键字后点「搜索」。一次查询只走一条通路，来源会标在结果表上。')))
+          : h('div', { className: 'so-card' },
+            h('div', { className: 'so-card-h' }, h('h2', null, '结果'),
+              h('span', { className: 'so-hsub' }, head.sub),
+              h('span', { className: 'so-grow' },
+                h(Pill, { cls: res.source === 'walk' ? 'so-pill-amber' : 'so-pill-blue' }, '来源：' + head.sourcePill),
+                h('span', { className: 'so-hint so-num', style: { marginLeft: 8 } }, head.hitText))),
+            h('div', { className: 'so-card-b' },
+              degrade ? h(Notice, { tone: degrade.tone }, degrade.text) : null,
+              res && res.note ? h(Notice, { tone: 'gray' }, String(res.note)) : null,
+              rows.length ? h('div', null,
+                h('div', { className: 'so-tblwrap' },
+                  h('table', { className: 'so-tbl' },
+                    h('thead', null, h('tr', null,
+                      h('th', null, '名称'), h('th', null, '所在目录'), h('th', { className: 'so-r' }, '大小'),
+                      h('th', { className: 'so-r' }, '修改时间'), h('th', { className: 'so-c' }, '来源'))),
+                    h('tbody', null, rows.map((c, i) => h('tr', { key: String(i) },
+                      h('td', { className: 'so-tr-name' }, c.name),
+                      h('td', null, h('div', { className: 'so-path' }, c.dir)),
+                      h('td', { className: 'so-r so-num' }, c.sizeText),
+                      h('td', { className: 'so-r so-num' }, c.mtimeText),
+                      h('td', { className: 'so-c' }, h(Pill, { cls: 'so-pill-line' }, c.sourcePill))))))),
+                h('div', { className: 'so-tbl-note' }, SEARCH_TXT.openNote))
+                : h('div', { className: 'so-empty' }, SEARCH_TXT.emptyNote))));
     }
-
-    function SettingsPage() {
-      return h('div', { className: 'so-tabpanel' },
-        h('div', { className: 'so-card' },
-          h('div', { className: 'so-card-h' }, h('h2', null, '数据采集'), h('span', { className: 'so-hsub' }, '关掉某一源，依赖它的告警规则会就地标为不可用')),
-          h('div', { className: 'so-card-b' },
-            h('div', { className: 'so-grid so-g-2' },
-              h('div', { className: 'so-field' }, h('label', null, '曲线保留窗口'), h('input', { className: 'so-input', type: 'text', defaultValue: '30 分钟', disabled: true })),
-              h('div', { className: 'so-field' }, h('label', null, '进程榜刷新'), h('input', { className: 'so-input', type: 'text', defaultValue: '10 秒', disabled: true }))),
-            h('div', { className: 'so-hint', style: { marginTop: 10 } }, '设置表单正在接通中；写接口在无 storageDomain 时返回 501，届时保存按钮会置灰并注明原因。'))));
-    }
-
-    const pages = { MonitorPage, CleanPage, SearchPage, SettingsPage };
+    const pages = { MonitorPage, CleanPage, SearchPage };
 
     // ------------------------------------------------------------
     // 4b) 连接层 useStream：SSE 主、轮询兜底、可见性驱动（spec §3.1）
@@ -1302,6 +1550,85 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
         });
       }, [snap]);
 
+      // —— 搜索页（Task 23）：探针 / 结果 / 通路参数与目录覆盖范围都上移在容器，
+      //    SearchPage 自身零 useState（与 CleanPage 同规）—— 换页与重采都不打断渲染。
+      const [srchProbe, setSrchProbe] = useState(null);
+      const [srchRes, setSrchRes] = useState(null);
+      const [srchMode, setSrchMode] = useState('everything');
+      const [srchLimit, setSrchLimit] = useState(LIMITS[1]);
+      const [srchQ, setSrchQ] = useState('');
+      const [srchDirs, setSrchDirs] = useState([]);
+
+      /** 从 prefs 的 search 组取界面认得的形态：walkDirs 只认数组，mode 只认 everything/walk 两档。 */
+      function searchFromPrefs(prefsRow) {
+        const s = (prefsRow || {}).search || {};
+        return {
+          dirs: Array.isArray(s.walkDirs) ? s.walkDirs.map((d) => String(d)) : [],
+          mode: s.mode === 'walk' ? 'walk' : 'everything',
+          limit: LIMITS.indexOf(num(s.limit)) >= 0 ? s.limit : LIMITS[1],
+        };
+      }
+
+      /**
+       * 进搜索页现读两样：ProbeResult 与 prefs.search（覆盖范围与通路参数都不在 SSE 帧里）。
+       * 任一路失败落可见错误并带 source（约束 4）；探测失败**不改**已有探针数据 ——
+       * 拿着 null 探针渲染就是「假装已经探测过」，宁可让页面显示未检测。
+       */
+      async function loadSearchAux() {
+        const [pr, pf] = await Promise.all([api('search/probe'), api('prefs')]);
+        if (pr.ok) setSrchProbe(pr.data && typeof pr.data === 'object' ? pr.data : null);
+        if (pf.ok) {
+          const got = searchFromPrefs((pf.data || {}).prefs);
+          setSrchDirs(got.dirs); setSrchMode(got.mode); setSrchLimit(got.limit);
+        }
+        for (const pair of [['search/probe', pr], ['prefs', pf]]) {
+          if (!pair[1].ok) { setPageErr({ source: pair[0], ...(pair[1].error || { code: 'UNKNOWN', message: '接口调用失败' }) }); break; }
+        }
+      }
+
+      /**
+       * 一次查询只走一条通路（宿主 service.js 决定，界面不预判）。
+       * 空 q 由 searchQuery 归成 null：不发请求，也不把上一条结果留在表上冒充新结果 ——
+       * 清空回「还没有查询」的空态才是实情（pg3-11 的纯函数口径在容器这侧的落点）。
+       */
+      async function doSearch(q) {
+        const arg = searchQuery({ q, mode: srchMode, limit: srchLimit });
+        if (!arg) { setSrchQ(''); setSrchRes(null); return undefined; }
+        setSrchQ(arg.q);
+        const r = await api('search', { query: arg });
+        if (!r.ok) { setPageErr({ source: 'search', ...(r.error || { code: 'UNKNOWN', message: '接口调用失败' }) }); return r; }
+        setSrchRes(r.data && typeof r.data === 'object' ? r.data : null);
+        return r;
+      }
+      async function doSearchReprobe() {
+        const r = await post('search/reprobe', {});
+        if (r.ok) setSrchProbe(r.data && typeof r.data === 'object' ? r.data : null);
+        return r;
+      }
+      /** 目录覆盖范围写 prefs.search.walkDirs（整域写回的风险由 writePrefsGroup 的读-并-写兜住）。 */
+      async function doSearchDirs(next) {
+        const r = await writePrefsGroup('search', { walkDirs: next });
+        if (!r.ok) return r;
+        // 以宿主写回后的那一份为准（POST /api/prefs 回 readAll，lib/api.js:354）；宿主没给才回落本次期望值
+        const got = searchFromPrefs((r.data || {}).prefs);
+        setSrchDirs(Array.isArray(((r.data || {}).prefs || {}).search || {}).walkDirs ? got.dirs : next);
+        return r;
+      }
+      const doSearchAddDir = (d) => {
+        const cur = Array.isArray(srchDirs) ? srchDirs : [];
+        // 已在覆盖范围里就不写：重复一条 chips 会画两个，写两次也只是把同一份数据再抹一遍
+        if (cur.indexOf(d) >= 0) return Promise.resolve({ ok: true, data: null });
+        return doSearchDirs(cur.concat([d]));
+      };
+      const doSearchDelDir = (d) => doSearchDirs((Array.isArray(srchDirs) ? srchDirs : []).filter((x) => x !== d));
+
+      // 进搜索/设置页 → 现读（这两页的数据都不在 SSE 帧里）；离开不清，回来再补
+      useEffect(() => {
+        if (tab !== 'search') return undefined;
+        loadSearchAux();
+        return undefined;
+      }, [tab]);
+
       // 连接层：SSE → 断线退避 1s/2s/4s/8s/30s 封顶 → 连续失败落轮询 2s（spec §3.1）
       useEffect(() => {
         let alive = true;
@@ -1430,8 +1757,12 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
           onSelectAll: doCleanSelectAll, onSelectNone: doCleanSelectNone,
           onApply: doCleanApply, onQuarantine: (ids) => doCleanApply(ids, 'move-to-quarantine'),
         }),
-        tab === 'search' && h(pages.SearchPage, null),
-        tab === 'settings' && h(pages.SettingsPage, null),
+        tab === 'search' && h(pages.SearchPage, {
+          probe: srchProbe, res: srchRes, mode: srchMode, limit: srchLimit, q: srchQ, dirs: srchDirs,
+          err: pageErr,
+          onSearch: doSearch, onMode: setSrchMode, onLimit: setSrchLimit, onReprobe: doSearchReprobe,
+          onAddDir: doSearchAddDir, onDelDir: doSearchDelDir,
+        }),
         h('div', { className: 'so-disclaimer' },
           '本插件对系统只读监控、对文件只删你明确勾选的项。不提供结束进程、不改注册表、不改属主与 ACL、不碰回收站与系统目录。所有清理动作都留一条可展开的追加式记录。'));
     }
@@ -1476,7 +1807,8 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
      */
     exports.__test = { cfg, consumeSse, api, fmtBytes, fmtRate, fmtPct, fmtAge, stateClass, sourcePill, nav, pages,
       monitor: { MonitorPage, mtrRows, srcCells, curveSpec, band, sparkPoints },
-      clean: { CleanPage, PLAN_COLS, scanCells, planRows, selTotals, selectAllIds, applyBody, logRow, quarantineText } };
+      clean: { CleanPage, PLAN_COLS, scanCells, planRows, selTotals, selectAllIds, applyBody, logRow, quarantineText },
+      search: { SearchPage, PROBE_ROWS, LIMITS, probeCells, modeOf, resultHead, rowCells, advice, searchQuery }, };
     return module.exports;
   },
 });

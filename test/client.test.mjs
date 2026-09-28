@@ -55,7 +55,7 @@ async function checkAsync(name, fn) {
 /* ③段：浏览器半边加载骨架 */
 // 四个页签的视图助手容器。ESM 顶层是严格模式，④~⑦段直接 `MON = …` 会抛
 // ReferenceError，所以在本段（第一个被追加进来的段）就把四个名字声明好。
-let MON = null, CLEAN = null, SRCH = null, SET = null;
+let MON = null, CLEAN = null, SRCH = null;
 let loadedClient = null;
 globalThis.window = { __ModuleLoader__: { load: (def) => { loadedClient = def; } } };
 globalThis.document = {
@@ -561,6 +561,149 @@ check('pg2-25 404 与 503 两种整批拒的界面文案分开，都就地落 no
   assert.ok(o404.has('未删除任何文件') && o503.has('未删除任何文件'), '两种都要如实说"什么都没删"');
 });
 
+/* ⑥段：搜索页 —— 通路自检与诚实降级
+ *    简报把本段写在 test/plugin.test.mjs，控制器明令页面用例落本文件（口径：用例 id、名称、断言照简报）。
+ *    夹具 PROBE/RES 的字段逐一对齐真机出口：lib/search/probe.js:144（ProbeResult）与
+ *    lib/search/service.js:122（Result）—— 简报草稿里的 `checks:[installed/channel/e2e]` 三行与
+ *    `res.total` 在真机形状里不存在，按现物改成本文件下面的四行 checks 与无 total 的 Result。 */
+SRCH = CLIENT.__test.search;
+globalThis.__SYSOPS__ = clientPayload();
+
+/** 真机 ProbeResult 形状（probe.js:144-165）：checks 四条 = installed / http / es / walk，界面按三级归并显示。 */
+const PROBE = (over = {}) => ({
+  at: 1, installed: false, http: false, es: false, e2e: false, ready: false, via: null, degraded: true, level: null,
+  checks: [
+    { key: 'installed', label: '① 已安装 Everything', ok: false, detail: '未在常见安装路径找到 Everything.exe，es.exe 也不可用（未探到已安装）' },
+    { key: 'http', label: '② HTTP 查询通路（:3417）', ok: false, detail: 'HTTP 探测超时（1500ms）' },
+    { key: 'es', label: '② es.exe 查询通路', ok: false, detail: '未找到 es.exe（不在 PATH，可在设置页指定路径）' },
+    { key: 'walk', label: '③ 本地遍历兜底', ok: false, detail: '未选目录：到设置页 → 搜索通路 里添加要覆盖的目录，兜底遍历不可用' },
+  ],
+  // 诱饵：advice() 只准读注入载荷的 searchAdvice（pg3-3 钉死），读 probe.advice 就会红
+  advice: ['WINGET 诱饵：不要从 probe.advice 取文案'],
+  ...over });
+/** 真机 Result 形状（service.js:122-130）：`error` 是宿主原话字符串，不是 code；没有 total 字段。 */
+const RES = (over = {}) => ({ rows: [], source: 'walk', sourceLabel: '本地遍历', truncated: false, stale: false, note: '', error: null, took: 7300, limit: 200, ...over });
+/** 宿主真机原话（everything-http.js:53 / :46）—— 界面 403 与超时的指引靠回显这两句，不在 client 再抄一份。 */
+const E403 = 'Everything 的 HTTP 服务未开启：在 Everything 里勾选 工具 → 选项 → HTTP 服务器（默认端口 3417）';
+const ETO = '请求超时（timeout，4000ms 到点已取消）';
+const READY = { installed: true, http: true, e2e: true, ready: true, via: 'http', degraded: false, level: 'e2e' };
+const PAGE = (over = {}) => walk(SRCH.SearchPage({ probe: PROBE(), res: null, mode: 'walk', limit: 200, q: '', dirs: [], err: null,
+  onSearch() {}, onMode() {}, onLimit() {}, onReprobe() {}, onAddDir() {}, onDelDir() {}, ...over }));
+
+check('pg3-1 自检三行标题逐字，且卡在哪一级就标在哪一级', () => {
+  assert.deepEqual(SRCH.PROBE_ROWS, ['① 已安装 Everything', '② 有查询通路', '③ 端到端可用']);
+  const c = SRCH.probeCells(PROBE());
+  assert.deepEqual(c.map((x) => x.title), SRCH.PROBE_ROWS);
+  assert.equal(c[0].mark, '!');
+  assert.equal(c[2].mark, '·', '前两级没过时第三级是"未执行"而不是失败');
+  assert.equal(c[2].pill, '未执行');
+});
+
+check('pg3-2 三级全绿才收引导卡', () => {
+  const off = PAGE({});
+  assert.ok(off.has('如何拿到全盘秒级搜索'));
+  const on = PAGE({ probe: PROBE(READY) });
+  assert.ok(!on.has('如何拿到全盘秒级搜索'), '通路就绪后引导卡该收起来');
+});
+
+check('pg3-3 指引三条只从注入载荷的 searchAdvice 取（文案单源，不在 client 再抄一份）', () => {
+  const A = ['A1 winget install voidtools.Everything', 'A2 https://www.voidtools.com/downloads/', 'A3 工具 → 选项 → HTTP 服务器'];
+  globalThis.__SYSOPS__ = clientPayload({ searchAdvice: A });
+  try {
+    assert.deepEqual(SRCH.advice(), A);
+    const code = stripComments(fs.readFileSync(path.join(ROOT, 'client.js'), 'utf8'));
+    assert.ok(!code.includes('voidtools.com'), 'client.js 里不该出现第二份安装指引文案');
+  } finally {
+    globalThis.__SYSOPS__ = clientPayload();
+  }
+});
+
+check('pg3-4 明说不代装：引导卡里有"由你自己执行"与三条边界（不装程序 / 不改注册表 / 不开服务）', () => {
+  const out = PAGE({});
+  assert.ok(out.has('由你自己执行'));
+  assert.ok(out.has('不会替你装程序'));
+  assert.ok(out.has('不会改注册表'));
+  assert.ok(out.has('不会替你打开 HTTP 服务'));
+});
+
+check('pg3-5 通路未就绪：默认模式落 walk，全盘索引按钮标不可选并给原因', () => {
+  assert.equal(SRCH.modeOf(PROBE(), 'everything'), 'walk');
+  assert.equal(SRCH.modeOf(PROBE({ installed: true, es: true, e2e: true, ready: true, via: 'es', degraded: false }), 'everything'), 'everything');
+  const out = PAGE({});
+  const b = out.buttons.find((x) => x.text.includes('全盘索引'));
+  assert.equal(b.disabled, true);
+  assert.ok(out.has('通路未就绪'));
+});
+
+check('pg3-6 walk 模式必须写明覆盖范围与实测代价（14.5 万条目 / 7.3s）', () => {
+  const out = PAGE({ mode: 'walk', dirs: ['C:\\Users\\gongj\\Documents', 'F:\\dsh-plugins'] });
+  assert.ok(out.has('仅覆盖下面已选目录'));
+  assert.ok(out.has('14.5 万'));
+  assert.ok(out.has('7.3s'));
+  assert.ok(out.has('C:\\Users\\gongj\\Documents'), '目录 chips 要渲染出来');
+});
+
+check('pg3-7 结果头三个字段：范围说明、来源 pill、命中数与上限', () => {
+  const h = SRCH.resultHead(RES({ source: 'walk', sourceLabel: '本地遍历', rows: new Array(3).fill({}), limit: 200 }));
+  assert.equal(h.sourcePill, '本地遍历');
+  assert.match(h.hitText, /命中 3 项/);
+  assert.match(h.hitText, /上限 200/);
+  assert.match(h.sub, /限定目录/);
+  const h2 = SRCH.resultHead(RES({ source: 'everything', sourceLabel: 'Everything HTTP', rows: new Array(5).fill({}), limit: 50, truncated: true }));
+  assert.equal(h2.sourcePill, 'Everything HTTP');
+  assert.match(h2.hitText, /已截断/);
+});
+
+check('pg3-8 每条结果自带来源 pill，缺字段显示 — 而不是 0', () => {
+  const rows = SRCH.rowCells(RES({ source: 'es', sourceLabel: 'es.exe', rows: [
+    { name: 'client.js', dir: 'F:\\dsh-plugins\\dsh-plugin-stock-analysis', size: 214 * 1024, mtime: 1_700_000_000_000, source: 'es', path: 'F:\\a' },
+    { name: 'x.txt', dir: 'F:\\', size: null, mtime: null, source: 'es', path: 'F:\\b' },
+  ] }));
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((r) => r.sourcePill), ['es.exe', 'es.exe']);
+  assert.equal(rows[1].sizeText, '—', '未知大小不许显示成 0 B');
+  assert.equal(rows[1].mtimeText, '—');
+});
+
+check('pg3-9 降级四类文案各不相同：未就绪 / 403 / 超时保留陈旧 / 空结果', () => {
+  const e403 = PAGE({ res: RES({ error: E403, rows: [], stale: true }) });
+  assert.ok(e403.has('工具 → 选项 → HTTP 服务器'), '403 要给可执行指引（spec §4.4）');
+  assert.ok(e403.has('HTTP 服务未开启'), '403 文案要认得出是 403：' + e403.texts.join('|'));
+  assert.ok(!e403.has('到点已取消'), '403 态不许混进超时文案：' + e403.texts.join('|'));
+  const stale = PAGE({ res: RES({ stale: true, error: ETO, rows: [{}] }) });
+  assert.ok(stale.has('陈旧'), '超时后留下的上次结果必须标陈旧：' + stale.texts.join('|'));
+  assert.ok(stale.has('超时') && stale.has('到点已取消'), '超时要说清已取消（宿主原话回显）：' + stale.texts.join('|'));
+  assert.ok(!stale.has('HTTP 服务未开启'), '超时态不该出现 403 的指引：' + stale.texts.join('|'));
+  const notReady = PAGE({ res: RES({ rows: [], note: '降级为本地遍历（Everything 通路未就绪）：未在常见安装路径找到 Everything.exe，es.exe 也不可用（未探到已安装）' }), q: 'a' });
+  assert.ok(notReady.has('通路未就绪') && notReady.has('降级为本地遍历'), '未就绪态要说成「整条通路没有、已降级」：' + notReady.texts.join('|'));
+  assert.ok(!notReady.has('到点已取消') && !notReady.has('HTTP 服务未开启'), '未就绪不许套 403/超时的话：' + notReady.texts.join('|'));
+  const empty = PAGE({ res: RES({ rows: [], error: null }), q: 'zzz' });
+  assert.ok(empty.has('空格 = 同时满足'), '空结果要教分词规则');
+  assert.ok(!empty.has('陈旧'), '空结果不是失败，不许挂陈旧条：' + empty.texts.join('|'));
+  const ready = PAGE({ probe: PROBE(READY), res: null });
+  assert.ok(ready.has('输入关键字'), '就绪态该是搜索框而不是引导');
+});
+
+check('pg3-10 上限三档 50/200/1000，切档只改 limit 不自动重发', () => {
+  assert.deepEqual(SRCH.LIMITS, [50, 200, 1000]);
+  let fired = 0;
+  const out = walk(SRCH.SearchPage({ probe: PROBE(), res: RES({ rows: [{}] }), mode: 'walk', limit: 200, q: 'a', dirs: [], err: null,
+    onSearch() { fired += 1; }, onMode() {}, onLimit() {}, onReprobe() {}, onAddDir() {}, onDelDir() {} }));
+  assert.equal(out.buttons.filter((b) => /^\d+$/.test(b.text)).length, 3);
+  assert.equal(fired, 0, '渲染阶段不许触发请求');
+});
+
+check('pg3-11 空查询不发请求（searchQuery 返回 null），带查询时三键齐', () => {
+  assert.equal(SRCH.searchQuery({ q: '   ', mode: 'walk', limit: 200 }), null);
+  assert.deepEqual(SRCH.searchQuery({ q: 'report .pdf', mode: 'walk', limit: 50 }), { q: 'report .pdf', mode: 'walk', limit: 50 });
+});
+
+check('pg3-12 「打开位置」只定位不执行：说明文案在场，且没有"打开文件/运行"字样', () => {
+  const out = PAGE({ res: RES({ rows: [{ name: 'a.txt', dir: 'F:\\', size: 1, mtime: 1, source: 'walk', path: 'F:\\a.txt' }] }) });
+  assert.ok(out.has('不替你打开文件'));
+  assert.ok(out.has('不执行任何程序'));
+  assert.ok(!out.has('运行'));
+});
 /* ⑧段：共享连接层（批 D + Ruling-98 接线）—— 带真实 useEffect/useState 的活体桩
  *    评审现证：useStream 层此前零覆盖，D-I-1 的假降级、D-I-2 的静默覆盖写、D-I-3 的连接悬挂
  *    都长在 effect 里，纯 props 的 walk 抓不到 ⇒ 本段用活体桩真挂载、真跑 effect、真收集 cleanup。 */
@@ -836,6 +979,114 @@ await checkAsync('cn-7 GET /clean/plan 回 ok 但没有 items 数组：同样留
   assert.ok(out.has('接口异常'), 'ok 但没 items 的半份应答也要可见：' + out.texts.join('|'));
   assert.ok(out.has('plan-y'), '报错要说清是哪个清单没数据：' + out.texts.join('|'));
   assert.ok(!out.texts.includes('待清理清单'), 'ok 但没 items 的半份应答同样不许立起清单卡：' + out.texts.join('|'));
+  w.live.__unmount();
+});
+
+/**
+ * 接线证人用的三个驱动器（Task 23/24 的容器侧）：
+ * 桩 React 没有 DOM，所以「用户在输入框里打字」用给 input vnode 的 ref 挂现值来等价表达
+ * —— client.js 读的正是 `ref.current.value`，挂上去就是真机那条路径，不是给测试开的后门。
+ * 按钮定位要区分「包含」与「全等」：页签「文件搜索」也含「搜索」二字，includes 会点错。
+ */
+/**
+ * 接线证人用的驱动器（Task 23/24 的容器侧）。桩 React 没有 DOM，所以「用户在输入框里打字」
+ * 用给 input vnode 的 ref 挂现值来等价表达 —— client.js 读的正是 `ref.current.value`，
+ * 挂上去走的就是真机那条路径，不是给测试开的后门。
+ * 关键约束：**挂值与取 onClick 必须同一次遍历** —— 活体桩的 hook 槽位按 cursor 顺序落，
+ * 跨两次遍历拿到的 ref 对象与按钮闭包里的 ref 会落到不同槽位，值就写不进去（现证：分两次走时 sentRule.n 是空串）。
+ * 按钮定位要区分「包含」与「全等」：页签「文件搜索」也含「搜索」二字，includes 会点错。
+ */
+function kids(n) {
+  if (typeof n.type === 'function') return [n.type(n.props || {})];
+  const list = Array.isArray(n.children) && n.children.length ? n.children : [(n.props || {}).children];
+  return list;
+}
+function fillAndClick(root, needle, value, btnText) {
+  const res = { boxDone: false, click: null };
+  const go = (n) => {
+    if (res.click || !n || typeof n !== 'object') return;
+    if (Array.isArray(n)) { for (const k of n) go(k); return; }
+    const p = n.props || {};
+    if (n.type === 'input' && !res.boxDone && String(p.placeholder || '').includes(needle)) {
+      if (!p.ref) p.ref = { current: null };
+      p.ref.current = { value };
+      res.boxDone = true;
+    }
+    if (n.type === 'button' && (n.children || []).filter((c) => typeof c === 'string').join('') === btnText
+      && typeof p.onClick === 'function') { res.click = p.onClick; return; }
+    go(kids(n));
+  };
+  go(root);
+  return res;
+}
+function findClickExact(root, text) {
+  const out = [];
+  const go = (n) => {
+    if (!n || typeof n !== 'object') return;
+    if (Array.isArray(n)) { n.forEach(go); return; }
+    if (n.type === 'button') {
+      const t = (n.children || []).filter((c) => typeof c === 'string').join('');
+      if (t === text && typeof n.props.onClick === 'function') out.push(n.props.onClick);
+    }
+    go(kids(n));
+  };
+  go(root);
+  return out.length === 1 ? out[0] : null;
+}
+await checkAsync('cn-8 搜索页接线：进页现读探针与 prefs，点「搜索」发的是输入框现值而不是上一条 q', async () => {
+  const PROBE_DOWN = { at: 1, installed: false, http: false, es: false, e2e: false, ready: false, via: null, degraded: true, level: null,
+    checks: [
+      { key: 'installed', label: '① 已安装 Everything', ok: false, detail: '未在常见安装路径找到 Everything.exe，es.exe 也不可用（未探到已安装）' },
+      { key: 'http', label: '② HTTP 查询通路（:3417）', ok: false, detail: 'HTTP 探测超时（1500ms）' },
+      { key: 'es', label: '② es.exe 查询通路', ok: false, detail: '未找到 es.exe（不在 PATH，可在设置页指定路径）' },
+      { key: 'walk', label: '③ 本地遍历兜底', ok: true, detail: '可遍历已选目录（非全盘索引）' },
+    ] };
+  const PROBE_UP = { ...PROBE_DOWN, installed: true, http: true, e2e: true, ready: true, via: 'http', degraded: false, level: 'e2e' };
+  const RES_WALK = { rows: [{ name: 'report.pdf', dir: 'F:\\dsh-plugins', size: 2048, mtime: 1_700_000_000_000, source: 'walk', path: 'F:\\dsh-plugins\\report.pdf' }],
+    source: 'walk', sourceLabel: '本地遍历', truncated: false, stale: false, note: '', error: null, took: 7300, limit: 50 };
+  const w = cnWorld([
+    { url: '/sysops/api/stream', reply: () => sseRes([`event: snapshot\ndata: ${JSON.stringify(CN_SNAP)}\n\n`]) },
+    { url: '/sysops/api/alerts/read', method: 'POST', reply: () => jsonRes({ ok: true, data: {} }) },
+    { url: '/sysops/api/search/probe', reply: () => jsonRes({ ok: true, data: PROBE_DOWN }) },
+    { url: '/sysops/api/search/reprobe', method: 'POST', reply: () => jsonRes({ ok: true, data: PROBE_UP }) },
+    { url: '/sysops/api/prefs', reply: () => jsonRes({ ok: true, data: { prefs: { search: { mode: 'walk', limit: 50, walkDirs: ['F:\\dsh-plugins'] } } } }) },
+    { url: '/sysops/api/search', reply: () => jsonRes({ ok: true, data: RES_WALK }) },
+  ]);
+  w.render();
+  await cnTick();
+  w.render();
+  const tabBtn = w.click('文件搜索');
+  assert.ok(tabBtn, '没找到「文件搜索」页签');
+  tabBtn();
+  w.render();
+  await cnTick();
+  const out = w.render();
+  const calls = () => JSON.stringify(w.log.map((e) => e.method + ' ' + e.url));
+  assert.ok(w.log.some((e) => e.method === 'GET' && e.url === '/sysops/api/search/probe'), '进搜索页必须现读探针：' + calls());
+  assert.ok(w.log.some((e) => e.method === 'GET' && e.url === '/sysops/api/prefs'), '覆盖范围与通路参数在 prefs 里，必须现读：' + calls());
+  assert.ok(out.has('① 已安装 Everything'), '自检三行要渲染出来：' + out.texts.join('|'));
+  assert.ok(out.has('如何拿到全盘秒级搜索'), '未就绪时引导卡在场：' + out.texts.join('|'));
+  assert.ok(out.has('F:\\dsh-plugins'), 'prefs 的 walkDirs 要画成覆盖范围 chips：' + out.texts.join('|'));
+  w.render();
+  const t1 = fillAndClick(w.live.__root, '输入关键字', 'report .pdf', '搜索');
+  assert.ok(t1.boxDone, '搜索输入框没挂 ref，容器拿不到现值');
+  assert.ok(t1.click, '没找到「搜索」按钮（或它不唯一）');
+  t1.click();
+  await cnTick();
+  const q = w.log.find((e) => e.method === 'GET' && e.url.split('?')[0] === '/sysops/api/search');
+  assert.ok(q, '点「搜索」必须发 GET /api/search：' + calls());
+  assert.ok(/[?&]q=report%20\.pdf/.test(q.url), '发的必须是输入框现值，不是 props.q（上一条查询）：' + q.url);
+  assert.ok(/[&]mode=walk/.test(q.url) && /[&]limit=50/.test(q.url), 'mode/limit 取进页读回的 prefs.search：' + q.url);
+  const out2 = w.render();
+  assert.ok(out2.has('report.pdf'), '结果行要落地：' + out2.texts.join('|'));
+  assert.ok(out2.has('本地遍历'), '每条结果带来源 pill（宿主 sourceLabel 原样）：' + out2.texts.join('|'));
+  const reprobe = findClickExact(w.live.__root, '重新检测');
+  assert.ok(reprobe, '没找到「重新检测」按钮');
+  reprobe();
+  await cnTick();
+  assert.ok(w.log.some((e) => e.method === 'POST' && e.url === '/sysops/api/search/reprobe'), '重新检测必须 POST reprobe：' + calls());
+  const out3 = w.render();
+  assert.ok(!out3.has('如何拿到全盘秒级搜索'), '探针真的换成就绪后引导卡该收起（不是文案没刷新）：' + out3.texts.join('|'));
   w.live.__unmount();
 });
 
