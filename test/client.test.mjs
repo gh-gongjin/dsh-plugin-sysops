@@ -551,7 +551,7 @@ check('pg2-24 扫描分母拿不到时进度条走不定量，不画实心 0%（
 check('pg2-25 404 与 503 两种整批拒的界面文案分开，都就地落 notice 不弹浮层（批 C concern-1 收口）', () => {
   const e404 = { source: 'clean/apply', status: 404, code: 'SYSOPS_RECORDS_NOT_FOUND', message: '清理清单快照不存在或已被裁剪，本次未删除任何文件，请重新扫描后再执行' };
   const o404 = walkClean({ clean: IDLE, err: e404 });
-  assert.ok(o404.has('已被覆盖'), '404 要说清是清单快照没了：' + o404.texts.join('|'));
+  assert.ok(o404.has('已被裁剪'), '404 要说清是清单快照被裁剪掉了：' + o404.texts.join('|'));
   assert.ok(o404.has('请重新扫描'), o404.texts.join('|'));
   assert.ok(!o404.has('接口异常'), '不许落到通用兜底句');
   const e503 = { source: 'clean/apply', status: 503, code: 'SYSOPS_QUARANTINE_UNAVAILABLE', message: '暂存目录不可用（配置错误或建不出来），整批停止，未删除任何文件' };
@@ -677,6 +677,15 @@ function cnWorld(routes) {
   return { log, live, C, render: () => live.__render(C.SysopsPage), click: (t) => findClick(live.__root, t) };
 }
 const cnTick = (ms = 30) => new Promise((r) => setTimeout(r, ms));
+/** 真链路等待：退避链要跑 1s/2s/4s 三轮，只能轮询到期望出现为止（给硬超时，不死等）。 */
+async function cnWait(fn, ms = 15000) {
+  const t0 = Date.now();
+  for (;;) {
+    if (fn()) return true;
+    if (Date.now() - t0 > ms) return false;
+    await cnTick(50);
+  }
+}
 
 await checkAsync('cn-1 SSE 健康时 collect:refresh 补快照只换快照不改 link（D-I-1 假降级钉桩）', async () => {
   const w = cnWorld([
@@ -758,6 +767,76 @@ await checkAsync('cn-4 快照只给 planId 字符串时按 GET /api/clean/plan �
   const out = w.render();
   assert.ok(out.has('待清理清单'), '补拉到的实体要渲染成清单卡：' + out.texts.join('|'));
   assert.ok(out.has('a.log'), out.texts.join('|'));
+});
+
+await checkAsync('cn-5 SSE 连续握手失败真降级：通道落「降级：轮询 2s」且轮询在取数（NEW-1 覆盖缺口）', async () => {
+  const w = cnWorld([
+    // 每一轮都回非 2xx：streamLoop 走 `!res.ok → throw` 这一路，跑完整的 1s/2s/4s 退避链
+    { url: '/sysops/api/stream', reply: () => ({ ok: false, status: 503, json: async () => ({ ok: false, error: { code: 'STREAM_DOWN', message: '服务端不让连' } }) }) },
+    { url: '/sysops/api/snapshot', reply: () => jsonRes({ ok: true, data: CN_SNAP }) },
+    { url: '/sysops/api/alerts/read', method: 'POST', reply: () => jsonRes({ ok: true, data: {} }) },
+  ]);
+  w.render();
+  const downgraded = await cnWait(() => w.render().has('降级：轮询 2s'));
+  assert.ok(downgraded, '连续失败三轮后必须换成轮询并在通道指示上如实写明：' + w.render().texts.join('|'));
+  const out = w.render();
+  assert.ok(!out.has('重连中'), '已落轮询就不该再挂着「重连中」（两个态必须互斥）：' + out.texts.join('|'));
+  const streamTries = w.log.filter((e) => e.url === '/sysops/api/stream').length;
+  assert.ok(streamTries >= 3, '降级前该真跑满三轮握手：' + streamTries);
+  const polls = w.log.filter((e) => e.method === 'GET' && e.url === '/sysops/api/snapshot').length;
+  assert.ok(polls >= 1, '降级后轮询必须真在取数，否则只是换个文案：' + JSON.stringify(w.log.map((e) => e.method + ' ' + e.url)));
+  w.live.__unmount();
+});
+
+await checkAsync('cn-6 GET /clean/plan 回 404：补拉失败要就地留痕且不出清单卡（D-I-5 / NEW-2）', async () => {
+  const snapWithPlanId = { ...CN_SNAP, clean: { phase: 'ready', planId: 'plan-x', plan: 'plan-x' } };
+  const w = cnWorld([
+    { url: '/sysops/api/stream', reply: () => sseRes([`event: snapshot\ndata: ${JSON.stringify(snapWithPlanId)}\n\n`]) },
+    { url: '/sysops/api/alerts/read', method: 'POST', reply: () => jsonRes({ ok: true, data: {} }) },
+    { url: '/sysops/api/clean/logs', reply: () => jsonRes({ ok: true, data: [] }) },
+    { url: '/sysops/api/clean/unfinished', reply: () => jsonRes({ ok: true, data: [] }) },
+    { url: '/sysops/api/quarantine', reply: () => jsonRes({ ok: true, data: { dirs: 0, files: 0, bytes: 0, oldest: null } }) },
+    { url: '/sysops/api/rules', reply: () => jsonRes({ ok: true, data: { items: [], off: [] } }) },
+    { url: '/sysops/api/prefs', reply: () => jsonRes({ ok: true, data: { prefs: {} } }) },
+    { url: '/sysops/api/clean/plan', reply: () => jsonRes({ ok: false, error: { code: 'SYSOPS_RECORDS_NOT_FOUND', message: '清单快照不存在或已被裁剪' } }, 404) },
+  ]);
+  w.render();
+  await cnTick();
+  w.click('C 盘清理')();
+  w.render();
+  await cnTick();
+  const out = w.render();
+  // 可见错误的两种落点都算数：404 走 cleanErrNotice 的「清单快照不存在…」专分支，其余走通用「接口异常」
+  assert.ok(out.has('清单快照不存在') || out.has('接口异常'), '补拉失败必须可见（约束 4）：' + out.texts.join('|'));
+  assert.ok(out.has('已被裁剪') || out.has('SYSOPS_RECORDS_NOT_FOUND'), '要带服务端给的原因，不能只说「失败了」：' + out.texts.join('|'));
+  // 清单卡的判据用**整节点相等**：空态提示里那句「生成待清理清单。」也含这个串，includes 会误报
+  assert.ok(!out.texts.includes('待清理清单'), '没补到实体就不该出现清单卡（半份数据不占位）：' + out.texts.join('|'));
+  w.live.__unmount();
+});
+
+await checkAsync('cn-7 GET /clean/plan 回 ok 但没有 items 数组：同样留痕，不静默返回（D-I-5 另一形态）', async () => {
+  const snapWithPlanId = { ...CN_SNAP, clean: { phase: 'ready', planId: 'plan-y', plan: 'plan-y' } };
+  const w = cnWorld([
+    { url: '/sysops/api/stream', reply: () => sseRes([`event: snapshot\ndata: ${JSON.stringify(snapWithPlanId)}\n\n`]) },
+    { url: '/sysops/api/alerts/read', method: 'POST', reply: () => jsonRes({ ok: true, data: {} }) },
+    { url: '/sysops/api/clean/logs', reply: () => jsonRes({ ok: true, data: [] }) },
+    { url: '/sysops/api/clean/unfinished', reply: () => jsonRes({ ok: true, data: [] }) },
+    { url: '/sysops/api/quarantine', reply: () => jsonRes({ ok: true, data: { dirs: 0, files: 0, bytes: 0, oldest: null } }) },
+    { url: '/sysops/api/rules', reply: () => jsonRes({ ok: true, data: { items: [], off: [] } }) },
+    { url: '/sysops/api/prefs', reply: () => jsonRes({ ok: true, data: { prefs: {} } }) },
+    // 半份应答：ok:true 但 data 里根本没有 items —— 不分支就会静默返回（界面少一张卡却无人报错）
+    { url: '/sysops/api/clean/plan', reply: () => jsonRes({ ok: true, data: { plan: 'plan-y' } }) },
+  ]);
+  w.render();
+  await cnTick();
+  w.click('C 盘清理')();
+  w.render();
+  await cnTick();
+  const out = w.render();
+  assert.ok(out.has('接口异常'), 'ok 但没 items 的半份应答也要可见：' + out.texts.join('|'));
+  assert.ok(out.has('plan-y'), '报错要说清是哪个清单没数据：' + out.texts.join('|'));
+  assert.ok(!out.texts.includes('待清理清单'), 'ok 但没 items 的半份应答同样不许立起清单卡：' + out.texts.join('|'));
+  w.live.__unmount();
 });
 
 console.log(`\n  ${passed}/${passed + failed} 通过`);

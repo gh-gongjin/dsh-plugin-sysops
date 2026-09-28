@@ -644,7 +644,9 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
     /**
      * 写接口错误 → 就地 notice 文案（spec §4.7：错误落在触发它的那张卡里，无浮层）。
      * 501 与 403 两种原因文案不同：501 = 宿主没给 storageDomain（配置只读），403 = guard 红线拒绝。
-     * apply 整批拒不落 200（批 C concern-1）：404 = 清单快照不存在/已被覆盖，
+     * apply 整批拒不落 200（批 C concern-1）：404 = 清单快照不存在/已被裁剪（措辞逐字跟宿主
+     * lib/api.js:145 与 lib/clean/executor.js:64 —— 快照是被 plan-store 的 PLAN_KEEP 裁剪掉的，
+     * 说「已被覆盖」会让人以为是自己刷新丢了数据而不去重扫），
      * 503 = 暂存目录不可用或记录域已关 —— 两种原因分开说，都如实交代「什么都没删」。
      */
     function cleanErrNotice(err) {
@@ -655,7 +657,7 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
         return { tone: 'red', text: `配置只读：宿主未提供 storageDomain，写操作被拒（${err.message || '接口返回 501'}）` };
       }
       if (status === 404 || code === 'SYSOPS_RECORDS_NOT_FOUND') {
-        return { tone: 'red', text: `清单快照不存在或已被覆盖：请重新扫描后再执行，本次未删除任何文件（${err.message || code || '接口返回 404'}）` };
+        return { tone: 'red', text: `清单快照不存在或已被裁剪：请重新扫描后再执行，本次未删除任何文件（${err.message || code || '接口返回 404'}）` };
       }
       if (status === 503 || code === 'SYSOPS_RECORDS_CLOSED' || code === 'SYSOPS_QUARANTINE_UNAVAILABLE') {
         return { tone: 'red', text: `暂存目录不可用或记录域已关闭：整批停止，本次未删除任何文件（${err.message || code || '接口返回 503'}）` };
