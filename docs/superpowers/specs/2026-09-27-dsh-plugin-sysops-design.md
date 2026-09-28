@@ -329,6 +329,8 @@ POST /sysops/api/clean/apply  { planId, itemIds, mode }      ← 只收 ID，不
 | L-11 | 曲线卡窗口按 `keepMinutes`（默认 30min）渲染，而非原型写的"最近 24 小时" | 环形缓冲只留 `keepMinutes`（钳 5~120），写 24h 就是界面撒谎。原型那句是演示数据，约束 9 的"标题逐字照原型"只约束**卡名** |
 | L-12 | `SKIP_LOCAL=1` 对 `test/search.test.mjs` 无效 | 该文件没有用例名含"真机"，`checkAsync` 的 skip 判定按名匹配故不命中。这是正确行为（它本就不做真机 IO），已在 spec 与台账写明，不假造一条 SKIP 记录 |
 | L-13 | `test/render-fixtures.mjs` 桩 React 与 25-C 真 React 预览页之间存在骨架渲染的 cosmetics 差异 | 桩只执行组件函数取文本/类名，不跑 React 的布局与告警链路；差异仅限骨架网格的空白填充，功能断言两侧一致 |
+| L-14 | 插件清单里的 `needsStorage` / `needsWebServer` **声明机制缺失**（计划文本有、实现与 spec 都没有） | 最终评审 Minor-1/2 的抱怨是"既没落地也没登记"。裁定**登记但不补机器**：声明机制是宿主契约面（宿主按声明决定是否注入 storage facility / web server），本插件已在运行时按"能力缺失就降级"处理（`PREFS_UNAVAILABLE` 501、`needsStorage` 分支置灰），加一份静态声明是给一个当前无消费者的字段加机器。**登记在此，后续若宿主引入该契约，按此条补** |
+| L-15 | `alerts.hitsError` 的清除只走 `snapshot` 整体替换（无专用恢复帧） | Ruling-115：SSE 长连且无重连/回可见/轮询时，落盘降级横幅可能比实际恢复多留一会儿（假阴性）。横幅是**保守提示**（"命中不会写入本机记录"），多留不产生错误动作，任一 `snapshot` 轮次即自愈；要做到"恢复即时可见"需新增 `alert-store-ok` 帧或让服务端周期重发快照，属新机制而非缺陷修复面 |
 
 ### 8.2 只能人工在真机 dsh 里补验的两条（本机无宿主，禁用替身冒充）
 
