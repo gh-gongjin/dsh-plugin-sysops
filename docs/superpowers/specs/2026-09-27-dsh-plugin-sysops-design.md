@@ -29,14 +29,19 @@
 
 ### 1.2 实测代价（决策依据，验收时须复跑）
 
+**2026-09-28 复跑**（命令 `node scripts/probe-collect.mjs`）。带 ★ 的三行相对计划期值偏差 >20%，已按本次实测改写；容量行只报事实、不参与 20% 判定。
+
 | 动作 | 实测 | 结论 |
 |---|---|---|
-| `os.cpus()` × 100 | 72ms（单次 0.7ms） | L0 以 1s 采样无感，纯 Node，不起子进程 |
-| `fs.statfsSync('C:')` | 0ms（总 214.7G / 可用 71.9G） | 磁盘容量并入 L0 |
-| `Get-Counter` 网络（冷启动） | 1495ms | 禁止每次新建进程 |
-| `typeperf -sc 3`（常驻流式） | 暖身 218.9ms，之后开销可忽略 | 网速走 L1a 常驻 |
-| `Get-CimInstance Win32_Process` | 640ms / 次 | 进程榜 L1b 默认关 + 可见性驱动 |
-| Node 遍历 `AppData\Local` | 145,369 条目 / 7,335ms | 清理扫描属 L2 请求驱动，必须带进度与可停止 |
+| `os.cpus()` × 100 | 61ms（单次 0.61ms，逻辑核 16） | L0 以 1s 采样无感，纯 Node，不起子进程 |
+| `fs.statfsSync('C:')` | 0.0ms（总 200.0G / 可用 70.5G —— 容量随使用变化，只报事实） | 磁盘容量并入 L0 |
+| 网络吞吐冷启动 | `typeperf -sc 1` 1366ms（计划期试的是 `Get-Counter`，1495ms；实现选定 typeperf） | 禁止每次新建进程 |
+| ★ `typeperf` 常驻流式 | `-sc 0` 在无控制台管道下出一个样本就退出、不提供无限流式 ⇒ 改为**定窗续采**（每窗 `-sc 30 -si 1`）；`-sc 3` 整窗 3402ms，减掉 3×1s 采样 ⇒ 暖身 ≈402ms/窗（计划期记 218.9ms），摊到 30 样本窗 1.3%；窗口衔接处有约 1 个采样周期空隙 | 网速走 L1a 常驻 |
+| `typeperf` 输出编码 | stdout 是 OEM 代码页（中文机器名为 GBK 字节，实测首行 `"(PDH-CSV 4.0)","\\龚进的华为笔记\Network Interface(...)"`）⇒ 解码代价已计入适配器（`decodePd` 用 `TextDecoder('gbk')`，无 ICU 环境留兜底），中文计数器名不再乱码 | 解析层只取实例名与计数器名 |
+| ★ `Get-CimInstance Win32_Process` | 冷启动单轮 1475ms（计划期记 640ms）；L1b 常驻循环按 `INTERVAL_SEC = 3` 跑 | 进程榜 L1b 默认关 + 可见性驱动；循环周期 `procIntervalSec` 默认 3s（钳 2~60） |
+| ★ Node 遍历 `AppData\Local` | 85,122 条目 / 4,532ms（本次探针根为 `%LOCALAPPDATA%\Temp`，与计划期不同根 ⇒ 条目数不可直接比；**吞吐** 18.8 条/ms 对计划期 19.8 条/ms，差 −5%） | 清理扫描属 L2 请求驱动，必须带进度与可停止 |
+
+> 复跑口径：`scripts/probe-collect.mjs` 是**只报事实**的脚本（不做 20% 判定、不认 `--json`、恒 exit 0），偏差比对靠人工做 —— 上表即 2026-09-28 那次人工比对的产物。
 
 ### 1.3 明确不做（红线）
 
@@ -159,7 +164,9 @@ L0 / L1a / L1b 各写一条带，共用 `collect/ring.js`。出口两条：
 
 - 五条独立记录，各自带 `v:1` schema 版本：`prefs`（采集档位、各源开关、告警阈值、搜索限定目录）、`clean-rules`（本机清理规则，内置规则不入库）、`clean-plan`（清单快照）、`clean-log`（执行留痕）、`alert-hit`（触发记录）。权威副本在宿主 `storageDomain`，浏览器只是镜像。
 - `null` = 从未写入；`[]` = 用户主动清空。两者在 spec 与 UI 上分开呈现。
-- 写路径两条：`PATCH /sysops/api/prefs`（档位、开关、阈值、限定目录）与 `PATCH /sysops/api/rules`（本机清理规则，**校验阶段就过 guard**，命中红线直接拒绝写入而不是执行期才失败）。两者共用同一套 schema 校验，落库后**返回归一化全量**；前端以返回值重渲染，不回显输入框内容。
+- 写路径两条：`POST /sysops/api/prefs`（档位、开关、阈值、限定目录）与 `POST /sysops/api/rules/add|remove|toggle`（本机清理规则，**校验阶段就过 guard**，命中红线直接拒绝写入而不是执行期才失败）。两者共用同一套 schema 校验，落库后**返回归一化全量**；前端以返回值重渲染，不回显输入框内容。
+- **写接口统一 POST**（计划期实测修正，不是设计变更）：宿主 `webServer` 只在 POST 下稳定给出 body，`PATCH` 拿不到载荷 ⇒ `GET` 只读、写一律 POST。
+- **`POST /sysops/api/prefs` 收的是整条 `prefs` 记录**：宿主 `writeMany` 按 key 整行 `put`（未知/空键跳过），所以**差量改也必须读-并-写**，否则会把同一记录里的兄弟分组（`clean` / `sources` / `search` / `alerts`）一起抹掉。
 
 ### 3.3 清理（两段式）
 
@@ -181,7 +188,9 @@ POST /sysops/api/clean/apply  { planId, itemIds, mode }      ← 只收 ID，不
 
 ### 3.4 搜索
 
-`GET /sysops/api/search?q&mode&limit` → 按 probe 结论选通路（探测结果缓存 30s）→ Everything HTTP / es.exe / walk → 归一化 `{name, dir, size, mtime, source}`，每条结果自带来源 pill。探测独立成 `GET /sysops/api/search/probe`，返回三级结果与建议动作（对应原型引导卡）。
+`GET /sysops/api/search?q&mode&limit` → 按 probe 结论选通路（探测结果缓存 30s）→ Everything HTTP / es.exe / walk → 归一化 `{name, dir, size, mtime, source}`，每条结果自带来源 pill。探测独立成 `GET /sysops/api/search/probe`，返回三级结果与建议动作（对应原型引导卡）；探测结果缓存 30s，改配置后需显式失效，走 `POST /sysops/api/search/reprobe`。
+
+**本机状态（2026-09-27 复核）**：本机未装 Everything（`C:\Program Files\Everything` 不存在、`where es.exe` 无命中、`curl 127.0.0.1:3417` 拒连），故两个 Everything 适配器标「**未在本机验证**」—— 它们的用例是注入假件跑的；`walk` 是当前**唯一**实跑通路。
 
 ### 3.5 告警
 
@@ -252,7 +261,9 @@ POST /sysops/api/clean/apply  { planId, itemIds, mode }      ← 只收 ID，不
 | `test/alerts.test.mjs` | 阈值穿越、连续 N 次、冷却窗口、依赖关闭后不评估 | 纯函数 + 假时钟 |
 | `test/clean.test.mjs` | 在 `%TEMP%\sysops-test-<rand>` 真建目录树（只读文件、深路径、>1000 文件）真遍历比对与真删；**伪造 itemId / 伪造路径必须被拒**；EXDEV 回退用打桩 | 真机（可跳）+ 打桩 |
 | `test/search.test.mjs` | probe 三级 8 种组合 → 通路选择；Everything HTTP 响应 fixture（403、超时、畸形 JSON）；walk 与 Everything 归一化一致 | 打桩 |
-| `test/plugin.test.mjs` | 加载级：宿主半边 inject 打桩、路由注册、浏览器半边 ModuleLoader 协议加载、侧边栏与主面板注册参数、页签齐全、**无顶部浮层**、无原生 `confirm/alert/select`、源码静态扫零 `@deepseek-ai/*` import | 加载 |
+| `test/prefs.test.mjs` | 五条独立记录的 schema 与读写语义（`schema-*` / `prefs-*` / `rules-*` / `prefq-*`）：未声明字段丢弃、`null` 与 `[]` 分开、`writeMany` 跳过未知键但不拖垮整批、内置库只收本机实测存在的路径且自产规则先过 guard、命中红线的规则在**写入阶段**就被拒、`prefq-1` 拒未展开的 `%VAR%` | 纯函数 |
+| `test/plugin.test.mjs` | 加载级（宿主半边）：`inject` 打桩、路由表与写端点全 POST、侧边栏与主面板注册参数、**回环闸门**（非回环一律 403）、无原生 `confirm/alert` 调用、源码静态扫零 `@deepseek-ai/*` import | 加载 |
+| `test/client.test.mjs` | 加载级（浏览器半边）：`__ModuleLoader__` 协议加载、四页签骨架与页签齐全、**无顶部浮层**、无原生 `confirm/alert/select`；四页的纯函数与渲染用例按 `pg1`（监控）/`pg2`（清理）/`pg3`（搜索）/`pg4`（设置）分段，外加 `cn-*` 走真实 `fetch` 与 SSE 打桩的端到端接线证人 | 加载 + 打桩 |
 | `test/host-compat.test.mjs` | 无 `storageDomain` / 无 `webServer` / 无 `timer` 三种组合下加载不抛、状态如实报 | 加载 |
 
 **覆盖率**：本仓库不产百分比数字（自研 harness 与 `node --test --experimental-test-coverage` 不兼容，引工具即破坏零依赖）。替代做法：`guard.js` 维护一份**分支清单**，每条红线一个用例 ID，人工核对是否全部打勾。guard 是唯一要求分支全覆盖的模块——它是这台机器上不可逆动作的单点。
@@ -289,9 +300,11 @@ POST /sysops/api/clean/apply  { planId, itemIds, mode }      ← 只收 ID，不
 
 ## 8. 未决项（实现阶段处理，不阻塞本设计）
 
-| 项 | 当前倾向 | 何时定 |
+**实现期已全部收口**（2026-09-28）：
+
+| 项 | 决定 | 依据 |
 |---|---|---|
-| 内置清理规则清单 | 逐条在本机实测路径存在性后才写入，禁止凭印象列路径 | 写 `clean/rules.js` 之前 |
-| 暂存目录位置 | `%LOCALAPPDATA%\dsh-plugin-sysops\quarantine` | 实现时确认 |
-| 曲线保留窗口默认值 | 30min（原型演示值） | 依 ring 内存实测 |
-| spec 文档位置 | 本路径按 superpowers 约定；兄弟插件惯例是 `docs/design-spec.md` | 若需统一，实现前重命名 |
+| 内置清理规则清单 | **已定：12 条**。只收本机实测存在、且不踩红线的路径，禁止凭印象列 | `lib/clean/rules.js` 的 `BUILTIN_RULES` 实测 `length === 12`（`temp-user` / `win-explorer` / `edge-cache` / `vscode-cache` / `npm-cache` / `pip-cache` / `crash-dumps` / `packages-cache` / `local-cache` / `wechat-cache` / `dingtalk-cache` / `playwright-browsers`）；2026-09-27 复核把 `WER` 剔了 —— 现采 `AppData/Local/Microsoft/Windows/WER` 三条全 ENOENT，Windows 错误报告实际落在 `C:/ProgramData/Microsoft/Windows/WER`（见该文件头部注释与 Task 11 Step 3 的现采块） |
+| 暂存目录位置 | **已定：默认落点 `%LOCALAPPDATA%\dsh-plugin-sysops\quarantine`** | `DEFAULT_QUARANTINE(appData)` 由宿主展开成绝对路径后放进 Task 19 载荷 `defaults`；prefs 只存展开后的绝对路径（`prefq-1` 拒未展开的 `%...%` 形），界面渲染 prefs 实配值、无实配时回落 `defaults`。原型里的 `C:\Users\gongj\.dsh-quarantine\2026-09-27\` 是演示串 |
+| 曲线保留窗口默认值 | **已定：30min**（`keepMinutes` 默认 30，钳 5~120） | ring 上界由 `maxPoints = 1800` 定（30min @1s），4 源 × 1800 点按该文件自述量级 ≈100KB，远低于 1MB —— 这是按 `maxPoints` 推的上界，不是压测读数 |
+| spec 文档位置 | **已定：保留在 `docs/superpowers/specs/`** | 不与兄弟插件的 `docs/design-spec.md` 统一（superpowers 约定优先） |

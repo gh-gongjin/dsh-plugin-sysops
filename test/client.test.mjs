@@ -181,6 +181,35 @@ check('cf-12 无顶部浮层：CSS 与组件里都没有 toast/notice-bar 类实
   assert.doesNotMatch(code, /toast|Toast|notice-bar|noticeBar|position:fixed[^]*top:\s*\d/, '出现浮层实现');
 });
 
+/**
+ * cf-13：DOM 属性名必须用 React 驼峰形，连字符名字只允许 aria-* / data-*（React 保留这两族原样）。
+ * 为什么单开一条源码级用例：**桩 React 不校验属性名**，`stroke-width` 这种写法在 98 条桩用例里全绿，
+ * 直到 25-C 的离线预览页用真 React(dev) 渲染才逐条报 `Invalid DOM property`（SysopsPanelIcon 报 3 条）。
+ * 桩测不出、预览页又不入库 ⇒ 把这条不变量钉在源码上，防止再退化。
+ */
+check('cf-13 DOM 属性名用 React 驼峰：源码里连字符键只允许 aria-* / data-*', () => {
+  const code = stripComments(fs.readFileSync(path.join(ROOT, 'client.js'), 'utf8'));
+  const bad = (code.match(/'[a-z][a-z0-9]*-[a-z0-9-]*':/g) || []).filter((k) => !/^'(aria|data)-/.test(k));
+  assert.deepEqual(bad, [], '真 React 会对这些连字符属性名报 Invalid DOM property：' + JSON.stringify(bad));
+});
+
+/**
+ * cf-14：清单/搜索表在窄视口必须「表格撑住 + 外层横向滚动」，不能把路径列压扁折行。
+ *
+ * 为什么单开一条源码级用例：桩 React 没有布局，99 条桩用例量不出宽度。
+ * 25-C 用真布局预览量到过反例：620 档表格被压到容器宽 467px、路径列只剩 103px 折成 4 行、
+ * `.so-tblwrap` 的 scrollWidth 等于 clientWidth（没滚动）；同一视口下原型 499→879 是横向滚动的。
+ * 根因是 `.so-path{word-break:break-all}` 让单元格最小内容宽度退化成一个字符。
+ * 这里把「机制的两半」一起钉住：外层可滚 + 表格内路径不折。任一半被删，行为就退化。
+ */
+check('cf-14 表格窄视口横向滚动：.so-tblwrap 可滚 + .so-tbl 内路径列不折行', () => {
+  const code = stripComments(fs.readFileSync(path.join(ROOT, 'client.js'), 'utf8'));
+  assert.match(code, /\.so-tblwrap\{[^}]*overflow-x:\s*(auto|scroll)/,
+    '外层容器必须可横向滚动，否则表格只能被压扁');
+  assert.match(code, /\.so-tbl\s+\.so-path\{[^}]*white-space:\s*nowrap/,
+    '表格上下文里的路径列必须禁止折行，否则最小内容宽度退化、表格被压扁到容器宽度');
+});
+
 /* ④段：监控页 —— 纯函数级视图助手 + 组件渲染遍历 */
 const { walk, render, clientPayload } = await import('./render-fixtures.mjs');
 MON = CLIENT.__test.monitor;

@@ -196,6 +196,11 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
 .so-tl-item .so-tx{font-size:13px}
 .so-empty{padding:26px 14px;text-align:center;color:var(--so-t3);font-size:12.5px;line-height:1.9}
 .so-path{font-family:Consolas,"Cascadia Mono",monospace;font-size:11.5px;color:var(--so-t2);word-break:break-all}
+/* 表格里的路径列不换行：break-all 会让单元格的最小内容宽度退化成一个字符，
+   表格因此被压扁到容器宽度（620 档实测路径列只剩 103px、一行折成 4 行），
+   而原型是「表格撑住、外层 .so-tblwrap 横向滚动」。只覆盖表格上下文，
+   监控页的遍历行、设置页的红线列表仍可折行。 */
+.so-tbl .so-path{white-space:nowrap}
 .so-skel{height:9px;border-radius:4px;background:var(--so-hover);margin-bottom:8px}
 .so-disclaimer{margin-top:20px;color:var(--so-t3);font-size:12px;border-top:1px solid var(--so-bd);padding-top:12px;line-height:1.75}
 @media (max-width:1080px){
@@ -1046,9 +1051,12 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
     function SysopsPanelIcon({ size, active, unread } = {}) {
       const s = num(size) || 20;
       const shown = unread === undefined ? sidebarUnread : unread;
+      // SVG 属性必须用 React 的驼峰名（strokeWidth / strokeLinecap / strokeLinejoin）：
+      // 连字符名在真 React 里会逐条报 `Invalid DOM property`（桩 React 不校验，故老测试放过了它）。
+      // aria-* 例外，React 保留连字符原样。
       const attrs = {
         width: s, height: s, viewBox: '0 0 24 24', fill: 'none',
-        stroke: 'currentColor', 'stroke-width': 1.7, 'stroke-linecap': 'round', 'stroke-linejoin': 'round',
+        stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round', strokeLinejoin: 'round',
         'aria-hidden': active ? 'true' : 'false',
       };
       const kids = [
