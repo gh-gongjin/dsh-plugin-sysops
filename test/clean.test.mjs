@@ -642,6 +642,7 @@ function quarFs(over = {}) {
 }
 
 const QU = await import('../lib/clean/quarantine.js');
+const QruleMod = await import('../lib/clean/rules.js');
 
 // T14-B：`forbiddenPrefixes` 只能由调用方喂 —— 现采证明 guard 对 Temp 是 allow=true（Temp 本来就是可清理区），
 // 不传这条则 q-6 永远绿不了，「暂存目录不得落在被清理路径内」这条红线也就没有任何执行者。
@@ -753,6 +754,341 @@ await checkAsync('q-9 stats 汇总天数/件数/字节/最早日期（Task 24 �
 await check('q-7 dayDir 用本地日期且补零', () => {
   // T14-H：夹具本地构造，断言「按本地字段取值 + 月/日补零」，与所在时区无关。
   assert.equal(QU.dayDir(new Date(2026, 8, 7, 23, 30, 0).getTime(), 'R'), 'R\\2026-09-07');
+});
+
+/* ④段：执行器（假 FS + 真快照仓储，路径只从快照来） */
+const EX = await import('../lib/clean/executor.js');
+
+const PLAN_ITEM = (over = {}) => ({
+  id: 'temp-user-aG9tZQ', ruleId: 'temp-user', ruleName: '用户临时目录', kind: '缓存',
+  path: 'C:\\Users\\gongj\\AppData\\Local\\Temp\\old.log', size: 1000, count: 1,
+  atime: 1, mtime: 1, riskLevel: 'mid', ...over,
+});
+
+/** 假 FS：条目按快照里的 items 建，偏差/新增/占用都通过 over 注入。 */
+function exFs(items, over = {}) {
+  const files = new Map();
+  const dirs = new Set();
+  for (const it of items) {
+    if (it.dir === true) dirs.add(it.path);
+    else files.set(it.path, { size: it.size, mtimeMs: it.mtime });
+  }
+  const boom = (code) => { throw Object.assign(new Error('被占用'), { code }); };
+  const statOf = (p) => {
+    if (files.has(p)) { const f = files.get(p); return { isFile: () => true, isDirectory: () => false, size: over.currentSize ?? f.size, mtimeMs: f.mtimeMs }; }
+    if (dirs.has(p)) { const it = items.find((x) => x.path === p); return { isFile: () => false, isDirectory: () => true, size: it.size, mtimeMs: it.mtime }; }
+    if (over.dirChildren?.length) return { isFile: () => true, isDirectory: () => false, size: 1, mtimeMs: over.childrenMtimeMs ?? 1 };
+    throw Object.assign(new Error('找不到'), { code: 'ENOENT' });
+  };
+  return {
+    files, dirs,
+    existsSync: (p) => files.has(p) || dirs.has(p),
+    statSync: (p) => { if (over.errno) boom(over.errno); return statOf(p); },
+    unlinkSync: (p) => { if (over.unlinkErrno) boom(over.unlinkErrno); files.delete(p); },
+    rmSync: (p) => { if (over.rmErrno) boom(over.rmErrno); files.delete(p); dirs.delete(p); },
+    readdirSync: () => over.dirChildren ?? [],
+    realpathSync: (p) => p,
+    join: (a, b) => `${a}\\${b}`,
+    statfsSync: () => ({ available: over.afterFree ?? 71 * 2 ** 30 }),
+  };
+}
+
+function exWorld(items, over = {}) {
+  const fsMod = over.fsMod ?? exFs(items, over);
+  const facility = createMemoryFacility();
+  const planStore = createPlanStore({ getFacility: () => facility, logger: { warn() {} }, now: () => 5000, newId: () => 'p-1' });
+  const logStore = createLogStore({ getFacility: () => facility, logger: { warn() {} }, now: () => 8000 });
+  const events = [];
+  // T15-B：executor 在 move 模式下会**先**调 ensureRoot()（整批闸门），桩必须供得上这个方法；
+  // 缺了它，exWorld 造的默认桩会让 ex-1/9/9b 在闸门处 TypeError —— 红得毫无意义。
+  const quarantine = over.quarantine ?? {
+    ensureRoot: async () => 'Q',
+    stash: async (p) => ({ ok: true, dest: 'Q\\' + p.split('\\').pop(), method: 'move', why: '' }),
+    stats: async () => ({ dirs: 0, files: 0, bytes: 0, oldest: null }),
+  };
+  const exec = EX.createExecutor({
+    fsMod, planStore, logStore, quarantine,
+    logger: { warn: (m) => events.push({ type: 'log', m }) },
+    now: () => 9000,
+    onEvent: (e) => events.push(e),
+  });
+  return { fsMod, files: fsMod.files, dirs: fsMod.dirs, facility, planStore, logStore, exec, events, quarantine };
+}
+
+/** executor 只认快照，所以测试要先真存一份。 */
+async function seeded(items, over = {}) {
+  const w = exWorld(items, over);
+  await w.planStore.save(
+    { items, totals: { n: items.length, bytes: items.reduce((a, b) => a + b.size, 0) }, walked: 9, hit: items.length, skipped: [], stopped: false, truncated: false, at: 5000 },
+    { beforeFree: 70 * 2 ** 30, modeDefault: items[0]?.dir === true ? 'delete-dir' : 'delete-file' },
+  );
+  return w;
+}
+
+await checkAsync('ex-1 正常删一项：state=ok、写留痕、afterFree 更新', async () => {
+  const w = await seeded([PLAN_ITEM()]);
+  const sum = await w.exec.apply({ planId: 'p-1', itemIds: ['temp-user-aG9tZQ'], mode: 'delete-file' });
+  assert.equal(sum.ok, 1);
+  assert.equal(sum.results[0].state, 'ok');
+  assert.equal(w.files.has(PLAN_ITEM().path), false, '文件应被删');
+  assert.equal(sum.bytesFreed, 1000);
+  const logs = await w.logStore.list({ limit: 5 });
+  assert.equal(logs.length, 1);
+  assert.ok(logs[0].finishedAt, 'finish 落库时必须盖完成时间');
+});
+
+await checkAsync('ex-2 伪造 itemId 直接拒，且一个文件都不碰（spec §5 的红线用例）', async () => {
+  const w = await seeded([PLAN_ITEM()]);
+  const sum = await w.exec.apply({ planId: 'p-1', itemIds: ['evil-id'], mode: 'delete-file' });
+  assert.equal(sum.rejected, 1);
+  assert.equal(sum.results[0].state, 'rejected-unknown');
+  assert.equal(w.files.has(PLAN_ITEM().path), true, '不在快照里的 id 不得引发任何删除');
+});
+
+await checkAsync('ex-3 前端传来的路径字段完全被忽略（只按 id 找）', async () => {
+  const w = await seeded([PLAN_ITEM()]);
+  const sum = await w.exec.apply({ planId: 'p-1', itemIds: ['temp-user-aG9tZQ'], mode: 'delete-file', path: 'C:\\Windows\\win.ini', paths: ['C:\\Windows'] });
+  assert.equal(sum.ok, 1);
+  assert.equal(sum.results[0].path, PLAN_ITEM().path, '执行对象必须来自快照');
+});
+
+await checkAsync('ex-4 未知 mode 拒（只允许三个操作，不给改 ACL/结束进程留口）', async () => {
+  const w = await seeded([PLAN_ITEM()]);
+  const sum = await w.exec.apply({ planId: 'p-1', itemIds: ['temp-user-aG9tZQ'], mode: 'takeown' });
+  assert.equal(sum.error, 'GUARD_OPERATION_DENIED');
+  assert.equal(sum.ok, 0);
+});
+
+await checkAsync('ex-5 re-stat：大小偏差 >10% → rejected-snapshot 不删', async () => {
+  const w = await seeded([PLAN_ITEM()], { currentSize: 5000 });
+  const sum = await w.exec.apply({ planId: 'p-1', itemIds: ['temp-user-aG9tZQ'], mode: 'delete-file' });
+  assert.equal(sum.results[0].state, 'rejected-snapshot');
+  assert.match(sum.results[0].errnoText, /偏差|重新扫描/);
+  assert.equal(w.files.has(PLAN_ITEM().path), true);
+});
+
+await checkAsync('ex-6 re-stat：快照之后有新增/修改的条目 → rejected-snapshot', async () => {
+  const dir = 'C:\\Users\\gongj\\AppData\\Local\\Temp\\olddir';
+  const w = await seeded([PLAN_ITEM({ path: dir, size: 1000, count: 2, dir: true })], { dirChildren: ['new.bin'], childrenMtimeMs: 9999 });
+  const sum = await w.exec.apply({ planId: 'p-1', itemIds: ['temp-user-aG9tZQ'], mode: 'delete-dir' });
+  assert.equal(sum.results[0].state, 'rejected-snapshot');
+  assert.match(sum.results[0].errnoText, /新增|修改/);
+});
+
+await checkAsync('ex-7 目录已消失 → rejected-snapshot（不是 failed，用户没做错事）', async () => {
+  const w = await seeded([PLAN_ITEM()]);
+  w.files.delete(PLAN_ITEM().path);
+  const sum = await w.exec.apply({ planId: 'p-1', itemIds: ['temp-user-aG9tZQ'], mode: 'delete-file' });
+  assert.equal(sum.results[0].state, 'rejected-snapshot');
+});
+
+await checkAsync('ex-8 EBUSY/EPERM/ENOTEMPTY → skipped 且只试一次（重试只会拉长锁定期）', async () => {
+  for (const errno of ['EBUSY', 'EPERM', 'ENOTEMPTY']) {
+    const w = await seeded([PLAN_ITEM()], { unlinkErrno: errno, rmErrno: errno });
+    const sum = await w.exec.apply({ planId: 'p-1', itemIds: ['temp-user-aG9tZQ'], mode: 'delete-file' });
+    assert.equal(sum.results[0].state, 'skipped', `${errno} 应判为 skipped`);
+    assert.match(sum.results[0].errnoText, new RegExp(errno));
+    assert.equal(sum.failed, 0);
+    assert.equal(sum.skipped, 1, `${errno}：循环到第二种 errno 时计数不得从上一轮继承（T15-H）`);
+  }
+});
+
+await checkAsync('ex-9 move-to-quarantine 走 quarantine.stash 并落 dest', async () => {
+  const w = await seeded([PLAN_ITEM()]);
+  const sum = await w.exec.apply({ planId: 'p-1', itemIds: ['temp-user-aG9tZQ'], mode: 'move-to-quarantine' });
+  assert.equal(sum.results[0].state, 'ok');
+  assert.match(sum.results[0].dest, /^Q\\/);
+});
+
+await checkAsync('ex-9b stash 返回 ok:false → skipped + 原因，且原件不得消失（T15-G：失败分支独立成例）', async () => {
+  const w = await seeded([PLAN_ITEM({ id: 'x-2', path: 'C:\\Users\\gongj\\AppData\\Local\\Temp\\b.log' })],
+    { quarantine: { stash: async () => ({ ok: false, dest: '', method: 'move', why: 'EPERM 被占用' }), ensureRoot: async () => 'Q' } });
+  const sum = await w.exec.apply({ planId: 'p-1', itemIds: ['x-2'], mode: 'move-to-quarantine' });
+  assert.equal(sum.results[0].state, 'skipped');
+  assert.match(sum.results[0].errnoText, /被占用/);
+  assert.equal(w.files.has('C:\\Users\\gongj\\AppData\\Local\\Temp\\b.log'), true, '隔离失败等于「什么都没做」，原件必须在');
+});
+
+await checkAsync('ex-10 realpath 落到受保护目录 → rejected-snapshot + guard 原因（junction 逃逸）', async () => {
+  const w = await seeded([PLAN_ITEM()]);
+  w.fsMod.realpathSync = () => 'C:\\Windows\\evil';
+  const sum = await w.exec.apply({ planId: 'p-1', itemIds: ['temp-user-aG9tZQ'], mode: 'delete-file' });
+  assert.equal(sum.results[0].state, 'rejected-snapshot');
+  assert.match(sum.results[0].errnoText, /GUARD|受保护/);
+});
+
+await checkAsync('ex-11 快照不存在 → 整批拒并留一条错误，不抛给 HTTP 层', async () => {
+  const w = await seeded([PLAN_ITEM()]);
+  const sum = await w.exec.apply({ planId: 'p-nope', itemIds: ['temp-user-aG9tZQ'], mode: 'delete-file' });
+  assert.equal(sum.error, 'SYSOPS_RECORDS_NOT_FOUND');
+  assert.equal(sum.results.length, 0);
+});
+
+await checkAsync('ex-12a 暂存目录配错（ensureRoot 抛）+ move 模式 → 整批拒、一个条目都不碰（T15-B：批次外层 catch）', async () => {
+  const w = await seeded([PLAN_ITEM()], {
+    quarantine: { ensureRoot: async () => { throw new Error('暂存目录落在被清理路径 C:\\Users\\gongj\\AppData\\Local\\Temp 内部'); }, stash: async () => ({ ok: true, dest: 'X', method: 'move', why: '' }) },
+  });
+  const sum = await w.exec.apply({ planId: 'p-1', itemIds: ['temp-user-aG9tZQ'], mode: 'move-to-quarantine' });
+  assert.equal(sum.error, 'SYSOPS_QUARANTINE_UNAVAILABLE');
+  assert.equal(sum.ok, 0);
+  assert.equal(sum.results.length, 0, '闸门之后一条都不该跑 —— 逐条 catch 会把「整批停」降级成「逐条失败」');
+  assert.equal(w.files.has(PLAN_ITEM().path), true, '源文件必须还完整存在');
+});
+
+await checkAsync('ex-12b 同一个配错的暂存目录，delete-file 模式不受牵连（闸门只管 move）', async () => {
+  const w = await seeded([PLAN_ITEM()], {
+    quarantine: { ensureRoot: async () => { throw new Error('暂存目录不合法'); }, stash: async () => ({ ok: true, dest: 'X', method: 'move', why: '' }) },
+  });
+  const sum = await w.exec.apply({ planId: 'p-1', itemIds: ['temp-user-aG9tZQ'], mode: 'delete-file' });
+  assert.equal(sum.error, undefined, '删除模式不该被暂存配置错拖死');
+  assert.equal(sum.ok, 1);
+});
+
+/* ⑤段：清理服务（一次只允许一个扫描；进度与完成事件汇给 api.js） */
+const CS = await import('../lib/clean/service.js');
+const { createPrefStore } = await import('../lib/prefs/store.js');
+const { createRuleStore } = await import('../lib/prefs/rules-store.js');
+
+function csWorld(over = {}) {
+  const events = [];
+  const execArgs = [];
+  const stoppedCalls = [];      // T15-F：cs-4 要断「stopScan 真转给了 scanner」，不能靠桩往 svc 上挂属性
+  const quarArgs = [];          // T15-A：makeQuarantine 收到的实参是这条红线唯一的可观测点
+  const facility = createMemoryFacility();
+  const prefStore = createPrefStore({ getFacility: () => facility, logger: { warn() {} }, now: () => 1000 });
+  const ruleStore = createRuleStore({ prefStore, logger: { warn() {} } });
+  const planStore = createPlanStore({ getFacility: () => facility, logger: { warn() {} }, now: () => 5000, newId: () => over.planId ?? 'p-1' });
+  const logStore = createLogStore({ getFacility: () => facility, logger: { warn() {} }, now: () => 8000 });
+  const scannerCalls = [];
+  let scanResolve = null;
+  const svc = CS.createCleanService({
+    ruleStore,
+    makeScanner: ({ onProgress }) => ({
+      scan: async (rules) => {
+        scannerCalls.push({ n: rules.length });
+        over.progress?.forEach(() => onProgress({ dir: 'x', walked: 1, hit: 0, bytes: 0 }));
+        await new Promise((r) => { scanResolve = r; setTimeout(r, 0); });
+        if (over.scanThrows) throw new Error('遍历炸了');
+        return over.scanResult ?? { items: [PLAN_ITEM()], totals: { n: 1, bytes: 1000 }, walked: 10, hit: 1, skipped: [], stopped: false, truncated: false, at: 5000 };
+      },
+      stop: () => { stoppedCalls.push(1); if (scanResolve) scanResolve(); },
+    }),
+    // T15-A：service 必须自己造 quarantine 并把 rootDir / forbiddenPrefixes 喂进去。
+    // 桩只记实参、返回一个够用的假对象，断言全部打在 quarArgs 上。
+    makeQuarantine: (a) => {
+      quarArgs.push(a);
+      return {
+        ensureRoot: async () => a.rootDir,
+        stash: async (p) => ({ ok: true, dest: 'Q\\' + p.split('\\').pop(), method: 'move', why: '' }),
+        stats: async () => ({ dirs: 2, files: 3, bytes: 38, oldest: '2026-09-26' }),
+      };
+    },
+    makeExecutor: ({ onEvent }) => ({
+      apply: async (args) => {
+        execArgs.push(args);
+        onEvent({ type: 'clean:item', id: args.itemIds[0], state: 'ok', errnoText: '', path: 'x' });
+        return over.summary ?? { planId: args.planId, logId: 'l-1', ok: 1, skipped: 0, failed: 0, rejected: 0, bytesFreed: 1000, beforeFree: 1, afterFree: 2, results: [] };
+      },
+    }),
+    planStore, logStore,
+    getPrefs: () => ({ clean: { after: over.after ?? 'log', keepDays: 7, ...(over.quarantineDir ? { quarantineDir: over.quarantineDir } : {}) } }),
+    fsMod: { statfsSync: () => ({ available: 60 * 2 ** 30 }) },
+    osMod: { homedir: () => 'C:\\Users\\gongj' },
+    pathMod: { join: (...a) => a.join('\\') },
+    logger: { warn: (m) => events.push({ type: 'log', m }) },
+    now: () => 5000,
+  });
+  svc.onEvent((e) => events.push(e));
+  return { svc, events, execArgs, scannerCalls, stoppedCalls, quarArgs, facility, planStore, logStore, ruleStore };
+}
+
+await checkAsync('cs-1 startScan → 事件流有 progress 与 done，state 落 ready 且带 planId', async () => {
+  const w = csWorld();
+  await w.svc.startScan();
+  assert.equal(w.svc.state().phase, 'ready');
+  assert.equal(w.svc.state().planId, 'p-1');
+  assert.ok(w.events.some((e) => e.type === 'clean:done'));
+});
+
+await checkAsync('cs-2 扫描期间再点「开始扫描」不并行（两条遍历抢 IO 且清单会互相覆盖）', async () => {
+  const w = csWorld({ progress: [null] });
+  const a = w.svc.startScan();
+  const b = await w.svc.startScan();
+  assert.equal(b.busy, true, '第二次要给出忙碌回执');
+  await a;
+  assert.equal(w.scannerCalls.length, 1);
+});
+
+await checkAsync('cs-3 扫描抛错：clean:error 可见 + state.phase 回 idle + error 有文案（不静默）', async () => {
+  const w = csWorld({ scanThrows: true });
+  await w.svc.startScan();
+  assert.ok(w.events.some((e) => e.type === 'clean:error' && /遍历炸了/.test(e.error)));
+  assert.equal(w.svc.state().phase, 'idle');
+  assert.match(w.svc.state().error, /遍历炸了/);
+});
+
+await checkAsync('cs-4 stopScan 转成 scanner.stop()，state.stopped 标出（清单仍可查看已发现部分）', async () => {
+  const w = csWorld();
+  const p = w.svc.startScan();
+  w.svc.stopScan();
+  await p;
+  // T15-F：断的是「真转给了 scanner」+「Task 22 渲染用的 state().stopped」，
+  // 原稿断的 svc.__stopped 是桩自己挂上去的属性，跟 service 的 state 没半点关系。
+  assert.equal(w.stoppedCalls.length, 1);
+  assert.equal(w.svc.state().stopped, true);
+});
+
+await checkAsync('cs-5 apply 只把 planId+itemIds+mode 交给 executor，前端带来的路径字段一概不转', async () => {
+  const w = csWorld();
+  await w.svc.startScan();
+  await w.svc.apply({ planId: 'p-1', itemIds: ['temp-user-aG9tZQ'], mode: 'delete-file', path: 'C:\\Windows\\x', paths: ['C:\\Windows'] });
+  assert.equal(w.execArgs.length, 1);
+  assert.deepEqual(Object.keys(w.execArgs[0]).sort(), ['itemIds', 'mode', 'planId']);
+});
+
+await checkAsync('cs-6 after=log 时带执行后可用容量并通知采集重读；after=none 两者都不做', async () => {
+  const a = csWorld({ after: 'log' });
+  await a.svc.startScan();
+  const s1 = await a.svc.apply({ planId: 'p-1', itemIds: ['temp-user-aG9tZQ'], mode: 'delete-file' });
+  assert.equal(s1.afterFree, 60 * 2 ** 30, 'after=log 时用 statfsSync 现读（world 里给的是 60GB）');
+  assert.ok(a.events.some((e) => e.type === 'collect:refresh'), 'after=log 要推一次曲线刷新');
+  const b = csWorld({ after: 'none' });
+  await b.svc.startScan();
+  const s2 = await b.svc.apply({ planId: 'p-1', itemIds: ['temp-user-aG9tZQ'], mode: 'delete-file' });
+  assert.equal(s2.afterFree, 2, 'after=none 不现读，沿用执行器汇总里的值');
+  assert.ok(b.events.some((e) => e.type === 'clean:summary'), '留痕与汇总恒定写（spec §7）');
+  assert.ok(!b.events.some((e) => e.type === 'collect:refresh'));
+});
+
+await checkAsync('cs-7 unfinished() 透出未确认完成的留痕（重启后界面提示指向它）', async () => {
+  const w = csWorld();
+  await w.logStore.start({ planId: 'p-0', itemIds: ['a'], mode: 'delete-file' });
+  const rows = await w.svc.unfinished();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].planId, 'p-0');
+});
+
+await checkAsync('cs-8 makeQuarantine 收到 prefs 的 quarantineDir 与「当前 active rules 的 dir 集」—— Task 14 那条红线的唯一真实喂入者（T15-A）', async () => {
+  const qd = 'C:\\Users\\gongj\\AppData\\Local\\dsh-plugin-sysops\\quarantine';
+  const w = csWorld({ quarantineDir: qd });
+  const s = await w.svc.quarantineStats();
+  assert.deepEqual(s, { dirs: 2, files: 3, bytes: 38, oldest: '2026-09-26' }, 'stats() 原样透出，界面才有 keepDays 到期提醒的数据');
+  assert.equal(w.quarArgs.length, 1);
+  assert.equal(w.quarArgs[0].rootDir, qd, 'prefs 设了就必须用 prefs 的');
+  const rules = await w.ruleStore.activeRules();
+  assert.deepEqual(w.quarArgs[0].forbiddenPrefixes, rules.map((r) => r.dir), '被清理路径集必须来自 activeRules()，写死一份等于两处口径');
+  assert.ok(w.quarArgs[0].forbiddenPrefixes.length > 0, '内置库有 10 条 active，空集就是没喂');
+  // 口径单点的证据：默认关的两条不在 activeRules 里 ⇒ 也不该出现在 forbidden 集里。
+  // 只断 `rules.map(r=>r.dir)` 与本表达式相等是套套逻辑，这一条才是「两处口径」的抓网。
+  const { BUILTIN_RULES, DEFAULT_OFF } = QruleMod;
+  assert.equal(w.quarArgs[0].forbiddenPrefixes.length, BUILTIN_RULES.length - DEFAULT_OFF.length);
+});
+
+await checkAsync('cs-9 prefs 没设 quarantineDir 时回落到 %LOCALAPPDATA% 下的内置默认（界面与执行器不能两套默认）', async () => {
+  const w = csWorld();                       // getPrefs 里没有 quarantineDir
+  await w.svc.quarantineStats();
+  // QUAR_ROOT 与 csWorld 的 homedir('C:\\Users\\gongj') 拼出来的回落值同源：都走 DEFAULT_QUARANTINE
+  assert.equal(w.quarArgs[0].rootDir, QU.DEFAULT_QUARANTINE('C:\\Users\\gongj\\AppData\\Local'));
 });
 
 console.log(`\n  ${passed}/${passed + failed} 通过`);
