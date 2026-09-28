@@ -371,6 +371,102 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
     ];
 
     // ------------------------------------------------------------
+    // 2b) 监控页视图助手（纯函数；经 __test.monitor 暴露，测的就是跑的这份）
+    // ------------------------------------------------------------
+    const peak = (pts) => { const a = (pts || []).map((p) => num(p && p.v)).filter((v) => v !== null); return a.length ? Math.max(...a) : null; };
+
+    /** warn/crit 分档。边界值归 warn：85 是"≥ 才触发"的阈值，进度条不该在等于阈值时就报红。 */
+    function band(v, warn, crit) { const x = num(v); if (x === null) return ''; if (x > crit) return 'crit'; if (x > warn) return 'warn'; return ''; }
+
+    /** 四指标行：顺序与 n 逐字固定（pg1-1）；快照没有的数字不显示、更不硬算（pg1-4）。 */
+    function mtrRows(snap) {
+      const l = (snap && snap.latest) || {};
+      const s = (snap && snap.series) || {};
+      const cpu = num(l.cpu), mem = num(l.mem);
+      const total = num(l.diskTotalGb), free = num(l.diskFreeGb);
+      const usedPct = total && free !== null ? Math.round((1 - free / total) * 1000) / 10 : null;
+      return [
+        { key: 'cpu', n: 'CPU 使用率', v: cpu === null ? '—' : cpu.toFixed(0), u: '%',
+          c: `档位 ${snap.cadence} · 峰值 ${fmtPct(peak(s.cpu), 0)} · 阈值线 85%`, pct: cpu, cls: band(cpu, 70, 85) },
+        { key: 'mem', n: '内存', v: mem === null ? '—' : mem.toFixed(1), u: '%',
+          c: `峰值 ${fmtPct(peak(s.mem), 0)} · 保留 ${snap.keepMinutes}min`, pct: mem, cls: band(mem, 75, 85) },
+        { key: 'disk', n: 'C 盘可用', v: free === null ? '—' : free.toFixed(1), u: 'GB',
+          c: usedPct === null ? '总容量未知（statfs 未返回）' : `已用 ${usedPct.toFixed(1)}% · 总 ${total.toFixed(1)} GB`,
+          pct: usedPct, cls: usedPct === null ? '' : band(usedPct, 85, 92) },
+        { key: 'net', n: '网络吞吐', v: fmtRate(num(l.netDown)).split(' ')[0], u: 'MB/s',
+          c: `下行 · 上行 ${fmtRate(num(l.netUp))}`, pct: null, cls: '' },
+      ];
+    }
+
+    /** 曲线画布口径照原型 drawCurve：W=340 / H=92 / pad=3，阈值虚线。 */
+    const CHART_W = 340, CHART_H = 92, CHART_PAD = 3;
+
+    /** 四张曲线卡的静态定义：颜色与阈值口径照原型，数值一律运行时从快照取（pg1-15）。 */
+    const CHART_DEFS = {
+      cpu: { label: 'CPU 使用率', threshold: 85, color: 'var(--so-t1)' },
+      mem: { label: '内存占用率', color: 'var(--so-blue)' },
+      netDown: { label: '网络吞吐', second: 'netUp', color: 'var(--so-t1)', secondColor: 'var(--so-t3)' },
+      diskFreePct: { label: 'C 盘空闲占比', thresholdGb: 32, color: 'var(--so-amber)' },
+    };
+
+    /**
+     * 单卡曲线规格：points/max/threshold/color（喂 sparkPoints）。
+     * C 盘卡的 thresholdGb=32 换算到「空闲占比」轴上；总容量未知就不画线（pg1-8）。
+     */
+    function curveSpec(snap, key) {
+      const def = CHART_DEFS[key] || {};
+      const s = (snap && snap.series) || {};
+      const l = (snap && snap.latest) || {};
+      const points = Array.isArray(s[key]) ? s[key] : [];
+      let threshold = num(def.threshold);
+      const thresholdGb = num(def.thresholdGb);
+      if (thresholdGb !== null) {
+        const total = num(l.diskTotalGb);
+        threshold = total ? Math.round((thresholdGb / total) * 1000) / 10 : null;
+      }
+      const pk = peak(points);
+      const max = pk === null ? null : Math.max(pk, threshold || 0, 1);
+      return { key, label: def.label || key, points, max, threshold, thresholdGb, color: def.color || 'var(--so-t1)' };
+    }
+
+    /** 折线坐标串（SVG polyline 的 points 属性）；无有效点返回 null，由卡面标空态。 */
+    function sparkPoints(points, max, W = CHART_W, H = CHART_H, pad = CHART_PAD) {
+      const vals = (points || []).map((p) => num(p && p.v)).filter((v) => v !== null);
+      const m = num(max);
+      if (!vals.length || m === null) return null;
+      const n = vals.length;
+      return vals.map((v, i) => {
+        const x = n === 1 ? W - pad : pad + (i * (W - pad * 2)) / (n - 1);
+        const y = H - pad - (v / m) * (H - pad * 2);
+        return x.toFixed(1) + ',' + y.toFixed(1);
+      }).join(' ');
+    }
+
+    /**
+     * 采集源条：每源一格，四分清文案经 sourcePill；exited-max 把 stderr 尾巴
+     * （≤400 字符）并进 detail 给人看（pg1-6）。link 非 sse 时尾部如实追加一格（pg1-14）。
+     */
+    function srcCells(snap, link) {
+      const rows = Array.isArray(snap && snap.sources) ? snap.sources : [];
+      const cells = rows.map((row) => {
+        const p = sourcePill(row);
+        let detail = String(row.detail || '');
+        if (p.retryOnly && row.stderrTail) {
+          detail = (detail ? detail + ' · ' : '') + String(row.stderrTail).slice(0, 400);
+        } else if (p.note) {
+          detail = (detail ? detail + ' · ' : '') + p.note;
+        }
+        const cell = { key: row.key, name: row.label || row.key, state: row.state, detail, cls: p.cls, pill: p.pill };
+        if (p.retryOnly) cell.retryOnly = true;
+        return cell;
+      });
+      if (link && link !== 'sse') {
+        cells.push({ key: '__link', name: '推送通道', state: link, detail: '', cls: 'so-pill-amber', pill: link === 'reconnecting' ? '重连中' : '降级：轮询 2s' });
+      }
+      return cells;
+    }
+
+    // ------------------------------------------------------------
     // 3) 基础组件（自研控件，无原生弹层）
     // ------------------------------------------------------------
     const Pill = ({ cls = '', children }) => h('span', { className: ('so-pill ' + cls).trim() }, children);
@@ -436,21 +532,192 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
 
     // ------------------------------------------------------------
     // 4) 四个页签组件
-    //    本任务先交能跑的骨架（Task 21~24 逐个换实现，导出名不动）：
-    //    Monitor=空态卡 / Clean=扫描按钮（禁用+原因）/ Search=搜索框 / Settings=表单壳
+    //    Monitor=完整实现（Task 21）；Clean/Search/Settings 仍是可跑骨架，
+    //    Task 22~24 逐个换实现，导出名不动。
     // ------------------------------------------------------------
 
-    function MonitorPage({ snap, link } = {}) {
-      // Task 20 骨架：只画四张指标卡的空态；Task 21 换成完整实现（名字与 props 不变）。
-      const heads = ['CPU 使用率', '内存', 'C 盘可用', '网络吞吐'];
+    /**
+     * 监控页（Task 21 完整实现）：**自身零 useState** —— 快照、link、档位都在
+     * SysopsPage 的连接层里，本组件只吃 props；换页/重采不打断这里的渲染。
+     * 三个 useRef 只给「新建规则」输入框读值用，每次渲染顺序固定。
+     */
+    function MonitorPage({ snap, link, err, onSource, onRuleToggle, onRuleAdd, onRestart, onProcToggle } = {}) {
+      const vRef = useRef(null);
+      const cRef = useRef(null);
+      const kRef = useRef(null);
+
+      /** 采集源条：一格一源，点按钮只发意图（开/重试），裁决全在服务端。 */
+      function srcStrip(cells) {
+        return h('div', { className: 'so-srcs' }, cells.map((c) => {
+          const bad = ['stalled', 'crashed', 'exited-max'].indexOf(c.state) >= 0;
+          const dim = c.key === '__link' || c.state === 'off' || c.state === 'unavailable';
+          return h('span', { className: 'so-src' + (bad ? ' is-bad' : dim ? ' is-off' : ''), key: c.key },
+            h('span', { className: 'so-dot' }),
+            c.name, ' ',
+            h(Pill, { cls: c.cls }, c.pill),
+            c.detail ? h('span', { className: 'so-hint so-num' }, c.detail) : null,
+            (c.retryOnly || c.state === 'crashed') && c.key !== '__link'
+              ? h('button', { type: 'button', className: 'so-btn so-btn-sm so-btn-quiet', onClick: () => onRestart && onRestart(c.key) }, '重试')
+              : null,
+            c.state === 'off' && c.key !== '__link'
+              ? h('button', { type: 'button', className: 'so-btn so-btn-sm so-btn-quiet', onClick: () => onSource && onSource(c.key, true) }, '开启')
+              : null);
+        }));
+      }
+
+      /** 首帧未到：四张骨架卡 + 「等待首帧数据」，数值位全破折号，绝不 NaN（pg1-16）。 */
+      if (!snap) {
+        return h('div', { className: 'so-tabpanel' },
+          h('div', { className: 'so-mtr-strip' }, ['CPU 使用率', '内存', 'C 盘可用', '网络吞吐'].map((n) => h('div', { className: 'so-mtr', key: n },
+            h('div', { className: 'so-n' }, n),
+            h('div', { className: 'so-v so-num' }, '—'),
+            h('div', { className: 'so-skel' })))),
+          h('div', { className: 'so-card' }, h('div', { className: 'so-card-b' },
+            h('div', { className: 'so-empty' }, '等待首帧数据：连上本机接口后这里会出现真实曲线。'))),
+          srcStrip(srcCells({ sources: [] }, link)));
+      }
+
+      const rows = mtrRows(snap);
+      const l = snap.latest || {};
+      const s = snap.series || {};
+      const alerts = snap.alerts || {};
+      const rules = Array.isArray(alerts.rules) ? alerts.rules : [];
+      const hits = Array.isArray(alerts.hits) ? alerts.hits : [];
+      const proc = snap.proc || { rows: [], state: 'off', note: '' };
+      const procRows = (Array.isArray(proc.rows) ? proc.rows.slice() : []).sort((a, b) => (num(b.cpuPct) || 0) - (num(a.cpuPct) || 0));
+      const labelOf = {};
+      (Array.isArray(snap.sources) ? snap.sources : []).forEach((r0) => { labelOf[r0.key] = r0.label || r0.key; });
+
+      // 脏点丢弃要报数但不挡曲线（pg1-7）：只列真实计数，不编原因
+      const dr = snap.dropped || {};
+      const dropParts = [];
+      if ((num(dr.bad) || 0) > 0) dropParts.push(`丢弃 ${dr.bad} 个异常点`);
+      if ((num(dr.stale) || 0) > 0) dropParts.push(`乱序 ${dr.stale}`);
+
+      // 四张曲线卡：cpu / mem / 网络（下行主线 + 上行灰线）/ C 盘空闲占比
+      const chartCards = ['cpu', 'mem', 'netDown', 'diskFreePct'].map((k) => {
+        const def = CHART_DEFS[k] || {};
+        const spec = curveSpec(snap, k);
+        let max = spec.max;
+        let line2 = null;
+        if (def.second) {
+          const up = curveSpec(snap, def.second);
+          max = max === null ? up.max : (up.max === null ? max : Math.max(max, up.max));
+          const p2 = sparkPoints(up.points, max);
+          if (p2) line2 = { points: p2, color: def.secondColor || 'var(--so-t3)' };
+        }
+        const line1 = sparkPoints(spec.points, max);
+        const thY = spec.threshold !== null && num(max) !== null
+          ? (CHART_H - CHART_PAD - (spec.threshold / max) * (CHART_H - CHART_PAD * 2)).toFixed(1)
+          : null;
+        let value = '—';
+        let note = `最近 ${snap.keepMinutes}min`;
+        if (k === 'cpu') { value = rows[0].v + rows[0].u; note = `阈值线 85% · 峰值 ${fmtPct(peak(s.cpu), 0)}`; }
+        if (k === 'mem') { value = rows[1].v + rows[1].u; note = `峰值 ${fmtPct(peak(s.mem), 0)} · 保留 ${snap.keepMinutes}min`; }
+        if (k === 'netDown') { value = rows[3].v + ' ' + rows[3].u; note = `下行主线 · 上行 ${fmtRate(num(l.netUp))}`; }
+        if (k === 'diskFreePct') {
+          value = rows[2].v + ' ' + rows[2].u;
+          note = spec.thresholdGb === null ? '阈值缺失' : `红线 = ${spec.thresholdGb} GB 空闲水位` + (spec.threshold !== null ? `（≈ ${spec.threshold}%）` : '（总容量未知，不画线）');
+        }
+        return h('div', { className: 'so-card', key: k },
+          h('div', { className: 'so-card-b' },
+            h('div', { className: 'so-curve-cap' }, h('h3', null, `${spec.label} · 最近 ${snap.keepMinutes} 分钟`), h('span', { className: 'so-grow so-num' }, note)),
+            h('div', { className: 'so-curve-v so-num' }, value),
+            h('svg', { className: 'so-spark', viewBox: `0 0 ${CHART_W} ${CHART_H}`, preserveAspectRatio: 'none', style: { height: CHART_H + 'px' } },
+              [1, 2, 3].map((q) => h('line', { key: 'g' + q, x1: 0, y1: (CHART_H * q) / 4, x2: CHART_W, y2: (CHART_H * q) / 4, stroke: 'var(--so-bd)', strokeWidth: 1 })),
+              thY !== null ? h('line', { key: 'th', x1: 0, y1: thY, x2: CHART_W, y2: thY, stroke: 'var(--so-up)', strokeWidth: 1, strokeDasharray: '3 3', opacity: 0.55 }) : null,
+              line1 ? h('polyline', { key: 'p', points: line1, fill: 'none', stroke: spec.color, strokeWidth: 1.6, strokeLinejoin: 'round' }) : h('span', { key: 'e', className: 'so-hint' }, '暂无采样'),
+              line2 ? h('polyline', { key: 'p2', points: line2.points, fill: 'none', stroke: line2.color, strokeWidth: 1.4 }) : null)));
+      });
+
+      // 规则行：置灰只吃宿主算好的 st 三态，页面绝不自己比 source.state（pg1-11）
+      const ruleRows = rules.map((row) => {
+        const rl = (row && row.rule) || {};
+        const st = (row && row.st) || {};
+        return h('div', { className: 'so-rule', key: rl.id },
+          h('div', { className: 'so-ri' },
+            h('div', { className: 'so-rn' }, rl.n || rl.name || rl.id),
+            h('div', { className: 'so-rd' }, rl.d || `依赖 ${labelOf[rl.dep] || rl.dep || '本机采集'}`)),
+          h('span', { className: 'so-rt' + (st.dim ? ' so-rule-dim' : '') }, st.st || ''),
+          h(Switch, {
+            on: st.on === true, disabled: st.dim === true,
+            label: st.on ? '停用规则' : '启用规则',
+            onChange: (next) => onRuleToggle && onRuleToggle(rl.id, next),
+          }));
+      });
+
+      const readVal = (ref, dft) => { const x = ref && ref.current ? Number(ref.current.value) : NaN; const v = num(x); return v === null || v <= 0 ? dft : v; };
+      const saveRule = () => {
+        if (!onRuleAdd) return;
+        onRuleAdd({ metric: 'cpu', value: readVal(vRef, 85), consecutive: readVal(cRef, 3), cooldownSec: Math.max(60, readVal(kRef, 10) * 60) });
+      };
+
+      const hitText = (hh) => {
+        if (hh.kind === 'op') return hh.text || hh.note || '';
+        const name = hh.ruleName || hh.name || (hh.rule && hh.rule.n) || '';
+        const v = num(hh.value);
+        const vs = v === null ? '' : (hh.metric === 'netDown' || hh.metric === 'netUp' ? fmtRate(v) : `${v}%`);
+        return `${name}：${vs}${hh.note ? '（' + hh.note + '）' : ''}`;
+      };
+
+      const procBody = proc.state === 'on' && procRows.length
+        ? h('div', null,
+            h('div', { className: 'so-tblwrap' },
+              h('table', { className: 'so-tbl' },
+                h('thead', null, h('tr', null,
+                  h('th', null, '进程'), h('th', { className: 'so-r' }, 'PID'), h('th', { className: 'so-r' }, 'CPU%'), h('th', { className: 'so-r' }, '内存'), h('th', null, '来源'))),
+                h('tbody', null, procRows.map((p) => h('tr', { key: p.pid },
+                  h('td', { className: 'so-tr-name' }, String(p.name ?? p.pid)),
+                  h('td', { className: 'so-r so-num' }, String(p.pid ?? '—')),
+                  h('td', { className: 'so-r so-num', style: { fontWeight: (num(p.cpuPct) || 0) > 15 ? 600 : 400 } }, num(p.cpuPct) === null ? '—' : p.cpuPct.toFixed(1)),
+                  h('td', { className: 'so-r so-num' }, fmtBytes(p.ws)),
+                  h('td', null, h(Pill, { cls: 'so-pill-line' }, 'Win32_Process'))))))),
+            proc.note ? h('div', { className: 'so-tbl-note so-num' }, proc.note) : null,
+            h('div', { className: 'so-notice so-notice-gray' },
+              h('span', null, '只读榜：本插件不提供「结束进程」。要结束请在任务管理器自己做——误杀系统进程不该由一个监控面板代劳。')))
+        : h('div', { className: 'so-empty' },
+            '进程榜采集未开启。',
+            h('div', { className: 'so-hint' }, '单次 Get-CimInstance Win32_Process 实测 640ms，按 5s 刷新会持续占用约一个核心的 13%，所以默认关；本页展开进程榜时会自动开启。'),
+            h('button', { type: 'button', className: 'so-btn so-btn-sm', style: { marginTop: 10 }, onClick: () => onProcToggle && onProcToggle(true) }, '现在开启'));
+
       return h('div', { className: 'so-tabpanel' },
-        h('div', { className: 'so-mtr-strip' }, heads.map((n) => h('div', { className: 'so-mtr', key: n },
-          h('div', { className: 'so-n' }, n),
-          h('div', { className: 'so-v so-num' }, '—')))),
-        snap ? null : h('div', { className: 'so-card' }, h('div', { className: 'so-card-b' },
-          h('div', { className: 'so-empty' }, '等待首帧数据：连上本机接口后这里会出现真实曲线。'))),
-        link && link !== 'sse' ? h('div', { className: 'so-srcs' }, h('span', { className: 'so-src' },
-          h(Pill, { cls: 'so-pill-gray' }, link === 'reconnecting' ? '重连中' : '降级：轮询 2s'))) : null);
+        err ? h(Notice, { tone: 'amber' }, `接口异常（${err.code || 'UNKNOWN'}）：${err.message || '未知错误'}`) : null,
+        h('div', { className: 'so-mtr-strip' }, rows.map((r) => h('div', { className: 'so-mtr', key: r.key },
+          h('div', { className: 'so-n' }, r.n),
+          h('div', { className: 'so-v so-num' }, r.v, h('small', null, r.u)),
+          h('div', { className: 'so-c so-num' }, r.c),
+          r.pct === null ? null : h('div', { className: 'so-track' + (r.cls ? ' is-' + r.cls : '') },
+            h('i', { style: { width: Math.max(0, Math.min(100, r.pct)) + '%' } }))))),
+        srcStrip(srcCells(snap, link)),
+        dropParts.length ? h('div', { className: 'so-hint', style: { marginTop: 8 } }, dropParts.join(' · ')) : null,
+        h('div', { className: 'so-charts' }, chartCards),
+        h('div', { className: 'so-card' },
+          h('div', { className: 'so-card-h' }, h('h2', null, '进程占用榜'), h('span', { className: 'so-hsub' }, '按 PowerShell 周期采集，开销较高，默认关闭')),
+          h('div', { className: 'so-card-b' }, procBody)),
+        h('div', { className: 'so-card' },
+          h('div', { className: 'so-card-h' }, h('h2', null, '阈值告警'), h('span', { className: 'so-hsub' }, '触发只在页面内落时间线，不弹系统浮层')),
+          rules.length ? h('div', null, ruleRows) : h('div', { className: 'so-card-b' }, h('div', { className: 'so-empty' }, '还没有告警规则：在下方新建一条。')),
+          h('div', { className: 'so-card-b' },
+            h('div', { className: 'so-grid so-g-2' },
+              h('div', { className: 'so-field' }, h('label', null, '指标'), h('input', { className: 'so-input', type: 'text', defaultValue: 'CPU 使用率', readOnly: true })),
+              h('div', { className: 'so-field' }, h('label', null, '阈值 / 持续'),
+                h('input', { ref: vRef, className: 'so-input so-num', type: 'text', defaultValue: '85', style: { width: 64 } }), ' % · 连续',
+                h('input', { ref: cRef, className: 'so-input so-num', type: 'text', defaultValue: '3', style: { width: 48 } }), ' 次'),
+              h('div', { className: 'so-field' }, h('label', null, '冷却'),
+                h('input', { ref: kRef, className: 'so-input so-num', type: 'text', defaultValue: '10', style: { width: 64 } }), ' 分钟内不重复'),
+              h('div', { className: 'so-field' }, h('label', null, '提示落点'), h('input', { className: 'so-input', type: 'text', defaultValue: '监控页时间线 + 侧边栏蓝点', readOnly: true }))),
+            h('div', { style: { marginTop: 10, display: 'flex', gap: 8, alignItems: 'center' } },
+              h('button', { type: 'button', className: 'so-btn so-btn-primary so-btn-sm', onClick: saveRule }, '保存规则'),
+              h('span', { className: 'so-hint' }, '新建规则会插入列表首位，并写入下方触发记录。')))),
+        h('div', { className: 'so-card' },
+          h('div', { className: 'so-card-h' }, h('h2', null, '触发记录'), h('span', { className: 'so-hsub' }, '本机保留最近 200 条'),
+            h('span', { className: 'so-grow so-hint so-num' }, `${hits.length} 条`)),
+          h('div', { className: 'so-card-b' }, hits.length
+            ? h('div', { className: 'so-tl so-timeline' }, hits.map((hh, i) => h('div', {
+                className: 'so-tl-item ' + (hh.kind === 'op' ? 'so-tl-op' : 'so-tl-hit'), key: String(hh.hitId || (hh.t || i)) },
+                h('div', { className: 'so-tt so-num' }, fmtAge(Math.max(0, Date.now() - (num(hh.t) || Date.now())))),
+                h('div', { className: 'so-tx' }, hitText(hh)))))
+            : h('div', { className: 'so-empty' }, '本机还没有触发记录：规则命中后会出现在这里。'))));
     }
 
     function CleanPage() {
@@ -727,7 +994,8 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
      * 测试专用出口（页面代码本身也从这里取，杜绝"测的是一份、跑的是另一份"）。
      * monitor 键在 Task 21 追加，其余键名自此不动。
      */
-    exports.__test = { cfg, consumeSse, api, fmtBytes, fmtRate, fmtPct, fmtAge, stateClass, sourcePill, nav, pages };
+    exports.__test = { cfg, consumeSse, api, fmtBytes, fmtRate, fmtPct, fmtAge, stateClass, sourcePill, nav, pages,
+      monitor: { MonitorPage, mtrRows, srcCells, curveSpec, band, sparkPoints } };
     return module.exports;
   },
 });

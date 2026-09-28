@@ -15,7 +15,13 @@ export function makeStubReact() {
     __skip: SKIP,
     __reset() { cursor = 0; forced = []; },
     __force(...vals) { forced = vals.slice(); },
-    createElement(type, props, ...children) { return { type, props: props || {}, children }; },
+    createElement(type, props, ...children) {
+      // 真 React 会把 children 并进 props.children —— 桩必须同形，否则函数组件
+      // （Pill/Notice 这类吃 children 的）在测试里拿到 undefined，与跑的那份分叉。
+      const p = props ? { ...props } : {};
+      if (children.length) p.children = children.length === 1 ? children[0] : children;
+      return { type, props: p, children };
+    },
     useState(init) {
       const own = () => (typeof init === 'function' ? init() : init);
       let v = own();
@@ -59,7 +65,12 @@ export function walk(node, out = newOut(), depth = 0) {
     });
   }
   if (typeof node.type === 'function') walk(node.type(props), out, depth + 1);
-  else walk(props.children, out, depth + 1);
+  else {
+    // 桩 createElement 把子节点存进 node.children（真 React 会并进 props.children）——
+    // 优先按 children 数组下钻，取不到再退回 props.children，两种写法都遍历得到。
+    const kids = Array.isArray(node.children) ? node.children : [props.children];
+    for (const k of kids) walk(k, out, depth + 1);
+  }
   return out;
 }
 
