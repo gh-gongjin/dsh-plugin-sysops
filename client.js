@@ -875,8 +875,10 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
     }
 
     /**
-     * 清理规则行读数：pill 只分内置/本机；blocked 只看服务端有没有给 guardDenied 键（页面不做任何路径裁决）；
+     * 清理规则行读数：blocked 只看服务端有没有给 guardDenied 键（页面不做任何路径裁决）；
      * denyWhy 原样透传宿主 `guardDenied.why`，命中红线的行为由界面置灰 + 禁用开关（与原型 renderCleanRules 同行为）。
+     * pill 只渲染宿主给的 `builtin` 标记（Ruling-106：内置/本机由宿主 BUILTIN_RULES id 集合单点裁决）：
+     * 宿主没给标记（undefined）就**不画 pill** —— 不许按 id 前缀/白名单自判，也不许回落成「本机」骗人。
      */
     function ruleCells(rules) {
       const arr = Array.isArray(rules) ? rules : [];
@@ -889,7 +891,7 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
           glob: String(row.glob ?? ''),
           ageText: ageDays === null ? '—' : (ageDays <= 0 ? '当天' : `${ageDays} 天未访问`),
           kind: String(row.kind ?? ''),
-          pill: row.builtin === true ? '内置' : '本机',
+          pill: row.builtin === true ? '内置' : (row.builtin === false ? '本机' : ''),
           blocked: Boolean(gd),
           on: row.enabled === true,
           denyWhy: gd ? String(gd.why ?? gd.code ?? '') : '',
@@ -1532,6 +1534,16 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
       const esVal = String(search.esPath ?? '');
 
       const readNum = (ref, dft) => { const x = ref && ref.current ? Number(ref.current.value) : NaN; const v = num(x); return v === null || v < 0 ? dft : v; };
+      // 搜索通路保存（brief 任务24 :170）：把两个字段的现值交给容器 onSave，由容器走读-并-写（Ruling-105）。
+      // 没填的字段（真实浏览器里 defaultValue 会预填现值；测试/异常态 ref 为空）不上报 —— 服务端现值原样保留。
+      const saveSearch = () => {
+        if (!onSave) return;
+        const f = {};
+        const pv = portRef.current && portRef.current.value !== undefined && portRef.current.value !== null ? String(portRef.current.value).trim() : '';
+        if (pv !== '') f.port = pv;
+        if (esRef.current && esRef.current.value !== undefined && esRef.current.value !== null) f.esPath = String(esRef.current.value);
+        onSave(f);
+      };
       const saveRule = () => {
         if (!onRuleAdd) return;
         onRuleAdd({
@@ -1556,7 +1568,7 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
               r.switch === null
                 ? h('span', { className: 'so-hint' }, '档位由监控页控制')
                 : h(Switch, { on: r.switch.on, disabled: r.switch.disabled, label: `切换 ${r.name}`,
-                    onChange: (next) => onPatch && onPatch(patchBody({ sources: { [r.key]: next } })) }))),
+                    onChange: (next) => onPatch && onPatch({ sources: { [r.key]: next } }) }))),
             alertRules.length ? h('div', { style: { marginTop: 10 } },
               h('div', { className: 'so-hint' }, '依赖本机采集的告警规则：'),
               alertRules.map((row) => {
@@ -1583,7 +1595,7 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
               return h('div', { key: String(rid ?? i), className: 'so-rule' + (c.blocked ? ' so-rule-dim' : '') },
                 h('div', { className: 'so-ri' },
                   h('div', { className: 'so-rn' }, c.n,
-                    h(Pill, { cls: c.pill === '内置' ? 'so-pill-gray' : 'so-pill-blue' }, c.pill),
+                    c.pill === '' ? null : h(Pill, { cls: c.pill === '内置' ? 'so-pill-gray' : 'so-pill-blue' }, c.pill),
                     c.blocked ? h(Pill, { cls: 'so-pill-up' }, '已被 guard 拒绝') : null),
                   h('div', { className: 'so-rd so-path' }, c.glob),
                   c.denyWhy ? h('div', { className: 'so-hint' }, c.denyWhy) : null),
@@ -1622,7 +1634,7 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
                 h('span', { className: 'so-num' }, `${keepDays === null ? '—' : keepDays} 天（到期提醒，不自动删）`))),
             h('div', { className: 'so-field', style: { marginTop: 10 } }, h('label', null, '清理后动作'),
               h(Seg, { options: [{ v: 'none', t: '什么都不做' }, { v: 'log', t: '写一条留痕并刷新曲线' }], value: after,
-                onChange: (v) => onPatch && onPatch(patchBody({ clean: { after: v } })) })),
+                onChange: (v) => onPatch && onPatch({ clean: { after: v } }) })),
             h('div', { className: 'so-hint', style: { marginTop: 8 } }, '到期只提醒、不自动删：暂存件由你手动清空，插件不会替你删。'))),
         // —— 搜索通路：两字段（生效值 prefs.search，占位回落 defaults）+ 诚实降级说明 ——
         h('div', { className: 'so-card' },
@@ -1630,10 +1642,10 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
           h('div', { className: 'so-card-b' },
             h('div', { className: 'so-grid so-g-2' },
               h('div', { className: 'so-field' }, h('label', null, 'HTTP 端口'),
-                h('input', { ref: portRef, className: 'so-input so-num', type: 'text',
+                h('input', { ref: portRef, className: 'so-input so-num', type: 'text', disabled: save.disabled,
                   defaultValue: portVal === null ? '' : String(portVal), placeholder: dfltPort === null ? '—' : String(dfltPort) })),
               h('div', { className: 'so-field' }, h('label', null, 'es.exe 路径'),
-                h('input', { ref: esRef, className: 'so-input so-input-mono', type: 'text', defaultValue: esVal, placeholder: '（留空 = 用 PATH）' }))),
+                h('input', { ref: esRef, className: 'so-input so-input-mono', type: 'text', disabled: save.disabled, defaultValue: esVal, placeholder: '（留空 = 用 PATH）' }))),
             h(Notice, { tone: 'gray' },
               '两条通路都探不到时自动降级为「限定目录」模式，并在搜索页顶部写明覆盖范围 —— 与股票插件「东财不通就标腾讯」是同一套诚实降级，不静默换源、不拿旧结果冒充。'))),
         // —— 宿主能力探测：五行只报事实，一律不给开关 ——
@@ -1649,7 +1661,7 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
         // —— 保存闸门：禁用一定伴随可见原因（不允许只变灰） ——
         h('div', { className: 'so-card' },
           h('div', { className: 'so-card-b', style: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' } },
-            h('button', { type: 'button', className: 'so-btn so-btn-primary', disabled: save.disabled, onClick: () => onSave && onSave() }, '保存设置'),
+            h('button', { type: 'button', className: 'so-btn so-btn-primary', disabled: save.disabled, onClick: saveSearch }, '保存设置'),
             h('span', { className: 'so-hint' }, save.disabled ? save.why : '保存只提交你改动过的字段（差量），其余保持服务端现值。'))));
     }
 
@@ -1928,8 +1940,9 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
 
       /**
        * 进设置页现读 prefs 与规则：偏好与规则都不在 SSE 帧里。
-       * 规则行 = 内置（enabled = 不在 off 里）+ 本机（items）合并 —— guard 拒绝项由服务端在写入时
-       * 附 guardDenied，界面只渲染、不判断路径（硬约束 5）。
+       * 规则行 = 宿主 GET /api/rules 交出的内置行（row.builtin）+ 本机行（row.items）合并 ——
+       * 「内置/本机」标记**由宿主按 BUILTIN_RULES id 集合单点裁决**（Ruling-106），页面只拼接渲染，
+       * 不自己按 id 前缀判、也不再读永不存在 cfg().builtinRules；guard 拒绝项由服务端在写入时附 guardDenied。
        */
       async function loadSettingsAux() {
         const [pf, rl] = await Promise.all([api('prefs'), api('rules')]);
@@ -1938,9 +1951,8 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
         setSetPrefs(patch.prefs || {});
         const row = rl.ok && rl.data && typeof rl.data === 'object' ? rl.data : null;
         if (row) {
-          const off = Array.isArray(row.off) ? row.off : [];
-          const builtin = ((cfg().builtinRules) || []).map((b) => ({ ...b, builtin: true, enabled: off.indexOf(b.id) < 0 }));
-          const user = (Array.isArray(row.items) ? row.items : []).map((u) => ({ ...u, builtin: false, enabled: true }));
+          const builtin = Array.isArray(row.builtin) ? row.builtin : [];
+          const user = Array.isArray(row.items) ? row.items : [];
           setSetRules(builtin.concat(user));
         }
         for (const pair of [['prefs', pf], ['rules', rl]]) {
@@ -1948,13 +1960,45 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
         }
       }
 
-      /** 差量写偏好：只发 patchBody(patch)（服务端 normalize 后回全量），成功后以回的全量刷新界面。 */
+      /** 读-并-写偏好（Ruling-105）：prefs 是单行整记录（lib/prefs/store.js 的 writeMany 整行覆盖），
+       *  差量直写会抹掉其余分组。故：先「现读」全量（绝不拿缓存 setPrefs 当读的那一份），
+       *  读失败立即短路可见、不发写；按组浅合并后把完整记录 POST 回去，成功后以回的全量刷新界面。 */
       async function doSettingsPatch(patch) {
         setSetSaving(true);
-        const r = await api('prefs', { method: 'POST', body: patchBody(patch) });
+        const cur = await api('prefs');
+        if (!cur.ok) {
+          setSetSaving(false);
+          setPageErr({ source: 'prefs', ...(cur.error || { code: 'UNKNOWN', message: '接口调用失败' }) });
+          return cur;
+        }
+        const base = (cur.data && cur.data.prefs) || {};
+        const merged = { ...base };
+        for (const group of Object.keys(patch || {})) {
+          const values = patch[group] && typeof patch[group] === 'object' ? patch[group] : {};
+          merged[group] = { ...(base[group] && typeof base[group] === 'object' ? base[group] : {}), ...values };
+        }
+        const r = await post('prefs', patchBody(merged));
         setSetSaving(false);
         if (r.ok) setSetPrefs((r.data && r.data.prefs) || {});
-        else setPageErr({ source: 'prefs', ...(r.error || { code: 'UNKNOWN', message: '接口调用失败' }) });
+        return r;
+      }
+      /** 保存设置按钮（搜索通路两字段，brief 任务24 :170）：先本地校验端口，非法即见、零写入；
+       *  合法则走 doSettingsPatch 的读-并-写（Ruling-105），成功后整页重载（prefs+rules 现读刷新）。 */
+      async function doSettingsSave(fields) {
+        const f = fields && typeof fields === 'object' ? fields : {};
+        const patch = {};
+        if (Object.prototype.hasOwnProperty.call(f, 'port')) {
+          const port = Number(f.port);
+          if (!Number.isInteger(port) || port < 1 || port > 65535) {
+            setPageErr({ source: 'prefs', code: 'SEARCH_PORT_BAD', message: 'HTTP 端口需为 1-65535 之间的整数；本次未写入任何修改。' });
+            return { ok: false };
+          }
+          patch.port = port;
+        }
+        if (Object.prototype.hasOwnProperty.call(f, 'esPath')) patch.esPath = String(f.esPath || '');
+        if (Object.keys(patch).length === 0) { await loadSettingsAux(); return { ok: true }; }
+        const r = await doSettingsPatch({ search: patch });
+        if (r.ok) await loadSettingsAux();
         return r;
       }
       async function doSettingsRuleAdd(rule) {
@@ -2129,7 +2173,7 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
           prefs: setPrefs || {}, rules: setRules, caps: cfg().capabilities || {},
           capRows: cfg().capabilityRows || [], snap, err: pageErr, saving: setSaving,
           onPatch: doSettingsPatch, onRuleAdd: doSettingsRuleAdd, onRuleToggle: doSettingsRuleToggle,
-          onRuleRemove: doSettingsRuleRemove, onSave: loadSettingsAux,
+          onRuleRemove: doSettingsRuleRemove, onSave: doSettingsSave,
         }),
         h('div', { className: 'so-disclaimer' },
           '本插件对系统只读监控、对文件只删你明确勾选的项。不提供结束进程、不改注册表、不改属主与 ACL、不碰回收站与系统目录。所有清理动作都留一条可展开的追加式记录。'));

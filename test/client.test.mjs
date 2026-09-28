@@ -1090,6 +1090,219 @@ await checkAsync('cn-8 搜索页接线：进页现读探针与 prefs，点「搜
   w.live.__unmount();
 });
 
+/**
+ * 批 F 接线证人（C-1 / I-1 / I-2）用的两个取 props 驱动器：
+ * 开关与输入框都不在 walk 的收集范围里（walk 只收按钮），这里从 vnode 树直接拿 props。
+ * 与 fillAndClick 同一套遍历语义：函数组件按当前 props 展开，标题/占位符做定位锚。
+ */
+function collectProps(root, tag, pred) {
+  const out = [];
+  const go = (n) => {
+    if (!n || typeof n !== 'object') return;
+    if (Array.isArray(n)) { for (const k of n) go(k); return; }
+    if (n.type === tag && pred(n.props || {})) out.push(n.props);
+    for (const k of kids(n)) go(k);
+  };
+  go(root);
+  return out;
+}
+const findSwitchByTitle = (root, title) =>
+  collectProps(root, 'button', (p) => String(p.className || '').includes('so-switch') && p.title === title)[0] || null;
+const findInputByPlaceholder = (root, needle) =>
+  collectProps(root, 'input', (p) => String(p.placeholder || '').includes(needle))[0] || null;
+
+/** lib/prefs/store.js 里一条真形状历史全量记录（prefsRecord 整行：五组 + updatedAt）。 */
+const CN_FULL = () => ({
+  collect: { cadence: '5s', keepMinutes: 30 },
+  sources: { l0: true, l1a: true, l1b: false, l2: true },
+  clean: { quarantineDir: 'F:\\sysops-quarantine', keepDays: 7, after: 'log' },
+  search: { mode: 'everything', port: 3417, walkDirs: [], limit: 200 },
+  alerts: {},
+  updatedAt: 1700000000000,
+});
+/** 设置页接线世界的公共路由：prefs 走可变服务端记录（POST 后服务端现值真的被改掉），rules 默认空。 */
+function cnSettingsWorld(ruleRows) {
+  const server = { rec: CN_FULL() };
+  const w = cnWorld([
+    { url: '/sysops/api/stream', reply: () => sseRes([`event: snapshot\ndata: ${JSON.stringify(CN_SNAP)}\n\n`]) },
+    { url: '/sysops/api/alerts/read', method: 'POST', reply: () => jsonRes({ ok: true, data: {} }) },
+    { url: '/sysops/api/rules', reply: () => jsonRes({ ok: true, data: ruleRows || { items: [], off: [] } }) },
+    { url: '/sysops/api/prefs', reply: () => jsonRes({ ok: true, data: { prefs: server.rec } }) },
+    { url: '/sysops/api/prefs', method: 'POST', reply: ({ init }) => {
+        server.rec = JSON.parse(String(init.body)).prefs;
+        return jsonRes({ ok: true, data: { prefs: JSON.parse(JSON.stringify(server.rec)) } });
+      } },
+  ]);
+  w.server = server;
+  w.entries = () => w.log.map((e) => e.method + ' ' + e.url.split('?')[0]);
+  w.enterSettings = async () => {
+    w.render(); await cnTick(); w.render();
+    const tab = findClickExact(w.live.__root, '设置') || w.click('设置');
+    assert.ok(tab, '没找到「设置」页签');
+    tab(); w.render(); await cnTick(); w.render();
+  };
+  return w;
+}
+
+await checkAsync('cn-9 设置页写路径是读-并-写（C-1/Ruling-105）：写 sources 一个键，其余四组逐字幸存，且读是现读', async () => {
+  const FULL = CN_FULL();
+  const w = cnSettingsWorld();
+  await w.enterSettings();
+  const sw = findSwitchByTitle(w.live.__root, '切换 进程榜采集');
+  assert.ok(sw, 'L1b 源开关不在场');
+  const getsBefore = w.entries().filter((s) => s === 'GET /sysops/api/prefs').length;
+  sw.onClick();
+  await cnWait(() => w.entries().includes('POST /sysops/api/prefs'));
+  const posts = w.entries().filter((s) => s === 'POST /sysops/api/prefs').length;
+  assert.equal(posts, 1, '一次开关只该发一次写');
+  const postIdx = w.entries().lastIndexOf('POST /sysops/api/prefs');
+  const lastGetIdx = w.entries().lastIndexOf('GET /sysops/api/prefs');
+  assert.ok(lastGetIdx < postIdx, 'POST 前必须有一次「现读」GET（不许拿缓存 setPrefs 当读的那一份）：' + JSON.stringify(w.entries()));
+  assert.ok(w.entries().filter((s) => s === 'GET /sysops/api/prefs').length >= getsBefore + 1,
+    '写的「读」腿必须是点击后新发的 GET：' + JSON.stringify(w.entries()));
+  const body = JSON.parse(String(w.log.filter((e) => e.method === 'POST' && e.url === '/sysops/api/prefs')[0].body));
+  assert.ok(body && body.prefs && typeof body.prefs === 'object', 'POST 体应为 {prefs: 完整记录}');
+  // 整行写回：没动的四组必须逐字幸存（写Many 是整行覆盖，差量直写会把它们抹掉——评审 tmp/prefs_roundtrip 实证的形状）
+  assert.deepEqual(body.prefs.collect, FULL.collect, 'collect 组被差量写抹掉了');
+  assert.deepEqual(body.prefs.clean, FULL.clean, 'clean 组被差量写抹掉了');
+  assert.deepEqual(body.prefs.search, FULL.search, 'search 组被差量写抹掉了');
+  assert.deepEqual(body.prefs.alerts, FULL.alerts, 'alerts 组被差量写抹掉了');
+  // 本次动的 sources 组：只翻 l1b，其余三键保持现值
+  assert.equal(body.prefs.sources.l1b, true, '要写的键没写进去');
+  assert.equal(body.prefs.sources.l0, FULL.sources.l0);
+  assert.equal(body.prefs.sources.l1a, FULL.sources.l1a);
+  assert.equal(body.prefs.sources.l2, FULL.sources.l2);
+  // 写成功后界面吃服务端回的全量：L1b 开关真实落到开位
+  w.render();
+  const sw2 = findSwitchByTitle(w.live.__root, '切换 进程榜采集');
+  assert.equal(sw2['aria-checked'], 'true', '写成功后开关没按回的全量刷新');
+  w.live.__unmount();
+});
+
+await checkAsync('cn-9b 设置页写前的现读失败：阻断整行写并把原因可见（C-1 读失败短路）', async () => {
+  let gets = 0;
+  const w = cnSettingsWorld();
+  const origRoutes = w.log;
+  // 把 prefs 的 GET 应答改写成「首次（进页）成功、第二次（写前现读）500」
+  void origRoutes;
+  globalThis.fetch = (async (u, init = {}) => {
+    const url = String(u); const method = init.method ?? 'GET';
+    w.log.push({ url, method, body: init.body, signal: init.signal ?? null });
+    if (url.split('?')[0] === '/sysops/api/prefs' && method === 'GET') {
+      gets += 1;
+      if (gets === 1) return { ok: true, status: 200, json: async () => ({ ok: true, data: { prefs: CN_FULL() } }) };
+      return { ok: false, status: 500, json: async () => ({ ok: false, error: { code: 'PREFS_READ_FAILED', message: '现读失败，已挡住整行写' } }) };
+    }
+    if (url.split('?')[0] === '/sysops/api/prefs' && method === 'POST') return { ok: true, status: 200, json: async () => ({ ok: true, data: { prefs: CN_FULL() } }) };
+    if (url.split('?')[0] === '/sysops/api/rules') return { ok: true, status: 200, json: async () => ({ ok: true, data: { items: [], off: [] } }) };
+    if (url.split('?')[0] === '/sysops/api/alerts/read') return { ok: true, status: 200, json: async () => ({ ok: true, data: {} }) };
+    if (url.split('?')[0] === '/sysops/api/stream') return sseRes([`event: snapshot\ndata: ${JSON.stringify(CN_SNAP)}\n\n`]);
+    return { ok: false, status: 404, json: async () => ({ ok: false, error: { code: 'TEST_NO_ROUTE', message: '没这条路由：' + url } }) };
+  });
+  await w.enterSettings();
+  const sw = findSwitchByTitle(w.live.__root, '切换 进程榜采集');
+  assert.ok(sw, 'L1b 源开关不在场');
+  sw.onClick();
+  await cnTick(80);
+  assert.ok(w.entries().filter((s) => s === 'GET /sysops/api/prefs').length >= 2, '点击后要有现读：' + JSON.stringify(w.entries()));
+  assert.equal(w.entries().filter((s) => s === 'POST /sysops/api/prefs').length, 0,
+    '现读失败还整域写回会抹掉同域其它配置（lib/prefs/store.js:191），必须阻断');
+  const out = w.render();
+  assert.ok(out.has('现读失败，已挡住整行写'), '读失败必须可见（约束 4）：' + out.texts.join('|'));
+  w.live.__unmount();
+});
+
+await checkAsync('cn-10 内置/本机 pill 吃宿主行的 builtin 标记（I-1/Ruling-106）：没标记就不画，不回落「本机」', async () => {
+  const RULES_ROW = {
+    items: [
+      { id: 'u-pnpm', n: 'pnpm 未引用包', kind: '缓存', ageDays: 30, rel: 'pnpm-store/**', builtin: false },
+      // 老宿主形状：行上没有 builtin 键 —— 诚实降级是不画 pill，而不是自判或回落成「本机」骗人
+      { id: 'legacy-no-mark', n: '历史规则无标记', kind: '日志', ageDays: 5, rel: 'logs/**' },
+    ],
+    builtin: [
+      { id: 'temp-user', n: '用户临时目录', kind: '缓存', ageDays: 3, rel: 'AppData/Local/Temp', builtin: true, enabled: true },
+      { id: 'packages-cache', n: 'UWP 包缓存', kind: '缓存', ageDays: 60, rel: 'AppData/Local/Packages', builtin: true, enabled: false },
+    ],
+    off: ['packages-cache'],
+    updatedAt: 11,
+  };
+  const w = cnSettingsWorld(RULES_ROW);
+  await w.enterSettings();
+  const out = w.render();
+  assert.ok(out.has('用户临时目录') && out.has('pnpm 未引用包') && out.has('历史规则无标记'),
+    '宿主给的行（内置+本机）都要在场：' + out.texts.join('|'));
+  assert.equal(out.texts.filter((t) => t === '内置').length, 2, '「内置」pill 数量必须等于宿主标了 builtin:true 的行数');
+  assert.equal(out.texts.filter((t) => t === '本机').length, 1, '「本机」只画宿主标了 builtin:false 的那一条——无标记行不许被推断成「本机」');
+  assert.ok(!out.has('u-pnpm') && !out.has('legacy-no-mark'), 'id 不上界面，界面只吃宿主给的名称');
+  w.live.__unmount();
+});
+
+await checkAsync('cn-11 搜索通路保存链路端到端（I-2）：点「保存设置」→ 现读 → 合并 → POST → 整页重载；非法端口零写入', async () => {
+  const FULL = CN_FULL();
+  const w = cnSettingsWorld();
+  await w.enterSettings();
+  // ① 端口保存：输入框现值走 POST，未动的组逐字幸存
+  const t1 = fillAndClick(w.live.__root, '3417', '3419', '保存设置');
+  assert.ok(t1.boxDone, '端口输入框没挂 ref，容器拿不到现值');
+  assert.ok(t1.click, '没找到「保存设置」按钮（或它不唯一）');
+  t1.click();
+  assert.ok(await cnWait(() => w.entries().includes('POST /sysops/api/prefs')), '点保存后没发 POST：' + JSON.stringify(w.entries()));
+  let posts = w.log.filter((e) => e.method === 'POST' && e.url === '/sysops/api/prefs');
+  assert.equal(posts.length, 1);
+  let body = JSON.parse(String(posts[0].body));
+  assert.equal(body.prefs.search.port, 3419, '端口没按输入框现值写入');
+  assert.deepEqual(body.prefs.search, { mode: FULL.search.mode, port: 3419, walkDirs: FULL.search.walkDirs, limit: FULL.search.limit },
+    'search 组内没上报的键必须保持服务端现值');
+  assert.deepEqual(body.prefs.collect, FULL.collect); assert.deepEqual(body.prefs.clean, FULL.clean);
+  assert.deepEqual(body.prefs.sources, FULL.sources); assert.deepEqual(body.prefs.alerts, FULL.alerts);
+  // ② 保存成功后整页重载：POST 之后又现读了 prefs 与 rules
+  assert.ok(await cnWait(() => { const e = w.entries(); const pi = e.lastIndexOf('POST /sysops/api/prefs'); return e.slice(pi + 1).includes('GET /sysops/api/prefs') && e.slice(pi + 1).includes('GET /sysops/api/rules'); }),
+    '保存成功后必须整页重载（不是只改本地槽位）：' + JSON.stringify(w.entries()));
+  w.render();
+  const inp1 = findInputByPlaceholder(w.live.__root, '3417');
+  assert.equal(String(inp1.defaultValue), '3419', '重载后端口输入框要显示服务端新现值');
+  // ③ esPath 保存：只动 esPath，端口用服务端现值（本轮没上报 port）
+  const t2 = fillAndClick(w.live.__root, '留空 = 用 PATH', 'F:\\tools\\es.exe', '保存设置');
+  assert.ok(t2.boxDone && t2.click, 'es.exe 输入框或保存按钮不在场');
+  t2.click();
+  assert.ok(await cnWait(() => w.log.filter((e) => e.method === 'POST' && e.url === '/sysops/api/prefs').length >= 2), 'esPath 保存没发 POST');
+  posts = w.log.filter((e) => e.method === 'POST' && e.url === '/sysops/api/prefs');
+  body = JSON.parse(String(posts[1].body));
+  assert.equal(body.prefs.search.esPath, 'F:\\tools\\es.exe', 'esPath 没进合并后的整行');
+  assert.equal(body.prefs.search.port, 3419, '第二轮保存把上一轮写入的端口抹掉了');
+  // ④ 非法端口：可见纠错、零写入（不动服务端也不清别的组）
+  const t3 = fillAndClick(w.live.__root, '3417', '0', '保存设置');
+  assert.ok(t3.click, '没找到「保存设置」按钮');
+  t3.click();
+  await cnTick(80);
+  assert.equal(w.log.filter((e) => e.method === 'POST' && e.url === '/sysops/api/prefs').length, 2,
+    '非法端口不许发任何写（校验在容器层拦下）');
+  const out4 = w.render();
+  assert.ok(out4.has('1-65535'), '非法端口必须就地可见纠错文案：' + out4.texts.join('|'));
+  w.live.__unmount();
+});
+
+await checkAsync('cn-11b 无 storageDomain：搜索通路两输入框与保存按钮都禁用且原因可见（I-2 只读闸门）', async () => {
+  globalThis.__SYSOPS__ = clientPayload({ capabilities: { storageDomain: false, timer: true, webServer: true, notifications: false, autostart: false } });
+  try {
+    const w = cnSettingsWorld();
+    await w.enterSettings();
+    const p = findInputByPlaceholder(w.live.__root, '3417');
+    assert.equal(p.disabled, true, '只读时端口输入框必须禁用（灰显读）');
+    const e = findInputByPlaceholder(w.live.__root, '留空 = 用 PATH');
+    assert.equal(e.disabled, true, '只读时 es.exe 路径输入框必须禁用');
+    const out = w.render();
+    const saveBtn = out.buttons.find((b) => b.text === '保存设置');
+    assert.ok(saveBtn, '没找到「保存设置」按钮');
+    assert.equal(saveBtn.disabled, true, '只读时保存按钮必须禁用');
+    assert.ok(out.has('不可用') || out.has('禁用') || out.has('只读') || out.has('storageDomain') || out.has('持久化'),
+      '禁用必须伴随可见原因：' + out.texts.join('|'));
+    assert.equal(w.entries().filter((s) => s === 'POST /sysops/api/prefs').length, 0);
+  } finally {
+    globalThis.__SYSOPS__ = clientPayload();
+  }
+});
+
 /* ⑦段：设置页 —— 开关、规则、能力表与只读闸门
  *    简报把本段写在 test/plugin.test.mjs（追加 ⑦段），控制器明令页面用例落本文件（口径：用例 id、名称、断言照简报）。
  *    夹具 PREFS 逐键照 Task 3 prefsRecord（含 Task 12 的 clean 组）：sources 与 collect 同级；
@@ -1141,14 +1354,17 @@ check('pg4-4 规则行 pill 分内置/本机，guard 拒绝项标「已被 guard
     { id: 'temp-user', n: 'AI 助手临时目录 scoped_dir*', glob: '%TEMP%\\scoped_dir*', ageDays: 0, kind: '临时目录', builtin: true, enabled: true },
     { id: 'u-pnpm', n: 'pnpm 未引用包', glob: '%LocalAppData%\\pnpm-store\\**', ageDays: 30, kind: '缓存', builtin: false, enabled: true },
     { id: 'u-bin', n: '回收站', glob: 'C:\\$Recycle.Bin\\*', ageDays: 1, kind: '缓存', builtin: false, enabled: false, guardDenied: { code: 'b-recycle-bin', why: '回收站一律不参与' } },
+    // Ruling-106：宿主没给 builtin 的行（老接口形状）—— pill 必须是空串（不画），不许自判、更不许回落成「本机」
+    { id: 'legacy-no-mark', n: '历史规则无标记', glob: '%LOCALAPPDATA%\\x\\*', ageDays: 2, kind: '日志', enabled: true },
   ];
   const cells = SET.ruleCells(rules);
-  assert.deepEqual(cells.map((c) => c.pill), ['内置', '本机', '本机']);
+  assert.deepEqual(cells.map((c) => c.pill), ['内置', '本机', '本机', '']);
   assert.equal(cells[2].blocked, true);
   assert.ok(cells[2].denyWhy.includes('回收站一律不参与'));
   const out = SPAGE({ rules });
   assert.ok(out.has('已被 guard 拒绝'));
   assert.ok(out.classHas('so-rule-dim'));
+  assert.equal(out.texts.filter((t) => t === '本机').length, 2, '无标记行不许画「本机」pill');
 });
 
 check('pg4-5 黑名单 notice 逐字吃注入载荷的 redlines（单源，不抄第二份）', () => {

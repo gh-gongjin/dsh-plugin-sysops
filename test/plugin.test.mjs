@@ -107,7 +107,7 @@ function apiWorld(over = {}) {
     writeMany: async (p) => { calls.push(['writeMany', p]); if (over.prefsFails) throw Object.assign(new Error('没有 storageDomain'), { code: 'PREFS_UNAVAILABLE' }); return { written: p, skipped: [] }; },
     available: over.noStorage === true ? false : true,
   };
-  const ruleStore = { add: async (r) => { calls.push(['ruleAdd', r]); throw Object.assign(new Error('回收站不碰'), { code: 'SYSOPS_RULE_GUARD_DENY', why: '回收站不碰' }); }, remove: async () => ({}), toggle: async () => ({}), list: async () => ({ items: [], off: [] }), error: null };
+  const ruleStore = { add: async (r) => { calls.push(['ruleAdd', r]); throw Object.assign(new Error('回收站不碰'), { code: 'SYSOPS_RULE_GUARD_DENY', why: '回收站不碰' }); }, remove: async () => ({}), toggle: async () => ({}), list: async () => over.ruleRows ?? ({ items: [], off: [] }), error: null };
   // probe 作为独立 dep（属搜索域，不混进 clean 的桩里）
   const handler = API.createApiHandler({ collect, alerts, clean, probe, search, prefStore: prefsMod, ruleStore, caps: over.caps ?? { read: () => ({ storageDomain: prefsMod.available, timer: false, webServer: true, notifications: false, autostart: false }) }, logger: { warn: (m) => events.push(m) }, now: () => 1000, sseTimers: over.sseTimers });
   const remote = over.remoteAddress ?? '127.0.0.1';
@@ -504,6 +504,34 @@ await checkAsync('rt-35 GET /api/clean/plan 走真实 clean service 的 plan 转
   assert.equal(JSON.parse(res.body).data.planId, PLAN_FIXTURE.planId);
   assert.deepEqual(seen, [PLAN_FIXTURE.planId], '取数只带 planId 进仓储');
   handler2.dispose();
+});
+
+await checkAsync('rt-36 GET /api/rules 的 builtin 标记由宿主 BUILTIN_RULES id 集合裁决（Ruling-106），items/off/updatedAt 原形状不动', async () => {
+  const { BUILTIN_RULES } = await import('../lib/clean/rules.js');
+  const w = apiWorld({ ruleRows: {
+    items: [{ id: 'u-1', n: '自研规则', kind: '缓存', ageDays: 7, rel: 'notes/u1/**' }],
+    off: ['packages-cache'],
+    updatedAt: 7,
+  } });
+  const r = await w.run('GET', '/api/rules');
+  assert.equal(r.status, 200);
+  const d = r.json.data;
+  // 原形状不动：仓储行的三个键还是那三个键（规则库语义没被这次改动外溢），只多出一个宿主裁决的 builtin 集合
+  assert.deepEqual(Object.keys(d).sort().join(','), 'builtin,items,off,updatedAt');
+  assert.equal(d.updatedAt, 7);
+  assert.deepEqual(d.off, ['packages-cache']);
+  assert.equal(d.items.length, 1);
+  assert.equal(d.items[0].id, 'u-1');
+  // 本机行：标记由宿主 id 集合给出（id 不在 BUILTIN_RULES ⇒ builtin:false），不是页面拿前缀猜的
+  assert.equal(d.items[0].builtin, false, '本机行的 builtin 必须由宿主裁决为 false');
+  // 内置行：与 BUILTIN_RULES 同集合、逐行 builtin:true；enabled 由 off 推出
+  assert.equal(d.builtin.length, BUILTIN_RULES.length);
+  assert.deepEqual(d.builtin.map((b) => b.id).sort(), BUILTIN_RULES.map((b) => b.id).sort(), '内置行集合必须等于宿主 BUILTIN_RULES 的 id 集合');
+  assert.ok(d.builtin.every((b) => b.builtin === true), '内置行的 builtin 恒为 true');
+  assert.equal(d.builtin.find((b) => b.id === 'packages-cache').enabled, false, 'off 命中内置 id ⇒ enabled=false');
+  assert.equal(d.builtin.find((b) => b.id === 'temp-user').enabled, true, '不在 off ⇒ enabled=true');
+  // 私有路径不出接口：dir/glob 展开后含本机绝对路径，与注入载荷同口径地不透传
+  for (const b of d.builtin) assert.ok(!('dir' in b) && !('glob' in b), '内置行不得带 dir/glob：' + b.id);
 });
 
 console.log(`\n  ${passed}/${passed + failed} 通过`);
