@@ -424,7 +424,9 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
       cpu: { label: 'CPU 使用率', threshold: 85, color: 'var(--so-t1)' },
       mem: { label: '内存占用率', color: 'var(--so-blue)' },
       netDown: { label: '网络吞吐', second: 'netUp', color: 'var(--so-t1)', secondColor: 'var(--so-t3)' },
-      diskFreePct: { label: 'C 盘空闲占比', thresholdGb: 32, color: 'var(--so-amber)' },
+      // 标题逐字照原型 'C 盘可用空间'（约束 9）。原型同卡写「最近 24 小时」是演示数据 ——
+      // 本实现的环形缓冲只留 keepMinutes（默认 30、钳 5~120），卡片窗口按真实保留窗口渲染。
+      diskFreePct: { label: 'C 盘可用空间', thresholdGb: 32, color: 'var(--so-amber)' },
     };
 
     /**
@@ -702,7 +704,10 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
       qLabel: '输入关键字',
       // 逐字原型 index.html:649 的 q placeholder（不自造「通配 .ext、大小>100m」那种没验过的语法承诺）
       qHint: '输入关键字，如 report .pdf、client.js、东财 数据源',
-      tokenHint: '大小写敏感 · 支持空格分词（= 同时满足）',
+      // 原型 index.html:659 逐字写的是「大小写敏感」，但 wk-1 定音为**不敏感**（Everything 真身与
+      // Windows 文件名都不区分大小写，见 lib/search/walk.js:16-21 的三点裁定注释）⇒ 界面文案跟随实现，
+      // 不照抄原型原文，否则就是界面在撒谎。
+      tokenHint: '大小写不敏感 · 支持空格分词（= 同时满足）',
       dirHint: '粘贴绝对路径，如 F:\\dsh-plugins',
     };
 
@@ -1983,7 +1988,10 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
        * 进设置页现读 prefs 与规则：偏好与规则都不在 SSE 帧里。
        * 规则行 = 宿主 GET /api/rules 交出的内置行（row.builtin）+ 本机行（row.items）合并 ——
        * 「内置/本机」标记**由宿主按 BUILTIN_RULES id 集合单点裁决**（Ruling-106），页面只拼接渲染，
-       * 不自己按 id 前缀判、也不再读永不存在 cfg().builtinRules；guard 拒绝项由服务端在写入时附 guardDenied。
+       * 不自己按 id 前缀判、也不再读永不存在 cfg().builtinRules。
+       * `guardDenied` 是**纯渲染**分支：全仓（lib/ + index.js）当前没有任何生产者 —— 命中红线的规则
+       * 在写入阶段就被 rules-store 以 403 拒掉、扫到的受保护目录进 scanner 的 skipped（Ruling-94）。
+       * 保留分支是为了页面永不自己裁决红线（约束 5 单点）；真实拒绝路径是 403 响应体与 skipped 列表。
        */
       async function loadSettingsAux() {
         const [pf, rl] = await Promise.all([api('prefs'), api('rules')]);

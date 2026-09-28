@@ -107,6 +107,22 @@ check('prefs-3 prefs 记录：告警阈值、搜索通路、限定目录、null 
   assert.throws(() => t.parse({ search: { mode: 'find' } }), /mode/);
 });
 
+check('prefs-3b search.esPath 形状闸门：带盘符的绝对 .exe 才收，空串=回 PATH，其余一律拒（评审 O-1）', () => {
+  const t = prefsDomain.tables.prefs.valueSchema;
+  // esPath 是唯一一处「浏览器输入 → 宿主 execFile 的 bin」的配置，形状松了就等于给任意可执行文件放行
+  assert.equal(t.parse({ search: { esPath: 'C:\\Program Files\\Everything\\es.exe' } }).search.esPath,
+    'C:\\Program Files\\Everything\\es.exe', '合法绝对 .exe 必须存得下来');
+  assert.equal(t.parse({ search: { esPath: '  D:\\tools\\es.exe  ' } }).search.esPath,
+    'D:\\tools\\es.exe', '两侧空白要 trim 后再存，别把带空格的值喂给 execFile');
+  assert.equal(t.parse({ search: { esPath: '' } }).search.esPath, undefined, '空串 = 没设，回落到 PATH 里的 es.exe');
+  assert.equal(t.parse({ search: {} }).search.esPath, undefined, '缺省键同样回落到 PATH');
+  // 拒的四类：裸文件名 / 无盘符 / 非 .exe 后缀 / 非字符串
+  assert.throws(() => t.parse({ search: { esPath: 'es.exe' } }), /esPath/);
+  assert.throws(() => t.parse({ search: { esPath: '/tools/es.exe' } }), /esPath/);
+  assert.throws(() => t.parse({ search: { esPath: 'C:\\tools\\es.bat' } }), /esPath/);
+  assert.throws(() => t.parse({ search: { esPath: 123 } }), /esPath/);
+});
+
 check('prefs-4 clean_rules：本机新增规则的形状，glob 必填、拒绝形状进库', () => {
   const t = prefsDomain.tables.clean_rules.valueSchema;
   // 夹具补 `kind`：Task 11 把 kind 变成 items[] 必填字段（schema 演进），这是夹具随动，

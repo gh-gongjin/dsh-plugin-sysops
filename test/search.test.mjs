@@ -222,7 +222,7 @@ await checkAsync('se-3 es.exe 不存在（ENOENT）→ error 说清未找到，�
 /* ④段：walk（本机唯一实跑通路） */
 const WK = await import('../lib/search/walk.js');
 
-check('wk-1 空格分词=同时满足，大小写敏感（与原型「支持空格分词」文案一致）', () => {
+check('wk-1 空格分词=同时满足，大小写不敏感（原型 index.html:659 写的「大小写敏感」是错的，以本用例为准）', () => {
   assert.deepEqual(WK.tokensOf('东财 数据源'), ['东财', '数据源']);
   assert.equal(WK.matchName('东财数据源.csv', ['东财', '数据源']), true);
   assert.equal(WK.matchName('数据源东财.csv', ['东财', '数据源']), true, '词序无关');

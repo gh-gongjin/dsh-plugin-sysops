@@ -308,3 +308,31 @@ POST /sysops/api/clean/apply  { planId, itemIds, mode }      ← 只收 ID，不
 | 暂存目录位置 | **已定：默认落点 `%LOCALAPPDATA%\dsh-plugin-sysops\quarantine`** | `DEFAULT_QUARANTINE(appData)` 由宿主展开成绝对路径后放进 Task 19 载荷 `defaults`；prefs 只存展开后的绝对路径（`prefq-1` 拒未展开的 `%...%` 形），界面渲染 prefs 实配值、无实配时回落 `defaults`。原型里的 `C:\Users\gongj\.dsh-quarantine\2026-09-27\` 是演示串 |
 | 曲线保留窗口默认值 | **已定：30min**（`keepMinutes` 默认 30，钳 5~120） | ring 上界由 `maxPoints = 1800` 定（30min @1s），4 源 × 1800 点按该文件自述量级 ≈100KB，远低于 1MB —— 这是按 `maxPoints` 推的上界，不是压测读数 |
 | spec 文档位置 | **已定：保留在 `docs/superpowers/specs/`** | 不与兄弟插件的 `docs/design-spec.md` 统一（superpowers 约定优先） |
+
+### 8.1 遗留与已知限制（2026-09-28 Task 25 收尾裁定）
+
+全分支大评审与后续验证代理累计提出的 backlog，逐条给"改 / 不改 + 理由"。**已改的**是代码或注释（见
+`git log 98780a8..HEAD`），下表是**裁定不改**的项 —— 刻意保留，理由如下，供后续判断时不再重复讨论。
+
+| # | 项 | 不改的理由 |
+|---|---|---|
+| L-1 | 测试夹具里的 `C:\Users\gongj\` 用户名（全仓约 120 处） | 这是全仓统一的夹具约定，不是泄漏；`test/host-compat.test.mjs:290` 刻意用 `/C:\\Users\\|gongj/i` 当"注入载荷不得回显本机路径/用户名"的金丝雀断言。单改一个文件只会让两处口径分叉，收益纯属 cosmetics |
+| L-2 | `index.js` 的 `teardown()` 只 `close()` 不置空 storage facility 句柄 | 置空会破坏 ⚠️-1 的"同一 `getFacility` 实例"硬约束：宿主 `close()` 后同轮 `reopen()` 必须仍拿到同域，置空即断链。关闭已逐句留痕（不静默），句柄泄漏面为 0（进程退出即回收） |
+| L-3 | `beforeFree` / `afterFree` 恒为系统盘（不随清理目标盘变化） | 清理目标盘就是系统盘（内置 12 条规则全在 `C:`），`diskFreeGb` 也只报系统盘 —— 两处同源，不存在"报了别的盘"的错位。真做多盘需先扩采集口径，属新功能不属修复 |
+| L-4 | `skipped` / `INCOMPLETE` 明细的 SSE 载荷 ~150B/条的预算 | 预算是按单帧上限推的，超出即截断并在界面上标注"明细已截断"。为不完整的条目留全量明细会把 SSE 帧挤爆，反而伤主路径 |
+| L-5 | 跨边常量（`redlines` / `searchAdvice` / `defaults`）靠真机注入，测试用桩值 | 这些常量的权威生成方在宿主半边（`lib/clean/rules.js` + `lib/prefs/spec.js`），跨半边只能靠宿主载荷传递。桩值已由 `host-compat` 与 `plugin` 两侧钉住形状；真值注入链需真宿主，见 §8.2 |
+| L-6 | `GET /api/clean/plan` 不分页 | 清单快照本就按 `PLAN_KEEP=20` 段上限裁剪，单段条目数受 `maxEntries` 约束；加页参数是给一个不会长的列表加机器 |
+| L-7 | SSE 坏帧只跳过、不累计 UI 计数器 | `cf-7` 已把"坏帧只跳过该帧"定为设计契约（一帧坏不该污染整条流的状态），加计数器与之冲突，且无用户可见价值 |
+| L-8 | SSE 断流后降级轮询，永不自动回切 SSE | 回切需要可测的假时钟与"连续 N 次轮询成功"阈值，当前测试栈给不出廉价可信的时钟；按 Ruling-109 判例，收尾期加未证行为风险大于收益。用户可手动切回 |
+| L-9 | `client.js` 的 `guardDenied` 分支在生产链路无生产者 | 已如实改写注释（原注释声称"读 `cfg().builtinRules`"是假的）。保留分支是为了**页面永不自己裁决红线**（约束 5 单点）：真实拒绝路径是写入阶段 403 与扫描产物 `skipped`。见 Ruling-94 |
+| L-10 | 搜索的只读遍历不过 `guard` | `guard` 管的是不可逆动作（删除 / 改属主 / 改 ACL），只读遍历不在其列；对只读加闸会让"搜一下 `C:\Windows` 里那个 dll"直接失败。已在 `lib/search/walk.js` 头部写明这是刻意为之 |
+| L-11 | 曲线卡窗口按 `keepMinutes`（默认 30min）渲染，而非原型写的"最近 24 小时" | 环形缓冲只留 `keepMinutes`（钳 5~120），写 24h 就是界面撒谎。原型那句是演示数据，约束 9 的"标题逐字照原型"只约束**卡名** |
+| L-12 | `SKIP_LOCAL=1` 对 `test/search.test.mjs` 无效 | 该文件没有用例名含"真机"，`checkAsync` 的 skip 判定按名匹配故不命中。这是正确行为（它本就不做真机 IO），已在 spec 与台账写明，不假造一条 SKIP 记录 |
+| L-13 | `test/render-fixtures.mjs` 桩 React 与 25-C 真 React 预览页之间存在骨架渲染的 cosmetics 差异 | 桩只执行组件函数取文本/类名，不跑 React 的布局与告警链路；差异仅限骨架网格的空白填充，功能断言两侧一致 |
+
+### 8.2 只能人工在真机 dsh 里补验的两条（本机无宿主，禁用替身冒充）
+
+| 项 | 现状 | 补验方式 |
+|---|---|---|
+| ⚠️-1 存储域 `close()` → 同轮 `reopen()` 的毫秒时序 | `host-compat.test.mjs` 的 `hx-9` 在无宿主时如实 SKIP | 在真宿主里连续 `close()` 后立即 `reopen()`，断言 `getFacility` 仍返回**同一实例**（不是"同域的新实例"） |
+| F-7 真实 profile 的 `sysops_records` 对账 | 当前对账读数 `0→0` 是**空证**（profile 里本就没有历史数据） | 按 `task-1819-review.md` §3.9 的五步流程，在已有落盘数据的 profile 上跑一次读-写-读对账 |

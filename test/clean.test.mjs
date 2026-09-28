@@ -408,6 +408,41 @@ const { createMemoryFacility } = await import('./_helpers.mjs');
 // ①段只有 checkAsync；简报的 rec-1/rec-2 是同步断言，这里做一层薄包装复用同一套计数与失败打印。
 const check = (name, fn) => checkAsync(name, async () => fn());
 
+// cln-11 断的是 ①段 scanner.js 的纯函数，但同步断言得借 ②段才定义的 check 包装，
+// 故落在这里（用例名自带 cln- 前缀，读起来仍归 ①段）。
+check('cln-11 globToRegExp 单层通配的第二道闸：* 与 ? 都不跨分隔符、整体锚定、忽略大小写、** 直接抛', () => {
+  const g = SC.globToRegExp;
+
+  // * → [^\\/]*：同层任意个字符（含 0 个），但绝不吃分隔符
+  const star = g('*.log');
+  assert.ok(star.test('old.log'), '*.log 必须命中 old.log');
+  assert.ok(star.test('.log'), '* 允许命中 0 个字符（[^\\/]* 的语义就是 0..n）');
+  assert.ok(!star.test('sub/old.log'), '* 不得跨 / 进子目录');
+  assert.ok(!star.test('sub\\old.log'), '* 不得跨 \\ 进子目录');
+  assert.ok(!star.test('old.txt'), '结尾必须被 $ 咬住，后缀不符不得命中');
+
+  // ? → [^\\/]：恰好一个字符，同样不跨分隔符
+  const one = g('a?.txt');
+  assert.ok(one.test('ab.txt'), '? 命中恰好一个字符');
+  assert.ok(!one.test('a.txt'), '? 不许命中 0 个字符（那是 * 的活）');
+  assert.ok(!one.test('abc.txt'), '? 不许命中 2 个字符');
+  assert.ok(!one.test('a/.txt'), '? 不得跨分隔符');
+
+  // 整体锚定：前缀多出来的不命中
+  assert.ok(!g('a.txt').test('xa.txt'), '^ 必须咬住开头，前缀不符不得命中');
+
+  // Windows 路径大小写不敏感由 i 标志兜住（两侧方向都验，避免只测了一半）
+  assert.ok(g('*.LOG').test('old.log'), '模式大写 / 值小写也要命中（i 标志）');
+  assert.ok(g('README*').test('readme1.txt'), '模式小写 / 值大写同样命中（i 标志）');
+
+  // 元字符转义：. 是字面点而不是「任意字符」，否则 a.log 会误吃 axlog
+  assert.ok(!g('a.log').test('axlog'), '. 必须被 escapeChar 转义成字面点');
+
+  // ** = 递归通配（整盘扫）：guard 的 b-glob-overreach 已拒，这里是第二道 —— 不静默降级成单层
+  assert.throws(() => g('**\\*'), /不接受 \*\*/, '** 必须抛，不许静默当单层 * 用');
+  assert.throws(() => g('a/**/b'), /不接受 \*\*/, '出现在中间的 ** 同样拒');
+});
+
 // 形状必须是 Task 12 扫描器的**真产物**：risk 是嵌套的 {level, why}。
 // 扁平的 riskLevel/riskWhy 是 plan-store 投影**之后**的样子（Ruling-71 T13-A）——
 // 夹具若直接写扁平，「save 不拍平 ⇒ 每条快照写入抛 RECORDS_INVALID」这个缺陷永远测不到。

@@ -105,7 +105,8 @@ check('cf-3 没有宿主载荷（缺 webServer）→ 一个 slot 都不注册', 
 });
 
 check('cf-4 有载荷：侧边栏 id 与主面板 key 一致、order 跟随宿主', () => {
-  globalThis.__SYSOPS__ = { panelId: 'sysops', label: '系统运维', panelOrder: 12, routePrefix: '/sysops', api: '/sysops/api', capabilities: { storageDomain: true, timer: true, webServer: true }, cadences: ['1s', '5s', 'paused'], sourceKeys: ['l0', 'l1a', 'l1b', 'l2'], redlines: [], searchAdvice: [], defaults: {} };
+  // order 故意取 7：兜底默认是 12（client.js 的 PANEL_ORDER），写死或读兜底都会让下面那条断言红。
+  globalThis.__SYSOPS__ = { panelId: 'sysops', label: '系统运维', panelOrder: 7, routePrefix: '/sysops', api: '/sysops/api', capabilities: { storageDomain: true, timer: true, webServer: true }, cadences: ['1s', '5s', 'paused'], sourceKeys: ['l0', 'l1a', 'l1b', 'l2'], redlines: [], searchAdvice: [], defaults: {} };
   const c = clientCtx();
   CLIENT.apply(c);
   const nav = c.reg.find((r) => r.opts?.name === 'sidebar.panellist');
@@ -113,7 +114,7 @@ check('cf-4 有载荷：侧边栏 id 与主面板 key 一致、order 跟随宿�
   assert.ok(nav && page, '缺注册');
   assert.equal(nav.opts.id, page.opts.key);
   assert.equal(nav.opts.id, 'sysops');
-  assert.equal(nav.opts.order, 12, 'order 必须吃注入载荷而不是写死');
+  assert.equal(nav.opts.order, 7, 'order 必须吃注入载荷而不是写死（7 ≠ 兜底 12，两者同值就分不出真假）');
   assert.equal(nav.opts.label(), '系统运维');
   assert.deepEqual(c.reg.filter((r) => r.phase === 'inject').map((r) => r.name), ['sidebar.panellist', 'main']);
 });
@@ -365,6 +366,20 @@ check('pg1-16 快照缺失（首个 snapshot 帧未到）时渲染骨架而不�
   const out = walk(MON.MonitorPage({ snap: null, link: 'sse' }));
   assert.ok(out.has('等待首帧数据'), out.texts.join('|'));
   assert.ok(!out.has('NaN'));
+});
+
+check('pg1-17 相对时间四分档（fmtAge）：刚刚 / 分钟前 / 小时前 / 天前，缺值与负值出「—」', () => {
+  const f = CLIENT.__test.fmtAge;
+  assert.equal(f(0), '刚刚');
+  assert.equal(f(59_999), '刚刚', '60s 以下一律「刚刚」');
+  assert.equal(f(60_000), '1 分钟前', '整 60s 进「分钟前」档，边界不许落到上一档');
+  assert.equal(f(3_599_999), '59 分钟前');
+  assert.equal(f(3_600_000), '1 小时前');
+  assert.equal(f(86_399_999), '23 小时前');
+  assert.equal(f(86_400_000), '1 天前');
+  assert.equal(f(-1), '—', '负值是没有数据，不是「刚刚」');
+  assert.equal(f(null), '—');
+  assert.equal(f(undefined), '—');
 });
 
 /* ⑤段：清理页 —— 两段式的界面侧 */
@@ -781,6 +796,27 @@ check('pg3-13 I-6 只读闸门（搜索页）：caps 无 storageDomain ⇒ chips
   const back = PAGE({ dirs: ['F:\\dsh-plugins'] });
   assert.ok(back.buttons.some((b) => b.text.includes('添加目录')), '载荷恢复后「＋ 添加目录」必须回来（闸门翻转双向可证）');
   assert.ok(!back.has('配置只读：宿主未提供 storageDomain，覆盖范围不可改'));
+});
+
+check('pg3-14 关键字提示的大小写口径跟随实现（不敏感）：原型 index.html:659 写的「敏感」是错的', () => {
+  const out = PAGE({});
+  assert.ok(out.has('大小写不敏感'), '界面必须说不敏感（lib/search/walk.js:23 的 matchName 转小写比较）：' + out.texts.join('|'));
+  // 子串陷阱：'大小写不敏感' 不含 '大小写敏感'（中间隔一个「不」），所以这条能真咬住照抄原型的写法
+  assert.ok(!out.has('大小写敏感'), '同时出现「大小写敏感」就是界面在撒谎');
+});
+
+check('pg3-15 probeHint 的端口取注入载荷、不写死 3417（评审 M17 的渲染证人；改回硬编即红）', () => {
+  // 载荷故意给 4545：与「原型写死的 3417」和 probeCells 的默认值都不同值，写死或读错源都躲不过。
+  const dflt = clientPayload().defaults;
+  globalThis.__SYSOPS__ = clientPayload({ defaults: { ...dflt, searchPort: 4545 } });
+  try {
+    const out = PAGE({ probe: PROBE(READY) });
+    assert.ok(out.has('当前通路：Everything HTTP :4545 · 全盘索引'),
+      '通路提示行必须用载荷的 4545：' + out.texts.join('|'));
+    assert.ok(!out.has('Everything HTTP :3417'), '出现 3417 就是把端口写死了（载荷给的是 4545）');
+  } finally {
+    globalThis.__SYSOPS__ = clientPayload();
+  }
 });
 /* ⑧段：共享连接层（批 D + Ruling-98 接线）—— 带真实 useEffect/useState 的活体桩
  *    评审现证：useStream 层此前零覆盖，D-I-1 的假降级、D-I-2 的静默覆盖写、D-I-3 的连接悬挂
@@ -1262,34 +1298,39 @@ await checkAsync('cn-9 设置页写路径是读-并-写（C-1/Ruling-105）：�
 await checkAsync('cn-9b 设置页写前的现读失败：阻断整行写并把原因可见（C-1 读失败短路）', async () => {
   let gets = 0;
   const w = cnSettingsWorld();
-  const origRoutes = w.log;
-  // 把 prefs 的 GET 应答改写成「首次（进页）成功、第二次（写前现读）500」
-  void origRoutes;
-  globalThis.fetch = (async (u, init = {}) => {
-    const url = String(u); const method = init.method ?? 'GET';
-    w.log.push({ url, method, body: init.body, signal: init.signal ?? null });
-    if (url.split('?')[0] === '/sysops/api/prefs' && method === 'GET') {
-      gets += 1;
-      if (gets === 1) return { ok: true, status: 200, json: async () => ({ ok: true, data: { prefs: CN_FULL() } }) };
-      return { ok: false, status: 500, json: async () => ({ ok: false, error: { code: 'PREFS_READ_FAILED', message: '现读失败，已挡住整行写' } }) };
-    }
-    if (url.split('?')[0] === '/sysops/api/prefs' && method === 'POST') return { ok: true, status: 200, json: async () => ({ ok: true, data: { prefs: CN_FULL() } }) };
-    if (url.split('?')[0] === '/sysops/api/rules') return { ok: true, status: 200, json: async () => ({ ok: true, data: { items: [], off: [] } }) };
-    if (url.split('?')[0] === '/sysops/api/alerts/read') return { ok: true, status: 200, json: async () => ({ ok: true, data: {} }) };
-    if (url.split('?')[0] === '/sysops/api/stream') return sseRes([`event: snapshot\ndata: ${JSON.stringify(CN_SNAP)}\n\n`]);
-    return { ok: false, status: 404, json: async () => ({ ok: false, error: { code: 'TEST_NO_ROUTE', message: '没这条路由：' + url } }) };
-  });
-  await w.enterSettings();
-  const sw = findSwitchByTitle(w.live.__root, '切换 进程榜采集');
-  assert.ok(sw, 'L1b 源开关不在场');
-  sw.onClick();
-  await cnTick(80);
-  assert.ok(w.entries().filter((s) => s === 'GET /sysops/api/prefs').length >= 2, '点击后要有现读：' + JSON.stringify(w.entries()));
-  assert.equal(w.entries().filter((s) => s === 'POST /sysops/api/prefs').length, 0,
-    '现读失败还整域写回会抹掉同域其它配置（lib/prefs/store.js:191），必须阻断');
-  const out = w.render();
-  assert.ok(out.has('现读失败，已挡住整行写'), '读失败必须可见（约束 4）：' + out.texts.join('|'));
-  w.live.__unmount();
+  // 本用例要把 fetch 换成本地版本：必须 try/finally 收回本世界自己的桩，
+  // 否则 override 会漏给后面的用例（后建的 cnWorld 会重设，但同一世界内的 direct api() 调用就会读到脏桩）。
+  const worldFetch = globalThis.fetch;
+  try {
+    // 把 prefs 的 GET 应答改写成「首次（进页）成功、第二次（写前现读）500」
+    globalThis.fetch = (async (u, init = {}) => {
+      const url = String(u); const method = init.method ?? 'GET';
+      w.log.push({ url, method, body: init.body, signal: init.signal ?? null });
+      if (url.split('?')[0] === '/sysops/api/prefs' && method === 'GET') {
+        gets += 1;
+        if (gets === 1) return { ok: true, status: 200, json: async () => ({ ok: true, data: { prefs: CN_FULL() } }) };
+        return { ok: false, status: 500, json: async () => ({ ok: false, error: { code: 'PREFS_READ_FAILED', message: '现读失败，已挡住整行写' } }) };
+      }
+      if (url.split('?')[0] === '/sysops/api/prefs' && method === 'POST') return { ok: true, status: 200, json: async () => ({ ok: true, data: { prefs: CN_FULL() } }) };
+      if (url.split('?')[0] === '/sysops/api/rules') return { ok: true, status: 200, json: async () => ({ ok: true, data: { items: [], off: [] } }) };
+      if (url.split('?')[0] === '/sysops/api/alerts/read') return { ok: true, status: 200, json: async () => ({ ok: true, data: {} }) };
+      if (url.split('?')[0] === '/sysops/api/stream') return sseRes([`event: snapshot\ndata: ${JSON.stringify(CN_SNAP)}\n\n`]);
+      return { ok: false, status: 404, json: async () => ({ ok: false, error: { code: 'TEST_NO_ROUTE', message: '没这条路由：' + url } }) };
+    });
+    await w.enterSettings();
+    const sw = findSwitchByTitle(w.live.__root, '切换 进程榜采集');
+    assert.ok(sw, 'L1b 源开关不在场');
+    sw.onClick();
+    await cnTick(80);
+    assert.ok(w.entries().filter((s) => s === 'GET /sysops/api/prefs').length >= 2, '点击后要有现读：' + JSON.stringify(w.entries()));
+    assert.equal(w.entries().filter((s) => s === 'POST /sysops/api/prefs').length, 0,
+      '现读失败还整域写回会抹掉同域其它配置（lib/prefs/store.js:191），必须阻断');
+    const out = w.render();
+    assert.ok(out.has('现读失败，已挡住整行写'), '读失败必须可见（约束 4）：' + out.texts.join('|'));
+    w.live.__unmount();
+  } finally {
+    globalThis.fetch = worldFetch;
+  }
 });
 
 await checkAsync('cn-10 内置/本机 pill 吃宿主行的 builtin 标记（I-1/Ruling-106）：没标记就不画，不回落「本机」', async () => {
@@ -1642,6 +1683,23 @@ check('pg4-16 I-6 统一闸门（设置页）：capsReadOnly 决策表 + 缺键 
   const ok = SPAGE({ caps: CAPS_OK });
   const b2 = ok.buttons.find((x) => x.text === '保存设置');
   assert.equal(b2.disabled, false, 'storageDomain:true 时闸门必须开（双向可证）');
+});
+
+check('pg4-17 能力缺口横幅逐条吃 capabilityRows.ok:false；全 ok 时整块不挂（评审 B5 的渲染证人）', () => {
+  // 横幅长在根组件（client.js 的 capGaps），不在任何单页里 —— 必须渲染 SysopsPage 才够得上。
+  const allOk = clientPayload().capabilityRows.map((r) => ({ ...r, ok: true, fallback: '' }));
+  globalThis.__SYSOPS__ = clientPayload({ capabilityRows: allOk });
+  try {
+    assert.ok(!walk(CLIENT.SysopsPage()).classHas('so-capgaps'), '五行全 ok 时不许挂缺口横幅');
+  } finally {
+    globalThis.__SYSOPS__ = clientPayload();
+  }
+  // 默认载荷里 notifications / autostart 两行 ok:false ⇒ 横幅必须有、且一条一行
+  const out = walk(CLIENT.SysopsPage());
+  assert.ok(out.classHas('so-capgaps'), '两行缺口必须挂出 .so-capgaps：' + out.classes.join('|'));
+  assert.ok(out.has('系统通知（托盘）：宿主不提供'), '缺口按 label：detail/fallback 渲染：' + out.texts.join('|'));
+  assert.ok(out.has('开机自启常驻：宿主不提供'), '第二条缺口同样上屏');
+  assert.ok(!out.has('storageDomain（持久化）：宿主不提供'), 'ok:true 的行不得混进缺口横幅');
 });
 
 console.log(`\n  ${passed}/${passed + failed} 通过`);

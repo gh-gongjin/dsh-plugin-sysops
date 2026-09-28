@@ -238,7 +238,7 @@ await checkAsync('rt-14 ROUTES 覆盖 spec §3 的每个端点，且写端点全
   const keys = Object.keys(API.ROUTES);
   for (const need of ['GET /api/snapshot', 'GET /api/stream', 'GET /api/prefs', 'POST /api/prefs', 'POST /api/collect/cadence',
     'POST /api/collect/source', 'POST /api/collect/visibility', 'POST /api/collect/restart', 'GET /api/alerts', 'POST /api/alerts/read',
-    'POST /api/clean/scan', 'POST /api/clean/scan/stop', 'GET /api/clean/state', 'POST /api/clean/apply', 'GET /api/clean/logs',
+    'POST /api/clean/scan', 'POST /api/clean/scan/stop', 'GET /api/clean/state', 'GET /api/clean/plan', 'POST /api/clean/apply', 'GET /api/clean/logs',
     'GET /api/clean/unfinished', 'GET /api/rules', 'POST /api/rules/add', 'POST /api/rules/remove', 'POST /api/rules/toggle',
     'GET /api/search', 'GET /api/search/probe', 'POST /api/search/reprobe', 'GET /api/caps', 'GET /api/quarantine']) {
     assert.ok(keys.includes(need), `缺路由 ${need}`);
