@@ -1285,6 +1285,10 @@ await checkAsync('cn-10 内置/本机 pill 吃宿主行的 builtin 标记（I-1/
   assert.equal(out.texts.filter((t) => t === '内置').length, 2, '「内置」pill 数量必须等于宿主标了 builtin:true 的行数');
   assert.equal(out.texts.filter((t) => t === '本机').length, 1, '「本机」只画宿主标了 builtin:false 的那一条——无标记行不许被推断成「本机」');
   assert.ok(!out.has('u-pnpm') && !out.has('legacy-no-mark'), 'id 不上界面，界面只吃宿主给的名称');
+  // N-F1 证人②：本夹具含一行没带 builtin 标记（legacy-no-mark）⇒ 本机条数句不许猜数字，必须落「未确认」
+  // （合并数组是 4 行；若把内置/无标记一起算进「本机规则 N 条」就是谎报，这里既不能是 4 也不能是任何具体数字）
+  assert.ok(out.has('本机规则计数未确认'), '宿主没给 builtin 标记时本机条数句必须落「未确认」口径：' + out.texts.join('|'));
+  assert.ok(!/本机规则 \d+ 条/.test(out.texts.join('|')), '未确认态下界面不许出现「本机规则 <数字> 条」：' + out.texts.join('|'));
   w.live.__unmount();
 });
 
@@ -1389,6 +1393,41 @@ await checkAsync('cn-12 写失败分支留痕（I-5）：POST 500 后错误可�
   // ④ 服务端记录真的没动（500 的写不进仓储）
   assert.equal(w.server.rec.sources.l1b, false, '失败的 POST 不该改到服务端现值');
   w.live.__unmount();
+});
+
+await checkAsync('cn-13 设置页「本机规则 N 条」只数宿主标为非内置的行，内置不进计数、读不到不落数字（复评 N-F1）', async () => {
+  const marked = (id, b) => ({ id, n: id + '规则', kind: '缓存', ageDays: 1, rel: id + '/**', builtin: b, enabled: true });
+  const BUILTIN_12 = Array.from({ length: 12 }, (_, i) => marked('b' + i, true));
+  const enter = async (w) => {
+    w.render(); await cnTick(); w.render();
+    const tab = findClickExact(w.live.__root, '设置') || w.click('设置');
+    assert.ok(tab, '没找到「设置」页签');
+    tab(); w.render(); await cnTick(); return w.render();
+  };
+  // ① 真机形状：12 条内置 + 2 条本机（都带 builtin 标记）⇒ 界面读数须是「本机规则 2 条」，内置那 12 行不进这个数
+  const w1 = cnSettingsWorld({ builtin: BUILTIN_12, items: [marked('u1', false), marked('u2', false)], off: [] });
+  const out1 = await enter(w1);
+  assert.ok(out1.has('本机规则 2 条'), '两条本机规则的读数必须是「本机规则 2 条」：' + out1.texts.join('|'));
+  assert.ok(!out1.has('本机规则 14 条') && !out1.has('本机规则 4 条'), '内置行不许被算进本机条数（14/4 都是谎报）：' + out1.texts.join('|'));
+  assert.equal(out1.texts.filter((t) => t === '内置').length, 12, '12 条内置 pill 与「本机规则 2 条」并存才自洽');
+  w1.live.__unmount();
+  // ③ 本机规则全部清空（items: []，内置仍在）⇒ 落「本机规则已全部清空」而不是把内置念成「本机规则 12 条」
+  const w2 = cnSettingsWorld({ builtin: BUILTIN_12, items: [], off: [] });
+  const out2 = await enter(w2);
+  assert.ok(out2.has('本机规则已全部清空'), '本机清空态必须落「已全部清空」：' + out2.texts.join('|'));
+  assert.ok(!out2.has('本机规则 12 条'), '已清空时不许把 12 条内置念成「本机规则 12 条」：' + out2.texts.join('|'));
+  w2.live.__unmount();
+  // null 规则接口整体读不到 ⇒ 未确认/未写入态如实措辞，绝不落一个具体数字
+  const w3 = cnWorld([
+    { url: '/sysops/api/stream', reply: () => sseRes([`event: snapshot\ndata: ${JSON.stringify(CN_SNAP)}\n\n`]) },
+    { url: '/sysops/api/alerts/read', method: 'POST', reply: () => jsonRes({ ok: true, data: {} }) },
+    { url: '/sysops/api/rules', reply: () => jsonRes({ ok: false, error: { code: 'RULES_READ_FAILED', message: '规则读不到' } }) },
+    { url: '/sysops/api/prefs', reply: () => jsonRes({ ok: true, data: { prefs: CN_FULL() } }) },
+  ]);
+  const out3 = await enter(w3);
+  assert.ok(out3.has('本机尚未写入清理规则'), '读不到时落「本机尚未写入清理规则」的未确认态：' + out3.texts.join('|'));
+  assert.ok(!/本机规则 \d+ 条/.test(out3.texts.join('|')), '读不到态下界面不许出现「本机规则 <数字> 条」：' + out3.texts.join('|'));
+  w3.live.__unmount();
 });
 
 /* ⑦段：设置页 —— 开关、规则、能力表与只读闸门

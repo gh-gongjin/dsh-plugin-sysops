@@ -914,6 +914,27 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
     }
 
     /**
+     * 本机规则计数单列一槽（复评 N-F1）：合并行同时含内置与本机两类，计数只该吃「本机」那一份。
+     * 判据**只读宿主给的 `builtin` 标记**（Ruling-106 单源），不按 id 前缀/白名单自判：
+     *   · `builtin === true` → 内置行，不进本机计数；
+     *   · `builtin === false` → 宿主明标的本机行，计入；
+     *   · 任一行没带 `builtin` 标记（老宿主形状）→ 不猜、不把它当 0 条本机、也不并进计数，
+     *     整槽如实落「未确认」（返回非数组标记，交 ruleStateText 的未确认分支，绝不出具体数字）。
+     * 接口整体读不到时调用方不进取值、保持 null → 走 ruleStateText 的「本机尚未写入」读不到态。
+     */
+    function userRuleSlot(rows) {
+      if (!Array.isArray(rows)) return 'unconfirmed';
+      const local = [];
+      for (const r of rows) {
+        const b = r ? r.builtin : undefined;
+        if (b === true) continue;
+        if (b === false) { local.push(r); continue; }
+        return 'unconfirmed';
+      }
+      return local;
+    }
+
+    /**
      * 写偏好请求体：**只发差量** `{ prefs: patch }`（服务端 normalize 后回全量）。
      * 不整包回传当前 prefs —— 那会把用户在别处刚改的组抹掉（读-并-写的整域覆盖风险，同 writePrefsGroup 的理由）。
      */
@@ -1511,7 +1532,7 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
      */
     function SettingsPage(props = {}) {
       const {
-        prefs = {}, rules = [], caps = {}, capRows = [], snap = null, err = null, saving = false,
+        prefs = {}, rules = [], userRules = null, caps = {}, capRows = [], snap = null, err = null, saving = false,
         onPatch, onRuleAdd, onRuleToggle, onRuleRemove, onSave,
       } = props;
       const nameRef = useRef(null);
@@ -1597,7 +1618,7 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
         h('div', { className: 'so-card' },
           h('div', { className: 'so-card-h' }, h('h2', null, '清理规则'),
             h('span', { className: 'so-hsub' }, '内置规则只放通用缓存路径；本机私有路径存在你机器上，不进仓库'),
-            h('span', { className: 'so-grow so-hint' }, ruleStateText(rules))),
+            h('span', { className: 'so-grow so-hint' }, ruleStateText(userRules))),
           errN ? h('div', { className: 'so-card-b', style: { paddingBottom: 0 } }, h(Notice, { tone: errN.tone }, errN.text)) : null,
           h('div', { className: 'so-card-b' },
             cells.length ? h('div', null, cells.map((c, i) => {
@@ -1613,7 +1634,7 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
                 h(Switch, { on: c.on && !c.blocked, disabled: c.blocked,
                   label: c.blocked ? 'guard 已拒绝，无法启用' : (c.on ? '停用规则' : '启用规则'),
                   onChange: (next) => { if (!c.blocked && onRuleToggle) onRuleToggle(rid, next); } }));
-            })) : h('div', { className: 'so-empty' }, ruleStateText(rules)),
+            })) : h('div', { className: 'so-empty' }, ruleStateText(userRules)),
             // 新增本机规则：自研控件，无原生校验气泡；保存时先过服务端 guard，命中红线的拒绝就地落 notice
             h('div', { className: 'so-grid so-g-2', style: { marginTop: 14 } },
               h('div', { className: 'so-field' }, h('label', null, '名称'),
@@ -1946,6 +1967,8 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
       //    SettingsPage 自身零 useState（与其余三页同规）。
       const [setPrefs, setSetPrefs] = useState(null);
       const [setRules, setSetRules] = useState([]);
+      // 本机规则计数槽（复评 N-F1）：不进合并行的内置行不计入本机条数；null=读不到、未确认标记=非数组、[]/数组=如实
+      const [userRules, setUserRules] = useState(null);
       const [setSaving, setSetSaving] = useState(false);
 
       /**
@@ -1963,7 +1986,13 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
         if (row) {
           const builtin = Array.isArray(row.builtin) ? row.builtin : [];
           const user = Array.isArray(row.items) ? row.items : [];
-          setSetRules(builtin.concat(user));
+          const merged = builtin.concat(user);
+          setSetRules(merged);
+          // 计数只吃本机那一份（内置行不进），宿主没标 builtin 的行让整槽落未确认（复评 N-F1）
+          setUserRules(userRuleSlot(merged));
+        } else {
+          // 规则接口读不到：计数不猜数字，回落到「本机尚未写入清理规则」的未确认/未写入态
+          setUserRules(null);
         }
         for (const pair of [['prefs', pf], ['rules', rl]]) {
           if (!pair[1].ok) { setPageErr({ source: pair[0], ...(pair[1].error || { code: 'UNKNOWN', message: '接口调用失败' }) }); break; }
@@ -2180,7 +2209,7 @@ table.so-tbl{width:100%;border-collapse:collapse;font-size:12.5px}
           onAddDir: doSearchAddDir, onDelDir: doSearchDelDir,
         }),
         tab === 'settings' && h(pages.SettingsPage, {
-          prefs: setPrefs || {}, rules: setRules, caps: cfg().capabilities || {},
+          prefs: setPrefs || {}, rules: setRules, userRules, caps: cfg().capabilities || {},
           capRows: cfg().capabilityRows || [], snap, err: pageErr, saving: setSaving,
           onPatch: doSettingsPatch, onRuleAdd: doSettingsRuleAdd, onRuleToggle: doSettingsRuleToggle,
           onRuleRemove: doSettingsRuleRemove, onSave: doSettingsSave,
