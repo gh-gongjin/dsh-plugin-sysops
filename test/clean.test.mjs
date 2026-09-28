@@ -1091,5 +1091,15 @@ await checkAsync('cs-9 prefs 没设 quarantineDir 时回落到 %LOCALAPPDATA% �
   assert.equal(w.quarArgs[0].rootDir, QU.DEFAULT_QUARANTINE('C:\\Users\\gongj\\AppData\\Local'));
 });
 
+await checkAsync('cs-10 plan(planId) 薄转发：把 id 原样交给 planStore.get，命中回快照实体、未命中回 null（Ruling-98 的新出口）', async () => {
+  const w = csWorld();
+  await w.svc.startScan();
+  const got = await w.svc.plan('p-1');
+  assert.ok(got, '扫描落库后按 id 必须读回实体');
+  assert.equal(got.planId, 'p-1');
+  assert.ok(Array.isArray(got.items) && got.items.length === 1, '实体就是 planStore 落库那一行，不加工');
+  assert.equal(await w.svc.plan('nope'), null, '查无交 null，由路由层翻 404');
+});
+
 console.log(`\n  ${passed}/${passed + failed} 通过`);
 process.exit(failed ? 1 : 0);
