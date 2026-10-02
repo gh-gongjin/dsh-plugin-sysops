@@ -9,7 +9,12 @@
     "./client": { "default": "./client.js" },
     "./package.json": "./package.json"
   },
-  "files": ["index.js", "lib", "client.js", "cordis.yml", "README.md", "LICENSE"],
+  "files": ["index.js", "lib", "client.js", "cordis.yml", "scripts", "prototype", "README.md", "LICENSE"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gh-gongjin/dsh-plugin-sysops.git"
+  },
+  "homepage": "https://github.com/gh-gongjin/dsh-plugin-sysops#readme",
   "keywords": ["dsh", "dsh-plugin", "sysops", "monitor", "disk-clean", "windows"],
   "license": "MIT",
   "dsh": {

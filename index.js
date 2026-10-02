@@ -7,7 +7,7 @@
  *   1. 把四个 service（collect / alerts / clean / search）、五个 store
  *      （prefs / rules / alert_hit / clean_plan / clean_log）与 lib/api.js 门面
  *      接到宿主 ctx 上；
- *   2. 按需探测宿主能力（storageDomain / timer / webServer），缺哪项就怎么降级；
+ *   2. 按需探测宿主能力（storageDomain / timer / webServer / llm），缺哪项就怎么降级；
  *   3. 经 `webserver/index-inject` 把配置与能力表推给浏览器半边；
  *   4. 注册 `/sysops` 前缀路由，并在生命周期结束时按序收口（先断采集与子进程，后关存储句柄）。
  *
@@ -19,14 +19,18 @@
  *
  * 为什么 inject = []（零硬 inject）：
  *   Cordis 的 Context 是代理，读未 inject 的服务直接抛 `cannot get property without inject`。
- *   把 webServer / storageDomain / timer 写进 inject 会让"宿主缺任一服务"直接卡死插件加载。
+ *   把 webServer / storageDomain / timer / llm 写进 inject 会让"宿主缺任一服务"直接卡死插件加载。
  *   本插件选择按需注入 + 逐项探测 + 如实降级：缺存储配置转只读、缺定时器退 setInterval、
- *   缺 webServer 连侧边栏入口都不注册（点开空白页比看不到入口更糟）。
+ *   缺 webServer 连侧边栏入口都不注册（点开空白页比看不到入口更糟）、缺 llm 只是 AI 建议按钮不亮。
  *
  * 对系统的读写边界（红线，spec §1.1）：
- *   · 采集只读：L0 走 node:os / fs.statfsSync，L1a 只 spawn `typeperf`，L1b 只 spawn
- *     `powershell` 读进程榜 —— 绝不 spawn 安装器、不代装软件、不写注册表（探测只读）、
+ *   · 采集与探测只读：L0 走 node:os / fs.statfsSync，L1a 只 spawn `typeperf`，L1b 只 spawn
+ *     `powershell` 读进程榜；搜索自检三级探测全程只读 —— 这两段绝不 spawn 安装器、不写注册表、
  *     不结束任何进程、不做开机自启（notifications / autostart 宿主不提供，见 lib/caps.js）。
+ *   · 全插件**唯一**会改本机状态的两只手：① 清理执行（只删两段式清单里显式勾选的项，guard 单点裁决）；
+ *     ② S12-⑤ 的 Everything 一键安装（lib/search/installer.js）—— 必须用户在自检卡上点过
+ *     「确认安装」才起，只跑一条宿主自己写死的 `winget install --id voidtools.Everything`，
+ *     请求体的任何字段都不进命令行，探不到 winget 就连按钮都不亮。
  *   · 删除只删"用户在两段式清单里显式勾选的项"，且"能不能删"由 lib/clean/guard.js 单点裁决，
  *     本文件不复制判定、不放宽、也不绕过它直接操作路径（路径永不采信前端）。
  */
@@ -48,11 +52,13 @@ import { createAlertService } from './lib/alerts/service.js';
 import { createPlanStore } from './lib/clean/plan-store.js';
 import { createLogStore } from './lib/clean/log-store.js';
 import { createCleanService } from './lib/clean/service.js';
+import { createAiAdvisor } from './lib/clean/ai-advisor.js';
 import { createScanner } from './lib/clean/scanner.js';
 import { createExecutor } from './lib/clean/executor.js';
 import { createQuarantine } from './lib/clean/quarantine.js';
 import { createSearchService } from './lib/search/service.js';
 import { createProbe, ADVICE } from './lib/search/probe.js';
+import { createInstaller } from './lib/search/installer.js';
 import { searchEverything } from './lib/search/everything-http.js';
 import { searchEs } from './lib/search/es-exe.js';
 import { walkSearch } from './lib/search/walk.js';
@@ -166,7 +172,7 @@ const REDLINE_TEXT = {
   'b-system-dir': '系统目录（Windows / System32 等）只读，永不清理或删除',
   'b-recycle-bin': '回收站不碰：既不清空、也不还原，删除项一律走用户显式勾选',
   'b-program-files': 'Program Files / Program Files (x86) 受保护，只读不删',
-  'b-registry': '注册表只读探测，绝不写入、绝不代装软件',
+  'b-registry': '注册表只读探测，绝不写入，也绝不作为清理对象',
 };
 
 /** 模块级最近一次装配的运行时快照，仅测试可观测性用（见 __peek）。 */
@@ -221,25 +227,40 @@ function execFileAsync(bin, args, opts = {}) {
 export function apply(ctx, config = {}) {
   const resolved = resolveConfig(config);
 
-  /* ---- 1. 按需注入宿主服务（读属性会抛，必须走 inject）---- */
+  /* ---- 1. 宿主服务句柄：由 ctx.inject 回调**延后**填入（装配在 section 11 做）---- */
+  // ⚠️-2 Cordis 4.x：`ctx.inject(deps, cb)` 等价于 `ctx.plugin({ inject, apply: cb })` ——
+  // cb 跑在**独立 fiber** 上，**不在 apply 的同步段执行**；deps 不可满足时 cb 永不执行（不是抛错）。
+  // 所以同步段读这四个变量一律是空：能力位与依赖它们的装配（路由注册）都只能在回调里做。
+  // 真机症状（本文件的病历）：apply 顶层同步取一次快照 ⇒ 各项能力恒 false ⇒ 满屏能力缺口横幅
+  // + `if (caps.webServer)` 闸掉整块路由 ⇒ /sysops/api/* 全 404、页面无数据。
   let storageFacility;
   let intervalFn = null;
   let webServer;
-  ctx.inject(['storageDomain'], (s) => { storageFacility = s.storageDomain; });
-  ctx.inject(['timer'], (t) => { if (t.timer && typeof t.timer.interval === 'function') intervalFn = (fn, ms) => t.timer.interval(fn, ms); });
-  ctx.inject(['webServer'], (w) => { webServer = w.webServer; });
+  let llmService;
 
-  /* ---- 2. 能力探测：present 时同步标，缺时标 false 并留中文降级原因 ---- */
+  /* ---- 2. 能力：现取现算（syncCaps），不在 apply 顶层锁死 ---- */
   // ⚠️-1 硬约束：getFacility 必须始终返回**同一个** storageFacility 实例。
   // lib/kv-records-base.js 的登记表按 WeakMap<facility, ...> 记账、refs 归零才真关域，
   // lib/alerts/store.js 记的也是当初 acquire 的那个 held。宿主每次重取都会让 refs 记账作废 ——
   // 所以下面所有仓储都用同一个 `() => storageFacility`，且 apply 内绝不重新读 ctx 属性、绝不重取。
   const getFacility = () => storageFacility;
   const caps = createCaps({ logger: ctx.logger });
-  caps.mark('storageDomain', Boolean(storageFacility), storageFacility ? '' : '宿主未提供 ctx.storageDomain');
-  caps.mark('timer', Boolean(intervalFn));
-  caps.mark('webServer', Boolean(webServer));
-  // notifications / autostart 宿主不提供：保持缺省 false，绝不 mark(true)（见 lib/caps.js NEVER_PROVIDED）。
+  let storageOpenFailure = '';   // 有设施但域 open 失败：能力位随 reloadPrefs 回落并带上原因
+  /** 按当前句柄重算能力位。调用点：每个 inject 回调、index-inject 载荷构建前。 */
+  function syncCaps() {
+    caps.mark(
+      'storageDomain',
+      Boolean(storageFacility) && !storageOpenFailure,
+      !storageFacility ? '宿主未提供 ctx.storageDomain' : storageOpenFailure,
+    );
+    caps.mark('timer', Boolean(intervalFn), intervalFn ? '' : '宿主未提供 ctx.timer.interval，已退到 setInterval');
+    caps.mark('webServer', Boolean(webServer), webServer ? '' : '宿主未提供 webServer，一个入口都不注册');
+    // ai（S12-C）这一项**不在这里现算**：只在 llm 注入回调落地时 mark(true)（见 section 11）。
+    // 理由是它的降级面只影响一个建议按钮，而"宿主没给模型"是常见常态：
+    // 每次 syncCaps 都 mark(false) 会留下一条「宿主缺少 ai」的启动 warn，还会因带 why 而点亮页头横幅。
+    // 保持未探测态 = 表上如实显示 ok:false + fallback 那句话，一句多余的话都不说。
+    // notifications / autostart 宿主不提供：保持缺省 false，绝不 mark(true)（见 lib/caps.js NEVER_PROVIDED）。
+  }
 
   /* ---- 3. 偏好视图（同步读）：启动读一次，写后立即重读 ---- */
   const prefStore = createPrefStore({ getFacility, logger: ctx.logger, now: () => Date.now() });
@@ -249,14 +270,16 @@ export function apply(ctx, config = {}) {
     try {
       const all = await prefStore.readAll();
       view = mergePrefs(resolved, all?.prefs ?? null);
+      storageOpenFailure = '';
     } catch (e) {
-      // 有设施但域 open 失败（already-open 之类）：只降级、不抛；能力位改回 false 并留痕。
+      // 有设施但域 open 失败（already-open 之类）：只降级、不抛；能力位随之回落并留痕。
       view = mergePrefs(resolved, null);
       if (storageFacility) {
+        storageOpenFailure = '存储域 open 失败，配置转只读';
         ctx.logger?.warn?.(`[sysops] 存储域不可用（${e?.code ?? ''} ${e?.message ?? e}），偏好转只读`);
-        caps.mark('storageDomain', false, '存储域 open 失败，配置转只读');
       }
     }
+    syncCaps();   // open 失败要能反映到能力位（storageDomain 由 true 回落 false + 原因）
   }
   const getPrefs = () => view;
 
@@ -323,6 +346,11 @@ export function apply(ctx, config = {}) {
     now: () => Date.now(),
   });
 
+  /* ---- 7.5 Everything 一键安装（S12-⑤）：全插件唯一会改本机状态的写手（除清理执行外）---- */
+  // 只有自检卡上「确认安装」点下去才会走到 start()；探不到 winget 就 ready().can=false，按钮不亮。
+  // 复用 index.js 的 execFile 门面（非 shell），命令行整体是 lib/search/installer.js 的常量。
+  const install = createInstaller({ execFileMod: execFileAsync, probe, logger: ctx.logger, now: () => Date.now() });
+
   /* ---- 8. clean 服务（暂存红线由本服务每次现造，扫描/执行用真实工厂）---- */
   const clean = createCleanService({
     ruleStore,
@@ -338,6 +366,11 @@ export function apply(ctx, config = {}) {
     logger: ctx.logger,
     now: () => Date.now(),
   });
+
+  /* ---- 8.5 AI 清理建议（S12-C）：只读那份冻结快照要建议，不碰执行链 ---- */
+  // getLlm 与 getFacility 同一口径：**惰性取句柄变量**，绝不读 ctx 属性（Context 是代理，未 inject 读了就抛）。
+  // llm 句柄晚到时这里不用重装配：advisor 每次调用现取，provider/model 走运行时发现（不写死型号）。
+  const ai = createAiAdvisor({ getLlm: () => llmService, planStore, logger: ctx.logger, now: () => Date.now() });
 
   /* ---- 9. api 门面：collectForApi 保证界面点档位/开关时"service + 落库"两处都动（spec §3.2）---- */
   // 读-并-写全量：prefs 是**一行一份**（lib/prefs/store.js:191 writeMany 整行 put），
@@ -360,8 +393,10 @@ export function apply(ctx, config = {}) {
     collect: collectForApi,
     alerts,
     clean,
+    ai,
     search,
     probe,
+    install,
     prefStore: prefsFacade,
     ruleStore,
     caps,
@@ -385,27 +420,63 @@ export function apply(ctx, config = {}) {
   if (typeof ctx.effect === 'function') ctx.effect(() => teardown, 'sysops:lifecycle');
   lastRuntime = { collect, teardown };
 
-  /* ---- 11. 挂上 L0 采集节拍 + 订阅告警 + 启动预读偏好（异步，不阻塞 apply 返回）---- */
+  /* ---- 11. 宿主服务按需注入 + 启动节拍 ----
+   * 注入回调是**独立 fiber**（见 section 1 ⚠️-2），能力位与依赖它们的装配都只能在回调里做：
+   *   · storageDomain → 句柄落地后重读偏好（域可能 open 失败，能力位随 reloadPrefs 回落）
+   *   · timer         → 句柄落地后**重挂 L0**：启动那次挂表时宿主定时器还没到位（退路 setInterval），
+   *                     不重挂的话 `snapshot().timerBackend` 会一路说 setInterval，与能力位自相矛盾
+   *   · webServer     → 回调里注册路由；拿不到就一个入口都不注册（spec §4.6）
+   *   · llm           → AI 清理建议（S12-C）的句柄；拿不到就保持能力位未探测态，
+   *                     界面上的「AI 智能清理」按钮不亮，两段式人工清理一点不受影响
+   */
   // 这里**不**调 collect.start()（它会立即 l1a.enable() 去 spawn typeperf/powershell 常驻子进程）。
   // 启动期只把 L0 定时器按初始档位挂上（setCadence→armL0），子进程由可见性驱动的 setSource / SSE 首连再拉起。
-  // 这样 apply() 在无宿主子进程生命周期管理时也不会派生孤儿采集进程；timerBackend 退路仍如实可观测。
+  // 这样 apply() 在无宿主子进程生命周期管理时也不会派生孤儿采集进程。
   collect.setCadence(resolved.cadence);
   alerts.start();
-  void reloadPrefs();
 
-  /* ---- 12. 只有探到 webServer 才注册路由与推送入口载荷 ---- */
-  if (caps.webServer) {
-    if (typeof ctx.effect === 'function') {
-      ctx.effect(() => {
-        const disposer = webServer.register({ kind: 'prefix', path: ROUTE_PREFIX, handler: apiHandler });
-        return typeof disposer === 'function' ? disposer : () => {};
-      }, 'sysops:route');
-    } else {
-      webServer.register({ kind: 'prefix', path: ROUTE_PREFIX, handler: apiHandler });
+  ctx.inject(['storageDomain'], (s) => {
+    storageFacility = s.storageDomain;
+    syncCaps();
+    void reloadPrefs();
+  });
+
+  ctx.inject(['timer'], (t) => {
+    if (t.timer && typeof t.timer.interval === 'function') intervalFn = (fn, ms) => t.timer.interval(fn, ms);
+    syncCaps();
+    try {
+      collect.setCadence(view.collect.cadence);   // armL0 现取 intervalFn（lib/collect/service.js）
+    } catch (e) {
+      ctx.logger?.warn?.(`[sysops] 宿主定时器就绪后重挂采集节拍失败：${e?.message ?? e}`);
     }
-  }
+  });
 
+  ctx.inject(['webServer'], (w) => {
+    webServer = w.webServer;
+    syncCaps();
+    // handler 走一层闭包：apiHandler 在本回调执行时早已构造完，但闭包让注册语句只依赖 webServer 本身，
+    // 不必给注册动作排前后顺序（也避免了某些加载顺序下的 TDZ）。
+    const register = () => {
+      const disposer = webServer.register({ kind: 'prefix', path: ROUTE_PREFIX, handler: (req, res, body) => apiHandler(req, res, body) });
+      return typeof disposer === 'function' ? disposer : () => {};
+    };
+    if (typeof w.effect === 'function') w.effect(register, 'sysops:route');
+    else register();
+  });
+
+  // AI 清理建议（S12-C）：只把句柄存下来 + 点亮能力位，不装配别的东西。
+  // provider / model 一律在首次要建议时**运行时发现**（lib/clean/ai-advisor.js），
+  // 所以这里连 describe 都不必预跑一次 —— 预跑会把宿主模型清单的探测成本压进启动段。
+  ctx.inject(['llm'], (s) => {
+    llmService = s.llm;
+    caps.mark('ai', true);
+    ctx.logger?.info?.('[sysops] 宿主模型句柄已到位：清理页的「AI 智能清理」可用（只推荐，执行仍走两段式确认）');
+  });
+
+  /* ---- 12. 入口载荷：只有 webServer 到位才推（spec §4.6：一个入口都不注册，胜过点开空白页）---- */
   ctx.on('webserver/index-inject', (table) => {
+    if (!webServer) return;
+    syncCaps();   // 载荷里的能力位现算，不搬 apply 顶层的旧快照
     table.push({
       kind: 'global',
       name: GLOBAL_KEY,

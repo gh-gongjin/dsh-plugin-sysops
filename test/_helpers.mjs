@@ -48,3 +48,22 @@ export function createMemoryFacility({ closeDelayMs = 0 } = {}) {
     },
   };
 }
+
+/**
+ * `fs.statfsSync()` 的桩（S12-A）。
+ *
+ * **键集合逐字取真机读数**（`node tmp/probe-s12-disk.mjs` → `tmp/s12-disk.txt`）：
+ * `type / bsize / blocks / bfree / bavail / files / ffree`。真机上**没有** `available` 与 `total`，
+ * 而清理侧三处早先读的就是 `.available` ⇒ 假桩多给一个键，替宿主圆了一个谎：
+ * 四百多条断言全绿，真机每条留痕的 `beforeFree` 都是 0（spec §8.7 / S9 同型事故，本函数就是那道闸）。
+ *
+ * `total` / `free` 按字节交，内部折成扇区计数 —— 不能被 `bsize` 整除时报错，
+ * 免得用例把「换算写错」读成「桩给的数不对」。
+ */
+export function statfsFixture({ total = 120 * 2 ** 30, free = 60 * 2 ** 30, bsize = 4096 } = {}) {
+  const t = Number(total);
+  const f = Number(free);
+  if (!Number.isInteger(t) || !Number.isInteger(f)) throw new Error('statfsFixture 的 total / free 必须是整数值');
+  if (t % bsize !== 0 || f % bsize !== 0) throw new Error(`statfsFixture 的值必须能被 bsize(${bsize}) 整除，收到 total=${t} free=${f}`);
+  return { type: 0, bsize, blocks: t / bsize, bfree: f / bsize, bavail: f / bsize, files: 0, ffree: 0 };
+}

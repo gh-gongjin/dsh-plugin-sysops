@@ -28,6 +28,9 @@
   --sidebar-w:200px;
 }
 *{box-sizing:border-box;margin:0;padding:0}
+/* hidden 必须真的藏住：.notice 这类带 display:flex 的作者规则会盖掉 UA 的 [hidden]{display:none}。
+   S12-E 截图核对抓到：安装确认行置 hidden 后仍画成一条 1094x20 的空琥珀色横条。 */
+[hidden]{display:none !important}
 html,body{height:100%}
 body{
   font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
@@ -105,6 +108,8 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 .btn-sm{height:26px;padding:0 9px;font-size:12px;border-radius:var(--r-sm)}
 .btn-quiet{border-color:transparent;color:var(--t2)}
 .btn-quiet:hover{background:var(--bg-hover);color:var(--t1)}
+/* 页头「清理留痕」是开关不是动作：展开态要有视觉差别（与 client.js 的 .so-btn.is-open 同形） */
+.btn.is-open{background:var(--bg-soft);border-color:var(--bd-2)}
 .hint{font-size:12px;color:var(--t3);white-space:nowrap}
 .hint-live{font-size:12px;color:var(--t2);white-space:nowrap}
 
@@ -135,7 +140,9 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 .tab-panel[hidden]{display:none}
 
 .card{border:1px solid var(--bd);border-radius:var(--r-lg);background:#fff;overflow:hidden}
-.card + .card{margin-top:14px}
+/* 卡间距只挂在「面板的直接子级」上：.card + .card 会把 14px 漏进 .charts 网格，
+   同排第 2/4 张卡被压下并压矮 14px（真机反馈「这两个边框高度不一样」）；且卡前面不是卡时给不出间距。 */
+.tab-panel > * + .card{margin-top:14px}
 .card-head{
   display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--bd);
   background:var(--bg-soft);
@@ -160,6 +167,28 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 .track>i{display:block;height:100%;background:var(--ink)}
 .track.warn>i{background:var(--amber)}
 .track.crit>i{background:var(--up)}
+  /* 进度条宽度走过渡（S11-②）：逐条结果帧到达时是「走一步」，不是整条跳一格 */
+  .track>i{transition:width .25s ease}
+  /* 清理执行面板（S11-②「清理过程要有动画展」）：就地落在清单卡内，spec 禁浮层 */
+  .run-panel{margin-top:10px;padding:10px 12px;border:1px solid var(--bd);border-radius:8px;background:var(--bg-soft)}
+  /* 面板底色就是 --bg-soft：槽再取 --bg-soft 就等于看不见，只剩一条实心进度。槽改深一档并加粗 1px。 */
+  .run-panel .track{height:4px;background:var(--bd-2)}
+  .run-h{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--t2)}
+  .run-dot{width:7px;height:7px;border-radius:50%;background:var(--bd-2);flex:0 0 auto}
+  .run-panel.is-running .run-dot{background:var(--down);animation:run-pulse .9s ease-in-out infinite}
+  .run-panel.is-done .run-dot{background:var(--ink)}
+  @keyframes run-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(1.6)}}
+  .run-list{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:var(--t2)}
+  .run-list li{display:flex;align-items:center;gap:7px;min-width:0}
+  .run-list .path{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  /* AI 智能清理（S12-③）：卡头那颗按钮 + 卡内建议面板。面板复用 run-panel 的壳，
+     这里只补行内布局；采纳框长得像清单里的勾选框，但它的语义是"并进勾选"，不是删除。 */
+  .ai-ask{display:inline-flex;align-items:center;gap:8px}
+  .ai-list{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}
+  .ai-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:7px 9px;border:1px solid var(--bd);border-radius:8px;background:#fff;font-size:12px;color:var(--t2)}
+  .ai-row .ai-name{font-weight:500;color:var(--t1)}
+  .ai-row .ai-reason{flex:1 1 100%;color:var(--t3);font-size:11.5px;line-height:1.6}
+  .ai-row>.hint{font-variant-numeric:tabular-nums}
 
 /* ---------- 监控：采集源状态条 ---------- */
 .srcs{
@@ -178,7 +207,21 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 
 /* ---------- 监控：曲线 ---------- */
 .charts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:14px}
-.curve{width:100%;height:auto;display:block}
+/* 曲线悬停读数（S15-①，与 client.js 的 .so-curve / .so-tip-* 同形）：svg 是
+   preserveAspectRatio="none"（viewBox 340×92 拉到约 540px 宽），画在里面的 <text> 与 <circle>
+   会被横向拉伸 1.6 倍 —— 字发胖、点变椭圆。所以引导线留在 svg 内（要跟着曲线走），
+   圆环与气泡是**卡内** HTML 元素：横向按百分比贴、纵向按 px 贴，不吃拉伸。
+   两者只在这张卡里出现（.curve 是它的定位父级），不是浮层提示条。
+   气泡的横向朝向由 showCurveTip 给（点在哪半边就朝里长），类里不写 transform，免得两处各写一份互相压。
+   引导线 S16-① 由「3 3 虚线 + .45」改成实心细线 + .28（真机批「虚线样式不好看」）：阈值线本来就是虚线，
+   两条含义不同的线用同一种虚线画法会糊成一类 —— 虚实要留给「阈值 vs 悬停」这一层区分。浏览器半边同规。 */
+.curve{position:relative}
+.curve-svg{width:100%;height:auto;display:block}
+.tip-line{stroke-width:1;opacity:.28}
+.tip-ring{position:absolute;transform:translate(-50%,-50%);width:11px;height:11px;box-sizing:border-box;border-radius:50%;background:var(--bg-app);border:2px solid var(--t1);pointer-events:none}
+.tip-box{position:absolute;top:1px;display:inline-flex;align-items:baseline;gap:6px;padding:3px 9px;border:1px solid var(--bd-2);border-radius:8px;background:var(--bg-app);box-shadow:0 1px 3px rgba(0,0,0,.09);font-size:11.5px;line-height:1.35;color:var(--t1);white-space:nowrap;pointer-events:none}
+.tip-box b{font-weight:600;font-variant-numeric:tabular-nums}
+.tip-box .t{color:var(--t3);font-variant-numeric:tabular-nums}
 .curve-cap{display:flex;align-items:baseline;gap:8px;margin-bottom:6px}
 .curve-cap .big{font-size:16px;font-weight:600;letter-spacing:-.3px}
 .curve-cap .unit{font-size:11.5px;color:var(--t3)}
@@ -188,6 +231,43 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 
 /* ---------- 表格 ---------- */
 .tbl-wrap{overflow-x:auto}
+/* 清理清单在卡内滚动（S10-② 真机批注「滚动只在这个框内，不要整个屏滚动」）：限高 + 表头吸顶，
+   操作条当时仍留在框下方；S19-② 真机批「不要放在最下面，放在上面」后整条挪到卡头正下方。 */
+.tbl-wrap-plan{max-height:clamp(240px,52vh,480px);overflow:auto}
+.tbl-wrap-plan .tbl thead th{position:sticky;top:0;z-index:1}
+/* 进程榜同口径限高（S18-③ 真机批注「不要整页滚动，只在框内滚动」；浏览器半边 .so-tblwrap-proc 同规）。
+   比清理清单矮一档：这一页上面还有四张曲线卡，不能被榜顶出屏幕。 */
+.tbl-wrap-proc{max-height:clamp(220px,42vh,400px);overflow:auto}
+.tbl-wrap-proc .tbl thead th{position:sticky;top:0;z-index:1}
+/* 可排序表头：按钮铺满整格（点哪都算），aria-sort 挂在 th 上；未选中的列不画箭头。 */
+.tbl th.th-sort{padding:0}
+.th-sort button{display:flex;align-items:center;justify-content:flex-end;gap:4px;width:100%;padding:7px 10px;background:none;border:0;font:inherit;font-size:11.5px;color:inherit;text-align:right;white-space:nowrap}
+.th-sort button:hover{color:var(--t1)}
+.th-sort button.is-on{color:var(--t1);font-weight:600}
+.th-sort button i{font-size:10px;line-height:1;font-style:normal}
+/* 容量概览条（S12-A，与 client.js 的 .so-disk 同形）：先看盘再看清单。
+   可用/总量与监控页同源，「扫描那一刻」取冻结快照的 beforeFree，「可腾出」取条目大小合计 —— 不做加减推算。 */
+.disk-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:14px;padding:9px 12px;border:1px solid var(--bd);border-radius:var(--r-md);background:var(--bg-soft);font-size:12px;color:var(--t2)}
+.disk-bar b{font-weight:600;color:var(--t1);font-variant-numeric:tabular-nums}
+.disk-bar .track{flex:1 1 110px;min-width:80px;height:4px;background:var(--bd-2)}
+/* 分类读数（S12-A 起，S19-① 真机批注「这些不要放在这里，放在全部分类那里使用下拉选择」）：
+   六颗 chip 在 4709 项那一屏摊成五行高，把清单表顶到第二屏；收成一行 ≠ 删掉 ——
+   每个 option 里仍是「类名 · 项数 · 大小 · 可清理 · 有风险 · 已拒绝」，只是从常驻可见变成点开可见。
+   这里用原生 select：弹出那层是浏览器自己的控件，不是本插件画的浮层提示条（§4 禁的是后者）。
+   与 client.js 的 .so-catbar / .so-cat-select 同形（两边同改）。 */
+.catbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.cat-lb{font-size:11.5px;color:var(--t3)}
+.cat-select{max-width:100%;padding:5px 8px;border:1px solid var(--bd);border-radius:8px;background:var(--bg-app);font-size:11.5px;color:var(--t1);font-variant-numeric:tabular-nums}
+/* S12-A 问题①「到底扫了哪些目录」：扫描范围卡逐条列出规则指向的目录（与 client.js 的 .so-scope 同形） */
+.scope{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:3px 14px;margin-top:10px}
+.scope-row{display:flex;align-items:baseline;gap:6px;min-width:0;font-size:11.5px;color:var(--t2)}
+.scope-row>b{font-weight:500;color:var(--t1);flex:0 0 auto}
+.scope-row .path{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.scope-row .when{flex:0 0 auto;color:var(--t3);font-variant-numeric:tabular-nums}
+.scope-row.is-off{color:var(--t3)}
+/* 清理留痕面板（S12-①）：入口在页头，展开的是这个限高滚动框 —— 滚动只发生在框内，不是浮层 */
+.logpanel{max-height:340px;overflow-y:auto;overscroll-behavior:contain;border-top:1px solid var(--bd);padding:2px 0}
+.scope-row.is-off>b{color:var(--t3)}
 .tbl{width:100%;border-collapse:collapse;font-size:12.5px}
 .tbl th{
   background:var(--bg-soft);color:var(--t3);font-weight:500;font-size:11.5px;text-align:left;
@@ -196,7 +276,9 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 .tbl td{padding:8px 10px;border-bottom:1px solid var(--bd);vertical-align:middle}
 .tbl tbody tr:hover td{background:var(--bg-hover)}
 .tbl tbody tr.is-rejected:hover td{background:#fff}
-.tbl .r{text-align:right}
+/* 数值列（PID / CPU% / 大小 / 最后访问 / 修改时间）一律单行 —— 与 client.js 的 .so-tbl .so-r 同规（S14）：
+   表格被长路径挤压时，自动布局会把富余从数值列抠走，「656 MB」折成两行。中文列仍可折行吸收挤压。 */
+.tbl .r{text-align:right;white-space:nowrap}
 .tbl .c{text-align:center;width:34px}
 .path{font-family:Consolas,"Cascadia Mono",monospace;font-size:11.5px;color:var(--t2);word-break:break-all}
 .tr-name{font-weight:500}
@@ -211,6 +293,10 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 .cbx[aria-checked="true"]{background:var(--ink);border-color:var(--ink)}
 .cbx[aria-checked="true"] svg{opacity:1}
 .cbx.is-disabled{background:var(--bg-soft);border-color:var(--bd)}
+/* 表头全选框（S10-③）：同一个 .cbx 外观的按钮，三态 none/all/mixed */
+button.cbx{padding:0;cursor:pointer;font-size:11px;line-height:1;color:var(--t2)}
+.cbx[aria-checked="true"]{color:#fff}
+.cbx[aria-checked="mixed"]{background:var(--bg-soft);border-color:var(--bd-2);color:var(--t2)}
 
 /* ---------- 开关 ---------- */
 .switch{
@@ -235,17 +321,20 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 }
 .input:focus{outline:none;border-color:#b9b9bf}
 .input-mono{font-family:Consolas,"Cascadia Mono",monospace;font-size:12px}
+.input:disabled{background:var(--bg-soft);color:var(--t3);cursor:not-allowed}
 .searchbar{display:flex;gap:8px;align-items:center}
 .searchbar .input{height:34px}
 .field{display:flex;align-items:center;gap:8px}
 .field label{width:96px;flex:0 0 96px;color:var(--t2);font-size:12px}
 
-/* ---------- 汇总条 ---------- */
+/* ---------- 汇总条 / 操作条 ----------
+   S19-②（真机批注「不要放在最下面，放在上面」）：整条从清单表下面挪到卡头正下方，
+   于是它四周都要留白 —— margin 从「只顶 14px」改成四边 14px，与 client.js 的 .so-tot 同形。 */
 .tot{
   display:flex;align-items:center;gap:10px;padding:12px 14px;flex-wrap:wrap;
-  border:1px solid var(--bd-2);border-radius:var(--r-md);background:var(--bg-soft);margin-top:14px;
+  border:1px solid var(--bd-2);border-radius:var(--r-md);background:var(--bg-soft);margin:14px;
 }
-.tot .sum{font-size:13px;font-weight:500}
+.tot .sum{font-size:13px;font-weight:500;font-variant-numeric:tabular-nums}
 .tot .grow{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
 
 /* ---------- 说明条 ---------- */
@@ -291,6 +380,10 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 .rule .rt{color:var(--t3);font-size:12px;width:118px;text-align:right;flex:0 0 118px}
 .rule.is-dim .rn,.rule.is-dim .rd{color:var(--t3)}
 
+/* S16-④：监控记录限高在卡内滚动（真机 29 条把整页顶长）。滚动容器单独套一层，不加在 .tl 身上 ——
+   .tl::before 那条竖线是绝对定位、要跟着内容滚，容器自己 overflow 会把竖线钉死在可视框上。
+   口径照 .tbl-wrap-plan / .logpanel。浏览器半边同规（.so-tlwrap）。 */
+.tl-wrap{max-height:clamp(240px,52vh,480px);overflow:auto;overscroll-behavior:contain}
 .tl{position:relative;padding-left:16px}
 .tl::before{content:"";position:absolute;left:4px;top:6px;bottom:6px;width:1px;background:var(--bd)}
 .tl-item{position:relative;padding:7px 0;cursor:default}
@@ -300,7 +393,8 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 }
 .tl-item.hit::before{border-color:var(--up);background:var(--up)}
 .tl-item.op::before{border-color:var(--blue);background:var(--blue)}
-.tl-item .tt{color:var(--t3);font-size:12px}
+.tl-item .tt{color:var(--t2);font-size:12px;font-weight:500}
+.tl-item .tt .ago{color:var(--t3);font-weight:400;margin-left:6px}
 .tl-item .tx{font-size:13px}
 .tl-item .tx .num{font-weight:500}
 .tl-click{cursor:pointer}
@@ -328,6 +422,11 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 .chip b{font-weight:500;color:var(--t1)}
 .chip button{color:var(--t3);line-height:1}
 .chip button:hover{color:var(--t1)}
+.diradd{display:inline-flex;gap:6px;align-items:center}
+/* 写偏好的交代行（S12-④）：成功说存进了哪一份，失败说没存进去 —— 沉默的按钮就是「点击没反应」 */
+.savenote{margin-top:7px;font-size:12px;line-height:1.6}
+.savenote.is-ok{color:var(--down)}
+.savenote.is-bad{color:var(--up)}
 
 .skel{height:9px;border-radius:4px;background:#f0f0f2;margin-bottom:8px}
 .skel:nth-child(2){width:82%;background:#eaeaee}
@@ -442,6 +541,7 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 
       <div class="tabs" id="tabs">
         <button class="tab is-active" data-tab="monitor">资源监控</button>
+        <button class="tab" data-tab="alerts">监控记录</button>
         <button class="tab" data-tab="clean">C 盘清理</button>
         <button class="tab" data-tab="search">文件搜索</button>
         <button class="tab" data-tab="settings">设置</button>
@@ -456,31 +556,25 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
 
         <div class="charts" id="charts"></div>
 
-        <div class="card" style="margin-top:14px">
+        <div class="card">
           <div class="card-head">
             <h2>进程占用榜</h2>
-            <span class="sub">按 PowerShell 周期采集，开销较高，默认关闭</span>
+            <span class="sub">按 PowerShell 周期采集，开销较高，默认关闭 · 点 CPU% / 内存 表头可换排序</span>
             <span class="grow">
-              <span class="seg" id="procSort">
-                <button class="is-active" data-sort="cpu">按 CPU</button>
-                <button data-sort="mem">按内存</button>
-              </span>
+              <!-- S18-③：排序改由表头点击承担（真机批注「支持点击 cpu 和内存进行排序」）。
+                   原来这颗「按 CPU / 按内存」的 seg 与表头是两套入口、两个真相，删掉。 -->
               <button class="btn btn-sm" id="btnProcToggle">开启采集</button>
             </span>
           </div>
-          <div id="procBody">
-            <div class="empty">
-              进程榜采集未开启。<br>
-              <span class="hint">单次 <span class="num">Get-CimInstance Win32_Process</span> 实测 640ms，按 5s 刷新会持续占用约一个核心的 13%，所以默认关；本页展开进程榜时会自动开启。</span><br>
-              <button class="btn btn-sm" style="margin-top:10px" data-proc-on>现在开启</button>
-            </div>
-          </div>
+          <!-- 空态文案由 procEmpty() 单点渲染（S17-①）：这里再抄一份就是第二份真相，
+               上一版正是这么留下了「本页展开进程榜时会自动开启」这句假话。 -->
+          <div id="procBody"></div>
         </div>
 
         <div class="card">
           <div class="card-head">
             <h2>阈值告警</h2>
-            <span class="sub">触发只在页面内落时间线，不弹系统浮层</span>
+            <span class="sub">触发只在「监控记录」页落时间线，不弹系统浮层</span>
             <span class="grow"><button class="btn btn-sm" id="btnRuleAdd">＋ 新建规则</button></span>
           </div>
           <div id="ruleAddBox" hidden>
@@ -489,49 +583,89 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
                 <div class="field"><label>指标</label><input class="input" value="CPU 使用率" readonly></div>
                 <div class="field"><label>阈值 / 持续</label><input class="input num" value="≥ 85% · 连续 3 次"></div>
                 <div class="field"><label>冷却</label><input class="input num" value="10 分钟内不重复"></div>
-                <div class="field"><label>提示落点</label><input class="input" value="监控页时间线 + 侧边栏蓝点" readonly></div>
+                <div class="field"><label>提示落点</label><input class="input" value="监控记录页 + 侧边栏蓝点" readonly></div>
               </div>
               <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
                 <button class="btn btn-primary btn-sm" id="btnRuleSave">保存规则</button>
-                <span class="hint" id="ruleAddHint">新建规则会插入列表首位，并写入下方触发记录。</span>
+                <span class="hint" id="ruleAddHint">新建规则会插入列表首位，命中后记在「监控记录」页。</span>
               </div>
             </div>
           </div>
           <div id="ruleList"></div>
-          <div class="card-head" style="border-top:1px solid var(--bd);border-bottom:none">
-            <h2>触发记录</h2>
-            <span class="sub">本机保留最近 200 条</span>
-            <span class="grow"><span class="hint" id="tlCount">4 条</span></span>
+        </div>
+      </div>
+
+      <!-- ---------------- 监控记录（S15-② 建页时叫「触发记录」，S16-③ 改名；面板 id 与 data-tab 仍是 alerts） ---------------- -->
+      <div class="tab-panel" id="panel-alerts" hidden>
+        <div class="card">
+          <div class="card-head">
+            <h2>监控记录</h2>
+            <span class="sub">规则在设置页配置 · 本机保留最近 200 条</span>
+            <span class="grow">
+              <span class="hint num" id="tlCount">4 条</span>
+              <span class="seg" id="tlRange">
+                <button class="is-active" data-range="">全部</button>
+                <button data-range="24h">最近 24 小时</button>
+                <button data-range="7d">最近 7 天</button>
+              </span>
+            </span>
           </div>
-          <div class="card-body"><div class="tl" id="tl"></div></div>
+          <!-- S16-④：滚动只在卡内这一层（真机批注与 S10 清单表同一句）。滚动容器单独套一层，
+               不加在 .tl 身上 —— .tl 的竖线 ::before 是绝对定位，得跟着内容一起滚。
+               对应浏览器半边 .so-tlwrap（命名差一个连字符，与 .tbl-wrap-plan / .so-tblwrap-plan 同例）。 -->
+          <div class="card-body"><div class="tl-wrap"><div class="tl" id="tl"></div></div></div>
         </div>
       </div>
 
       <!-- ---------------- 清理 ---------------- -->
       <div class="tab-panel" id="panel-clean" hidden>
 
+        <!-- 清理留痕（S12-①）：入口在页头右上角「清理留痕 N」，点开设的是页面里这块限高滚动面板。
+             不是浮层：滚动只发生在这个框内，收起时整块从页面里拿掉。 -->
+        <div class="card" id="cleanLogs" hidden>
+          <div class="card-head">
+            <h2>清理留痕</h2>
+            <span class="sub">追加式，只读 · 滚动只在这个框内</span>
+            <span class="grow"><span class="hint num" id="logCount">3 段记录</span></span>
+            <button class="btn btn-sm" id="btnLogClose" title="收起这块留痕（入口在页头右上角）">收起</button>
+          </div>
+          <div class="logpanel" id="runLog"></div>
+        </div>
+
+        <!-- 扫描范围（S13 真机批注「占地方又没用，只显示关注的东西」）：卡头那一行摘要就是默认形态，
+             目录明细点「展开明细」就地摊开（页面内展开，零浮层）—— 与 client.js 的 scopeOpen 同规。 -->
         <div class="card">
           <div class="card-head">
             <h2>扫描范围</h2>
-            <span class="sub" id="scopeSub">已启用 9 条规则 · 覆盖 6 个已知缓存根目录</span>
-            <span class="grow"><a class="link" data-goto="settings">管理规则</a></span>
+            <span class="sub" id="scopeSub">启用 9 条规则 · 覆盖 6 个已知缓存根目录</span>
+            <span class="grow">
+              <a class="link" data-goto="settings">管理规则</a>
+              <button class="btn btn-sm" id="btnScopeToggle" aria-expanded="false" title="展开明细：逐条列出被扫的目录">展开明细</button>
+            </span>
           </div>
-          <div class="card-body">
-            <div class="chips" id="scopeChips"></div>
-            <div class="notice notice-amber">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 4l9 16H3L12 4Z"/><path d="M12 10v4M12 17v.1"/></svg>
-              <span><b>红线（写死在 guard 层，不可配置）</b>：不碰回收站、不碰 <span class="path">C:\Windows</span> / <span class="path">Program Files</span>、不改任何目录属主与 ACL、不动注册表。规则若命中这些路径会在清单里标为「已拒绝」，不进入可选集合。</span>
-            </div>
+          <div class="card-body" id="scopeBody" hidden>
+            <!-- 逐条列出被扫的目录（S12-① 问题①）：与 client.js 的扫描范围卡同形，一条规则一行 -->
+            <div class="scope" id="scopeList"></div>
+            <div class="hint" id="scopeOffNote" style="margin-top:7px;white-space:normal"></div>
+            <div class="hint" style="margin-top:7px;white-space:normal">「满 N 天」是按最后访问时间算的候选门槛（整条目录树都够老才进清单）；本机上不存在的目录会被如实跳过、不编进清单，跳过几条写在扫描结束后的那条提示里。</div>
           </div>
         </div>
 
-        <!-- 扫描前 -->
+        <!-- 容量概览条（S12-A）：四个相位都在场，数字全来自同一份快照口径 -->
+        <div class="disk-bar" id="diskBar">
+          <span>系统盘 C: 可用</span><b class="num" id="diskFree">71.9 GB</b>
+          <span class="num" id="diskTotal">/ 共 214.7 GB</span>
+          <span class="track" id="diskTrackWrap"><i id="diskTrack" style="width:66.5%"></i></span>
+          <span class="num" id="diskUsed">已用 66.5%</span>
+          <b class="num" id="planFreed"></b>
+          <span class="hint num" id="diskBefore"></span>
+        </div>
+
+        <!-- 扫描前（S13）：原来那坨 34px 居中的大空白压成一行 —— 一句话把「去哪儿扫 + 扫描危不危险」说完。
+             与 client.js 的空态卡同文同形：只有 hint 一行，不再套 .empty。 -->
         <div class="card" id="cleanIdle">
           <div class="card-body">
-            <div class="empty" style="padding:34px 14px">
-              尚未扫描。点击右上角<b style="color:var(--t1)">「开始扫描」</b>生成待清理清单。<br>
-              <span class="hint">扫描是只读的：只统计大小与访问时间，删除只发生在你勾选之后点「清理选中」那一刻。</span>
-            </div>
+            <div class="hint" style="white-space:normal">尚未扫描。点击右上角<b style="color:var(--t1)">「开始扫描」</b>生成待清理清单；扫描是只读的（只统计大小与访问时间），删除只发生在你勾选之后点「清理选中」那一刻。</div>
           </div>
         </div>
 
@@ -542,6 +676,8 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
               <span>正在遍历 <b id="scanCur" class="path">…\Tencent\xwechat\radium</b></span>
               <span class="num">已遍历 <b id="scanWalked">0</b> 个条目</span>
               <span class="num">已发现 <b id="scanFound">0</b> 项 · <b id="scanSize">0 B</b></span>
+              <span class="num" id="scanRule">第 1 / 共 … 类目录</span>
+              <span class="num">已用时 <b id="scanElapsed">0 秒</b></span>
             </div>
             <div class="track"><i id="scanBar" style="width:0%"></i></div>
             <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
@@ -557,17 +693,45 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
             <h2>待清理清单</h2>
             <span class="sub" id="planStamp">快照生成于 22:41:07 · 数据在扫描那一刻冻结</span>
             <span class="grow">
-              <span class="hint">共 <b class="num" id="planTotal">11</b> 项</span>
-              <button class="btn btn-sm" id="btnSelAll">全选可清理项</button>
-              <button class="btn btn-sm btn-quiet" id="btnSelNone">清空选择</button>
+              <span class="hint" id="planCounts"></span>
               <span class="hint" id="selHint"></span>
+              <!-- 一键安全清理（S11-② 红框批注）：只吃「可清理」档，风险项与已拒绝项一概不动 -->
+              <button class="btn btn-sm btn-primary" id="btnSafe">一键安全清理</button>
+              <!-- AI 智能清理（S12-③ 红框批注）：只在卡内给建议，采纳=并进勾选，永不代替执行 -->
+              <span class="ai-ask"><span class="hint" id="aiWhy"></span><button class="btn btn-sm" id="btnAiAsk">AI 智能清理</button></span>
             </span>
           </div>
-          <div class="tbl-wrap">
+          <!-- 操作条（S19-② 真机批注「不要放在最下面，放在上面」）：从清单表下面整条搬到这里。
+               表在卡内限高滚动，但它下面还压着暂存区交代，4709 项那一屏要滚到卡尾才够得着「清理选中」。
+               S20（真机批注「这些不要了」）：条上那三句说明（不可恢复 / 默认勾选来路 / modeDefault）删净，
+               与 client.js 的 .so-tot 同口径 —— 只留「读数 + 两颗按钮」。 -->
+          <div class="tot">
+            <span class="sum">已选 <b class="num" id="selN">0</b> 项 · 预计释放 <b class="num" id="selSize">0 B</b></span>
+            <span class="grow">
+              <button class="btn btn-sm" id="btnQuarantine">隔离到暂存目录</button>
+              <button class="btn btn-sm btn-primary" id="btnDelete" disabled>清理选中</button>
+            </span>
+          </div>
+          <!-- AI 建议面板（就地展开在卡内，不是浮层）：与 client.js 的 aiPanel 同一份口径 -->
+          <div class="card-body run-panel" id="aiPanel" hidden></div>
+          <!-- 就地确认行（不是浮层）：说清范围、数量、不可恢复，确认后才发请求 -->
+          <div class="card-body" id="safeAsk" hidden>
+            <div class="notice notice-amber" id="safeAskText"></div>
+            <div style="display:flex;gap:8px;margin-top:6px">
+              <button class="btn btn-sm btn-primary" id="btnSafeYes">确认清理</button>
+              <button class="btn btn-sm" id="btnSafeNo">取消</button>
+            </div>
+          </div>
+          <!-- 执行进度面板：逐条结果一到就更新，呼吸点 + 进度条过渡就是那条动画 -->
+          <div class="card-body" id="runPanel" hidden></div>
+          <!-- 分类下拉（S19-①）：一条命中规则一个 option，选它=只看它（只减行，绝不动勾选），
+               「全选本组」跟着当前那一格走 -->
+          <div class="card-body" id="catStrip" hidden></div>
+          <div class="tbl-wrap tbl-wrap-plan">
             <table class="tbl">
               <thead>
                 <tr>
-                  <th class="c"></th>
+                  <th class="c"><button class="cbx" id="cbxAll" role="checkbox" aria-checked="false"></button></th>
                   <th>路径 / 内容</th>
                   <th class="r">大小</th>
                   <th>命中规则</th>
@@ -578,61 +742,21 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
               <tbody id="planBody"></tbody>
             </table>
           </div>
-          <div class="tot">
-            <span class="sum">已选 <b class="num" id="selN">0</b> 项 · 预计释放 <b class="num" id="selSize">0 B</b></span>
-            <span class="hint" id="totNote">删除不可恢复，回收站不参与</span>
-            <span class="grow">
-              <button class="btn btn-sm" id="btnQuarantine">隔离到暂存目录</button>
-              <button class="btn btn-sm btn-primary" id="btnDelete" disabled>清理选中</button>
-            </span>
-          </div>
           <div class="notice notice-gray" id="quarNote" hidden>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
             <span>隔离 = 同盘移动到 <span class="path">C:\Users\gongj\.dsh-quarantine\2026-09-27\</span>，立即腾出目录树但可随时还原；同盘移动不占额外空间。暂存目录保留 7 天后由你手动清空，插件不会自动删。</span>
           </div>
         </div>
 
-        <!-- 留痕 -->
-        <div class="card">
-          <div class="card-head">
-            <h2>清理留痕</h2>
-            <span class="sub">追加式，只读</span>
-            <span class="grow"><span class="hint" id="logCount">3 段记录</span></span>
-          </div>
-          <div id="runLog"></div>
+        <!-- 红线说明（S12-②「放在最下面展示」）：全页唯一一处裁决口径，从「扫描范围」卡里挪到页尾 -->
+        <div class="notice notice-amber">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 4l9 16H3L12 4Z"/><path d="M12 10v4M12 17v.1"/></svg>
+          <span><b>红线（写死在 guard 层，不可配置）</b>：不碰回收站、不碰 <span class="path">C:\Windows</span> / <span class="path">Program Files</span>、不改任何目录属主与 ACL、不动注册表。规则若命中这些路径会在清单里标为「已拒绝」，不进入可选集合。</span>
         </div>
       </div>
 
       <!-- ---------------- 搜索 ---------------- -->
       <div class="tab-panel" id="panel-search" hidden>
-
-        <div class="card" id="probeCard">
-          <div class="card-head">
-            <h2>Everything 接入自检</h2>
-            <span class="sub">三级探测，卡在哪一级就告诉你缺什么</span>
-            <span class="grow"><button class="btn btn-sm" id="btnReprobe">重新检测</button></span>
-          </div>
-          <div class="card-body"><div class="steps" id="probeSteps"></div></div>
-        </div>
-
-        <div class="card" id="guideCard" hidden>
-          <div class="card-head"><h2>如何拿到全盘秒级搜索</h2></div>
-          <div class="card-body">
-            <div style="font-size:12.5px;line-height:1.85;color:var(--t2)">
-              <b style="color:var(--t1)">Everything</b> 是 voidtools 的 NTFS 索引工具，直接读 USN 日志，所以整个盘几百万文件也只需 <span class="num">84</span>MB 内存和毫秒级查询。本插件不复制它的能力，只把它的结果画成下面的表。
-              <div style="margin-top:8px">安装（任选一种，<b style="color:var(--t1)">由你自己执行</b>——本插件不会替你装程序、不会改注册表、也不会替你打开 HTTP 服务）：</div>
-              <div class="cmd">
-                <code id="cmdWinget">winget install voidtools.Everything</code>
-                <button class="btn btn-sm" data-copy="cmdWinget">复制</button>
-              </div>
-              <div class="cmd">
-                <code>https://www.voidtools.com/downloads/</code>
-                <button class="btn btn-sm" data-copy="cmdSite" data-text="https://www.voidtools.com/downloads/">复制</button>
-              </div>
-              <div style="margin-top:9px">装好后在 Everything 里勾选 <b style="color:var(--t1)">工具 → 选项 → HTTP 服务器</b>（默认端口 <span class="num">3417</span>），或把官方的 <span class="path">es.exe</span> 放进 PATH，然后点上方「重新检测」。</div>
-            </div>
-          </div>
-        </div>
 
         <div class="card">
           <div class="card-head">
@@ -662,9 +786,53 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.2v.1"/></svg>
               <span><b>限定目录模式</b>：仅覆盖下面已选目录，不是全盘索引。实测遍历 <span class="path">AppData\Local</span>（14.5 万条目）需 7.3s，所以结果分批返回、可随时停止，且必须写明覆盖范围。</span>
             </div>
-            <div class="chips" id="walkDirs" hidden style="margin-top:10px"></div>
+            <div class="chips" id="walkDirs" hidden style="margin-top:10px">
+              <span id="dirChips" style="display:contents"></span>
+              <span class="diradd">
+                <input class="input input-mono" id="dirInput" type="text" placeholder="粘贴绝对路径，如 F:\dsh-plugins" autocomplete="off" style="height:26px;width:260px">
+                <button class="btn btn-sm" id="btnAddDir" type="button" title="写进偏好 search.walkDirs：只是把该目录纳入遍历范围，不读也不删任何文件">＋ 添加目录</button>
+              </span>
+            </div>
+            <div class="savenote" id="dirNote" hidden></div>
           </div>
           <div id="searchResult"></div>
+        </div>
+
+        <div class="card" id="probeCard">
+          <div class="card-head">
+            <h2>Everything 接入自检</h2>
+            <span class="sub">三级探测，卡在哪一级就告诉你缺什么</span>
+            <span class="grow"><button class="btn btn-sm" id="btnReprobe">重新检测</button></span>
+          </div>
+          <div class="card-body"><div class="steps" id="probeSteps"></div></div>
+        </div>
+
+        <div class="card" id="guideCard" hidden>
+          <div class="card-head"><h2>如何拿到全盘秒级搜索</h2></div>
+          <div class="card-body">
+            <!-- S12-⑤（批注「自检卡加 Everything 一键安装按钮」）：入口长在引导卡第一行 —— 这张卡就是
+                 "拿不到全盘索引时该看的那张"。亮不亮吃宿主的 ready()（本机没探到 winget 就不亮按钮），
+                 原型这里只演示三态与就地确认行；命令原文由宿主 installer.js 的常量单点交出。 -->
+            <div id="installRow" style="margin-bottom:10px">
+              <span class="hint" id="installWhy"></span>
+              <button class="btn btn-sm" id="btnInstall" type="button" style="margin-left:8px">一键安装 Everything（winget）</button>
+            </div>
+            <div class="notice notice-amber" id="installAsk" hidden></div>
+            <div class="savenote" id="installNote" hidden></div>
+            <div style="font-size:12.5px;line-height:1.85;color:var(--t2)">
+              <b style="color:var(--t1)">Everything</b> 是 voidtools 的 NTFS 索引工具，直接读 USN 日志，所以整个盘几百万文件也只需 <span class="num">84</span>MB 内存和毫秒级查询。本插件不复制它的能力，只把它的结果画成下面的表。
+              <div style="margin-top:8px">装 Everything 有两条路：点亮上面的<b style="color:var(--t1)">「一键安装 Everything」</b>（本插件代跑 winget，探不到 winget 就不亮），或照下面自己执行。无论走哪条，本插件都不改注册表、也不替你打开 Everything 的 HTTP 服务。</div>
+              <div class="cmd">
+                <code id="cmdWinget">winget install voidtools.Everything</code>
+                <button class="btn btn-sm" data-copy="cmdWinget">复制</button>
+              </div>
+              <div class="cmd">
+                <code>https://www.voidtools.com/downloads/</code>
+                <button class="btn btn-sm" data-copy="cmdSite" data-text="https://www.voidtools.com/downloads/">复制</button>
+              </div>
+              <div style="margin-top:9px">装好后在 Everything 里勾选 <b style="color:var(--t1)">工具 → 选项 → HTTP 服务器</b>（默认端口 <span class="num">3417</span>），或把官方的 <span class="path">es.exe</span> 放进 PATH，然后点上方「重新检测」。<br>本页探测用的是设置页里配的端口 <span class="num">3417</span>；要换端口、或指定 es.exe 的路径，也在设置页的搜索通路里改。（真机上上面那三条指引由宿主随探测结果给出，界面不重述一遍。）</div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -829,20 +997,42 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
   }
 
   /* ---------- 指标数据（演示） ---------- */
+  var DISK_TOTAL_GB = 214.7;   /* 演示机容量：曲线画空闲百分比，卡面与读数按它换算回 GB（与真机 diskFreePct 同口径） */
   var metrics = {
     cpu: series(60, 24, 13, 4),
     mem: series(60, 68, 5, 1.5),
     netDown: series(60, 30, 40, 20),
     netUp: series(60, 9, 12, 6),
-    diskFree: (function () { var a = []; for (var i = 0; i < 60; i += 1) { a.push(72.3 - i * (0.4 / 59) + (i % 7 === 0 ? 0.05 : 0)); } return a; })()
+    diskFree: (function () { var a = []; for (var i = 0; i < 60; i += 1) { a.push(33.5 + 0.4 / DISK_TOTAL_GB * 100 - i * (0.4 / DISK_TOTAL_GB * 100 / 59) + (i % 7 === 0 ? 0.05 : 0)); } return a; })()
   };
   function last(a) { return a[a.length - 1]; }
+  /* 网络换算的唯一一处（S16-②，与浏览器半边 rateParts 同口径）：入参是**字节/秒**，
+     **十进制**自适应到 B/s / KB/s / MB/s / GB/s，数值与单位一起交出去。
+     原来这一处写的是 `(v / 8).toFixed(1) + ' MB/s'` —— 演示数据按 KB/s 存，那个 /8 是把 bit 当 byte，
+     量纲本来就是错的；浏览器半边那条 v/1e6 则是把真机 KB/s 量级的读数四舍五入成 0.0
+     （真机 latest.netDown 实测 7030 B/s ≈ 7 KB/s，界面常年显示 0.0 MB/s）。
+     两边现在共用同一条自适应规则，原型不再自演一套。容量仍走 1024（gbFree / 清理页），速率走 1000。 */
+  function ratePartsB(bytesPerSec) {
+    var v = bytesPerSec;
+    if (typeof v !== 'number' || !isFinite(v)) return { n: '—', u: '' };
+    if (Math.abs(v) < 1000) return { n: String(Math.round(v)), u: 'B/s' };
+    var u = ['KB/s', 'MB/s', 'GB/s'], i = -1, x = v;
+    do { x /= 1000; i += 1; } while (x >= 1000 && i < u.length - 1);
+    return { n: x >= 100 ? x.toFixed(0) : x.toFixed(x >= 10 ? 1 : 2), u: u[i] };
+  }
+  /* 演示数据存 KB/s、宿主交 B/s ⇒ 「× 1000」这一步只允许出现在这一个入口里。 */
+  function rateParts(kbPerSec) { return ratePartsB(kbPerSec * 1000); }
+  function rateFmt(kbPerSec) { var p = rateParts(kbPerSec); return p.u ? p.n + ' ' + p.u : p.n; }
+  function gbFree(v) { return (v / 100 * DISK_TOTAL_GB).toFixed(1); }
+
+  var netDownP = rateParts(last(metrics.netDown));
+  var netUpP = rateParts(last(metrics.netUp));
 
   var mtrs = [
     { n: 'CPU 使用率', v: last(metrics.cpu).toFixed(0), u: '%', c: '8 逻辑核 · 峰值 ' + Math.max.apply(null, metrics.cpu).toFixed(0) + '%', p: last(metrics.cpu), cls: last(metrics.cpu) > 85 ? 'crit' : (last(metrics.cpu) > 70 ? 'warn' : '') },
     { n: '内存', v: '11.4', u: '/ 16 GB', c: '占用 ' + last(metrics.mem).toFixed(0) + '% · 压缩存储未启用', p: last(metrics.mem), cls: last(metrics.mem) > 85 ? 'crit' : (last(metrics.mem) > 75 ? 'warn' : '') },
-    { n: 'C 盘可用', v: '71.9', u: '/ 214.7 GB', c: '已用 66.5% · 24h 净减 0.4 GB', p: 100 - 71.9 / 214.7 * 100, cls: '' },
-    { n: '网络吞吐', v: (last(metrics.netDown) / 8).toFixed(1), u: 'MB/s', c: '下行 · 上行 ' + (last(metrics.netUp) / 8).toFixed(1) + ' MB/s', p: null, cls: '' }
+    { n: 'C 盘可用', v: gbFree(last(metrics.diskFree)), u: '/ ' + DISK_TOTAL_GB + ' GB', c: '已用 ' + (100 - last(metrics.diskFree)).toFixed(1) + '% · 24h 净减 0.4 GB', p: 100 - last(metrics.diskFree), cls: '' },
+    { n: '网络吞吐', v: netDownP.n, u: netDownP.u, c: '下行 · 上行 ' + netUpP.n + ' ' + netUpP.u, p: null, cls: '' }
   ];
   el('mtrStrip').innerHTML = mtrs.map(function (m) {
     return '<div class="mtr"><div class="n">' + esc(m.n) + '</div>' +
@@ -862,7 +1052,11 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
     var parts = [];
     Object.keys(srcs).forEach(function (k) {
       var s = srcs[k];
-      parts.push('<span class="src is-' + s.state + '"><span class="dot"></span>' + esc(s.name) + ' <b>' + esc(s.detail) + '</b></span>');
+      // 停了的源必须就地给恢复入口（client 侧在采集源条上，S17-① 两边同形）：
+      // 只有红 pill 没有按钮，用户就只能刷新整页。
+      var bad = s.state === 'stalled' || s.state === 'crashed' || s.state === 'exited-max';
+      parts.push('<span class="src is-' + s.state + '"><span class="dot"></span>' + esc(s.name) + ' <b>' + esc(s.detail) + '</b>'
+        + (bad ? ' <button class="btn btn-sm" data-proc-retry>重试</button>' : '') + '</span>');
     });
     parts.push('<span class="sep">·</span><span class="hint">更新于 <span class="num">' + demoNow() + '</span></span>');
     el('srcBar').innerHTML = parts.join('');
@@ -884,54 +1078,111 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
     var lh = el('liveHint');
     if (lh) lh.textContent = live ? '自动刷新' : '已暂停刷新';
     syncAlertDeps();
-    hits.unshift({ k: 'op', t: demoTs(), x: '你将实时曲线采样档位切为 <b class="num">' + esc(v) + '</b>' });
+    hits.unshift({ k: 'op', t: Date.now(), x: '你将实时曲线采样档位切为 <b class="num">' + esc(v) + '</b>' });
     renderTl();
   }
 
   /* ---------- 曲线 ---------- */
-  function drawCurve(data, opt) {
-    var W = 340, H = 92, pad = 3;
-    var max = opt.max || Math.max.apply(null, data) * 1.15;
-    var pts = data.map(function (v, i) {
-      var x = pad + i * (W - pad * 2) / (data.length - 1);
-      var y = H - pad - (v / max) * (H - pad * 2);
-      return x.toFixed(1) + ',' + y.toFixed(1);
-    });
+  /* 映射常量与 client.js 的 CHART_W/CHART_H/CHART_PAD 同值：viewBox 340×92、左右各留 3，
+     悬停读数用同一个 xOf/yOf 回推点位置（一份真相，曲线与圆环不会各算各的）。 */
+  var CW = 340, CH = 92, CPAD = 3;
+  function xOf(i, n) { return CPAD + i * (CW - CPAD * 2) / (n - 1); }
+  function yOf(v, max) { return CH - CPAD - (v / max) * (CH - CPAD * 2); }
+  function chartMax(c) { return c.o.max || Math.max.apply(null, c.d) * 1.15; }
+  function drawCurve(c, ci) {
+    var data = c.d, opt = c.o, max = chartMax(c);
+    var pts = data.map(function (v, i) { return xOf(i, data.length).toFixed(1) + ',' + yOf(v, max).toFixed(1); });
     var g = '';
-    for (var q = 1; q <= 3; q += 1) { g += '<line x1="0" y1="' + (H * q / 4) + '" x2="' + W + '" y2="' + (H * q / 4) + '" stroke="#f0f0f2" stroke-width="1"/>'; }
+    for (var q = 1; q <= 3; q += 1) { g += '<line x1="0" y1="' + (CH * q / 4) + '" x2="' + CW + '" y2="' + (CH * q / 4) + '" stroke="#f0f0f2" stroke-width="1"/>'; }
     var th = '';
     if (opt.threshold) {
-      var ty = H - pad - (opt.threshold / max) * (H - pad * 2);
-      th = '<line x1="0" y1="' + ty.toFixed(1) + '" x2="' + W + '" y2="' + ty.toFixed(1) + '" stroke="#d93a2b" stroke-width="1" stroke-dasharray="3 3" opacity=".55"/>';
+      var ty = yOf(opt.threshold, max).toFixed(1);
+      th = '<line x1="0" y1="' + ty + '" x2="' + CW + '" y2="' + ty + '" stroke="#d93a2b" stroke-width="1" stroke-dasharray="3 3" opacity=".55" vector-effect="non-scaling-stroke"/>';
     }
     var extra = '';
     if (opt.second) {
-      var p2 = opt.second.map(function (v, i) {
-        var x = pad + i * (W - pad * 2) / (opt.second.length - 1);
-        var y = H - pad - (v / max) * (H - pad * 2);
-        return x.toFixed(1) + ',' + y.toFixed(1);
-      });
-      extra = '<polyline points="' + p2.join(' ') + '" fill="none" stroke="#a0a0a6" stroke-width="1.4"/>';
+      var sec = opt.second.map(function (v, i) { return xOf(i, opt.second.length).toFixed(1) + ',' + yOf(v, max).toFixed(1); });
+      extra = '<polyline points="' + sec.join(' ') + '" fill="none" stroke="#a0a0a6" stroke-width="1.4" vector-effect="non-scaling-stroke"/>';
     }
-    return '<svg class="curve" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="height:92px">' +
-      g + th + '<polyline points="' + pts.join(' ') + '" fill="none" stroke="' + (opt.color || '#1a1a1a') + '" stroke-width="1.6" stroke-linejoin="round"/>' + extra + '</svg>';
+    var color = opt.color || '#1a1a1a';
+    /* 悬停三件套随卡一起生成：引导线在 svg 内（跟着曲线走），圆环与气泡是卡内 HTML（不吃横向拉伸）。
+       鼠标移动只改位置与显隐，不重建节点。 */
+    return '<div class="curve">' +
+      '<svg class="curve-svg" data-ci="' + ci + '" viewBox="0 0 ' + CW + ' ' + CH + '" preserveAspectRatio="none" style="height:' + CH + 'px" aria-label="' + esc(c.t) + '曲线，鼠标移上来读该点数值">' +
+      g + th +
+      '<polyline points="' + pts.join(' ') + '" fill="none" stroke="' + color + '" stroke-width="1.6" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>' +
+      extra +
+      '<line class="tip-line" x1="0" x2="0" y1="' + CPAD + '" y2="' + (CH - CPAD) + '" stroke="' + color + '" vector-effect="non-scaling-stroke" style="display:none"/>' +
+      '</svg>' +
+      '<span class="tip-ring" style="display:none"></span>' +
+      '<span class="tip-box" style="display:none"></span>' +
+      '</div>';
   }
   var charts = [
-    { t: 'CPU 使用率 · 最近 30 分钟', v: last(metrics.cpu).toFixed(0) + '%', u: '峰值 ' + Math.max.apply(null, metrics.cpu).toFixed(0) + '% · 阈值线 85%', d: metrics.cpu, o: { max: 100, threshold: 85 } },
-    { t: '内存占用率 · 最近 30 分钟', v: last(metrics.mem).toFixed(0) + '%', u: '16 GB 总量 · 无换页告警', d: metrics.mem, o: { max: 100, color: '#3d6fe0' } },
-    { t: '网络吞吐 · 最近 30 分钟', v: (last(metrics.netDown) / 8).toFixed(1) + ' MB/s', u: '黑=下行 · 灰=上行（KB/s）', d: metrics.netDown, o: { second: metrics.netUp } },
-    { t: 'C 盘可用空间 · 最近 24 小时', v: '71.9 GB', u: '红线 = 32 GB（可用 < 15% 触发）· 24h 净减 0.4 GB', d: metrics.diskFree, o: { max: 100, threshold: 32, color: '#b06f14' } }
+    { t: 'CPU 使用率 · 最近 30 分钟', v: last(metrics.cpu).toFixed(0) + '%', u: '峰值 ' + Math.max.apply(null, metrics.cpu).toFixed(0) + '% · 阈值线 85%', d: metrics.cpu, o: { max: 100, threshold: 85 }, stepMs: 30e3, fmt: function (c, i) { return c.d[i].toFixed(1) + '%'; } },
+    { t: '内存占用率 · 最近 30 分钟', v: last(metrics.mem).toFixed(0) + '%', u: '16 GB 总量 · 无换页告警', d: metrics.mem, o: { max: 100, color: '#3d6fe0' }, stepMs: 30e3, fmt: function (c, i) { return c.d[i].toFixed(1) + '%'; } },
+    { t: '网络吞吐 · 最近 30 分钟', v: rateFmt(last(metrics.netDown)), u: '黑=下行 · 灰=上行（单位随量级自适应，见 ratePartsB）', d: metrics.netDown, o: { second: metrics.netUp }, stepMs: 30e3, fmt: function (c, i) { return '↓ ' + rateFmt(c.d[i]) + ' ↑ ' + rateFmt(c.o.second[i]); } },
+    { t: 'C 盘可用空间 · 最近 24 小时', v: gbFree(last(metrics.diskFree)) + ' GB', u: '红线 = 32 GB 空闲水位（≈ 14.9%）· 24h 净减 0.4 GB', d: metrics.diskFree, o: { max: 100, threshold: 14.9, color: '#b06f14' }, stepMs: 24 * 3600e3 / 59, fmt: function (c, i) { return gbFree(c.d[i]) + ' GB（' + c.d[i].toFixed(1) + '%）'; } }
   ];
-  el('charts').innerHTML = charts.map(function (c) {
+  el('charts').innerHTML = charts.map(function (c, i) {
     return '<div class="card"><div class="card-body">' +
       '<div class="curve-cap"><h2 style="font-size:12.5px;font-weight:600">' + esc(c.t) + '</h2>' +
       '<span class="grow num">' + esc(c.u) + '</span></div>' +
       '<div style="display:flex;align-items:baseline;gap:8px;margin:2px 0 8px"><span class="big num" style="font-size:16px;font-weight:600">' + esc(c.v) + '</span></div>' +
-      drawCurve(c.d, c.o) +
+      drawCurve(c, i) +
       '</div></div>';
   }).join('');
 
+  /* ---------- 曲线悬停读数（S15-①）---------- */
+  function hoverIndexAt(clientX, rect, n) {
+    if (!(n > 0) || !(rect.width > 0)) return null;
+    if (n === 1) return 0;
+    var vb = CPAD + ((clientX - rect.left) / rect.width) * (CW - CPAD * 2);
+    var i = Math.round(((vb - CPAD) * (n - 1)) / (CW - CPAD * 2));
+    return Math.max(0, Math.min(n - 1, i));
+  }
+  function fmtClockMs(ms) { var d = new Date(ms); return p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds()); }
+  /* 读数两段：数值口径跟着卡走（走 c.fmt），时刻由该点的采样间隔回推 —— 与 client.js 的 tipParts 同口径。 */
+  function tipTime(c, i) { return fmtClockMs(DEMO_NOW - (c.d.length - 1 - i) * c.stepMs); }
+  function showCurveTip(svg, c, i) {
+    var curve = svg.parentNode;
+    var x = xOf(i, c.d.length);
+    var leftPct = Math.round((x / CW) * 1000) / 10;
+    var topPx = Math.round(yOf(c.d[i], chartMax(c)) * 10) / 10;
+    var line = svg.querySelector('.tip-line');
+    line.setAttribute('x1', x.toFixed(1)); line.setAttribute('x2', x.toFixed(1)); line.style.display = '';
+    var ring = curve.querySelector('.tip-ring');
+    ring.style.left = leftPct + '%'; ring.style.top = topPx + 'px';
+    ring.style.borderColor = c.o.color || 'var(--t1)';
+    ring.style.display = '';
+    var box = curve.querySelector('.tip-box');
+    /* 气泡朝向（与 client.js 的 tipLayout 同式）：不居中，点在左半边就左边贴该点、右半边就右边贴该点，
+       再让开 8px。气泡多宽要等文案渲染出来才知道（网络卡实测 180px），居中 + 固定夹边会在贴边的点上被卡裁掉半截。 */
+    var start = leftPct < 50;
+    box.style.left = 'calc(' + leftPct + '% ' + (start ? '+ 8px)' : '- 8px)');
+    box.style.transform = start ? 'translateX(0)' : 'translateX(-100%)';
+    box.innerHTML = '<b>' + esc(c.fmt(c, i)) + '</b><span class="t">' + esc(tipTime(c, i)) + '</span>';
+    box.style.display = '';
+  }
+  function hideCurveTip(svg) {
+    var curve = svg.parentNode;
+    svg.querySelector('.tip-line').style.display = 'none';
+    curve.querySelector('.tip-ring').style.display = 'none';
+    curve.querySelector('.tip-box').style.display = 'none';
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('#charts .curve-svg'), function (svg) {
+    var c = charts[Number(svg.getAttribute('data-ci'))];
+    svg.addEventListener('mousemove', function (e) {
+      var i = hoverIndexAt(e.clientX, svg.getBoundingClientRect(), c.d.length);
+      if (i !== null) showCurveTip(svg, c, i);
+    });
+    svg.addEventListener('mouseleave', function () { hideCurveTip(svg); });
+  });
+
   /* ---------- 进程榜 ---------- */
+  /* 行数刻意给到 34 行（S18-③）：真机 L1b 上限 400 行，限高框的「只在框内滚」只有在**真的溢出**时
+     才量得出来。上一版只有 8 行，榜根本不长，截图看着正常、限高那条规则却没被验过 ——
+     与 S16/S17「夹具在说谎」同一类，故补齐。 */
   var procs = [
     { n: 'Chrome.exe (renderer ×12)', pid: 11384, cpu: 18.4, mem: 2.31 },
     { n: 'idea64.exe', pid: 7412, cpu: 11.2, mem: 3.86 },
@@ -942,11 +1193,44 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
     { n: 'java.exe (IDEA build)', pid: 19044, cpu: 1.9, mem: 1.62 },
     { n: 'obsidian.exe', pid: 8360, cpu: 0.7, mem: 0.51 }
   ];
-  var procSort = 'cpu';
+  (function fillProcs() {
+    var names = ['explorer.exe', 'svchost.exe (NetworkService)', 'SearchIndexer.exe', 'Taskmgr.exe',
+      'Code.exe (renderer)', 'msedgewebview2.exe', 'Teams.exe', 'Discord.exe', 'pwsh.exe',
+      'conhost.exe', 'RuntimeBroker.exe', 'ctfmon.exe', 'OneDrive.exe', 'SpoolSVX.exe',
+      'NahimicSvc64.exe', 'HxOutlook.exe', 'TextInputHost.exe', 'ShellExperienceHost.exe',
+      'dwm.exe', 'audiodg.exe', 'WmiPrvSE.exe', 'SecurityHealthSystray.exe', 'Everything.exe', 'qoder-cn.exe'];
+    for (var i = 0; i < names.length; i++) {
+      procs.push({ n: names[i], pid: 1024 + i * 137,
+        cpu: Math.round((i * 37) % 260) / 10,          // 0.0 ~ 25.9，够散也够真（不会是负 CPU%）
+        mem: Math.round(((i * 61) % 240 + 12)) / 100 }); // 0.12 ~ 2.51 GB
+    }
+  })();
+  /* 排序态（S18-③，真机批注「按 CPU 降序、点 cpu 和内存排序」）：{k, d}，默认 CPU 降序 ——
+     与浏览器半边 SysopsPage 的 procSort 初值同口径。点另一列回降序，点已选中的列只翻方向
+     （client.js 的 procSortNext 同规，两边同改）。 */
+  var procSort = { k: 'cpu', d: 'desc' };
+  function procSortNext(cur, key) {
+    if (cur.k !== key) return { k: key, d: 'desc' };
+    return { k: key, d: cur.d === 'desc' ? 'asc' : 'desc' };
+  }
+  /* 表头即排序入口：aria-sort 挂在 th（ARIA 的位置），点击落在铺满整格的按钮上。
+     未选中的列不画箭头，靠 hover 与 title 提示可点 —— 与 .so-th-btn 同一套。 */
+  function procThs() {
+    return ['cpu', 'mem'].map(function (k) {
+      var t = k === 'cpu' ? 'CPU%' : '内存';
+      var on = procSort.k === k, asc = on && procSort.d === 'asc';
+      return '<th class="r th-sort" aria-sort="' + (on ? (asc ? 'ascending' : 'descending') : 'none') + '">' +
+        '<button type="button" data-sort-col="' + k + '"' + (on ? ' class="is-on"' : '') +
+        ' title="' + (on ? '已按' + t + (asc ? '升序' : '降序') + '，点这里换方向' : '按' + t + '排序（先降序）') + '">' +
+        t + (on ? '<i>' + (asc ? '↑' : '↓') + '</i>' : '') + '</button></th>';
+    }).join('');
+  }
   function procTable() {
-    var rows = procs.slice().sort(function (a, b) { return procSort === 'cpu' ? b.cpu - a.cpu : b.mem - a.mem; });
-    return '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
-      '<th>进程</th><th class="r">PID</th><th class="r">CPU%</th><th class="r">内存</th><th>来源</th></tr></thead><tbody>' +
+    var col = procSort.k === 'mem' ? 'mem' : 'cpu';
+    var dir = procSort.d === 'asc' ? 1 : -1;
+    var rows = procs.slice().sort(function (a, b) { return (a[col] - b[col]) * dir; });
+    return '<div class="tbl-wrap tbl-wrap-proc"><table class="tbl"><thead><tr>' +
+      '<th>进程</th><th class="r">PID</th>' + procThs() + '<th>来源</th></tr></thead><tbody>' +
       rows.map(function (p) {
         return '<tr><td class="tr-name">' + esc(p.n) + '</td><td class="r num">' + p.pid + '</td>' +
           '<td class="r num" style="font-weight:' + (p.cpu > 15 ? '600' : '400') + '">' + p.cpu.toFixed(1) + '</td>' +
@@ -955,39 +1239,88 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
       }).join('') + '</tbody></table></div>' +
       '<div class="card-body" style="padding-top:0"><div class="notice notice-gray"><span>只读榜：<b style="color:var(--t1)">本插件不提供「结束进程」</b>。要结束请在任务管理器自己做——误杀系统进程不该由一个监控面板代劳。</span></div></div>';
   }
+  /* 空态一态一句：与 client.js 的 procEmptyText() 逐字同口径（两边同改）。
+     starting / on 无数据这两句是 S17-① 补的 —— 真机首轮要 4.3s 才出数据，
+     这段空白写「未开启」是假陈述，用户就会以为按钮没生效。 */
+  var PROC_CAD = '每 3s 一轮';
+  var PROC_FIRST = '4.3s';
+  function procEmpty(st, pill) {
+    var head = st === '' ? '进程榜状态未确认：宿主没给 l1b 这一源行。'
+      : st === 'off' ? '进程榜采集未开启。'
+      : st === 'starting' ? '进程榜正在起第一轮：常驻 PowerShell 冷启动，实测约 ' + PROC_FIRST + ' 到齐。'
+      : st === 'on' ? '进程榜已开启，还没出第一轮数据（' + PROC_CAD + '，实测约 ' + PROC_FIRST + ' 一行）。'
+      : '进程榜已停：' + (pill || st) + '。恢复请用上方「进程榜」的「重试」。';
+    var hint = st === 'off' ? '<span class="hint">单次 <span class="num">Get-CimInstance Win32_Process</span> 实测 640ms，按 5s 刷新会持续占用约一个核心的 13%，所以默认关；开了之后 ' + PROC_CAD + '。</span><br>' : '';
+    var btn = st === 'off' ? '<button class="btn btn-sm" style="margin-top:10px" data-proc-on>现在开启</button>' : '';
+    return '<div class="empty">' + head + '<br>' + hint + btn + '</div>';
+  }
   function setProc(on) {
-    srcs.l1b.state = on ? 'on' : 'off';
-    srcs.l1b.detail = on ? '10s 一次 · 运行中' : '已关闭';
-    renderSrcs();
     var sw = document.querySelector('[data-sw="l1b"]');
     if (sw) sw.setAttribute('aria-checked', on ? 'true' : 'false');
     el('btnProcToggle').textContent = on ? '停止采集' : '开启采集';
-    el('procBody').innerHTML = on ? procTable() : '<div class="empty">进程榜采集未开启。<br><span class="hint">单次 <span class="num">Get-CimInstance Win32_Process</span> 实测 640ms，按 5s 刷新会持续占用约一个核心的 13%，所以默认关。</span><br><button class="btn btn-sm" style="margin-top:10px" data-proc-on>现在开启</button></div>';
-    syncAlertDeps();
+    if (!on) {
+      srcs.l1b.state = 'off'; srcs.l1b.detail = '已关闭';
+      renderSrcs(); el('procBody').innerHTML = procEmpty('off'); syncAlertDeps();
+      return;
+    }
+    // 起进程 → starting（空态说实话）→ 实测首轮到齐才换榜：这段不许画「未开启」
+    srcs.l1b.state = 'starting'; srcs.l1b.detail = '启动中';
+    renderSrcs(); el('procBody').innerHTML = procEmpty('starting'); syncAlertDeps();
+    setTimeout(function () {
+      if (srcs.l1b.state !== 'starting') return;   // 这一轮被关掉了就别抢回来
+      srcs.l1b.state = 'on'; srcs.l1b.detail = PROC_CAD + ' · 运行中';
+      renderSrcs(); el('procBody').innerHTML = procTable(); syncAlertDeps();
+    }, 1800);
   }
-  el('procSort').addEventListener('click', function (e) {
-    var b = e.target.closest('button'); if (!b) return;
-    procSort = b.dataset.sort;
-    Array.prototype.forEach.call(el('procSort').children, function (x) { x.classList.toggle('is-active', x === b); });
-    if (srcs.l1b.state === 'on') el('procBody').innerHTML = procTable();
+  // 空态单点渲染：初始那一屏也走 procEmpty，页面里不再存第二份文案
+  el('procBody').innerHTML = procEmpty(srcs.l1b.state);
+  el('srcBar').addEventListener('click', function (e) {
+    if (e.target.closest('[data-proc-retry]')) setProc(true);
   });
   el('btnProcToggle').addEventListener('click', function () { setProc(srcs.l1b.state !== 'on'); });
-  el('procBody').addEventListener('click', function (e) { if (e.target.closest('[data-proc-on]')) setProc(true); });
+  /* 榜在卡内，表头就在榜里，所以排序点击与空态的「现在开启」共用 procBody 这一个委托口
+     （原 `#procSort` seg 已随 S18-③ 删除，入口唯一）。 */
+  el('procBody').addEventListener('click', function (e) {
+    var b = e.target.closest('[data-sort-col]');
+    if (b) {
+      procSort = procSortNext(procSort, b.dataset.sortCol);
+      if (srcs.l1b.state === 'on') el('procBody').innerHTML = procTable();
+      return;
+    }
+    if (e.target.closest('[data-proc-on]')) setProc(true);
+  });
 
   /* ---------- 告警规则 + 时间线 ---------- */
   var rules = [
-    { id: 'r1', n: 'CPU ≥ 85% 连续 3 次', d: '冷却 10 分钟 · 落点：监控页时间线', dep: 'l0' },
+    { id: 'r1', n: 'CPU ≥ 85% 连续 3 次', d: '冷却 10 分钟 · 落点：监控记录页', dep: 'l0' },
     { id: 'r2', n: '内存占用率 ≥ 90%', d: '冷却 15 分钟', dep: 'l0' },
     { id: 'r3', n: 'C 盘可用 < 15%', d: '冷却 24 小时 · 每次开机后首次必报', dep: 'l0' },
     { id: 'r4', n: '下行持续 > 20 MB/s 满 1 分钟', d: '依赖常驻 typeperf', dep: 'l1a' },
     { id: 'r5', n: '单进程 CPU > 60%', d: '依赖进程榜采集（PowerShell）', dep: 'l1b', userOff: true }
   ];
+  /* 触发记录（S15-②）：演示数据带「距今多少分钟」，渲染时换算成毫秒时间戳 —— 绝对时刻与相对时间
+     由同一个 t 派生（与真机 client.js 的 hitStamp/fmtAge 同口径），就地筛选也吃这个 t。
+     最后一条故意放到 8 天前，好让「全部 / 24 小时 / 7 天」三档切得出差别。 */
+  var DEMO_NOW = Date.now();
   var hits = [
-    { k: 'hit', t: '22:38:04', x: '<b class="num">CPU 92.4%</b> 连续 3 次触发（java.exe build 占 61%）' },
-    { k: 'hit', t: '22:11:52', x: '<b class="num">C 盘可用 71.9 GB / 33.5%</b> 低于 15% 水位？否 —— 上次触发为 09-21 08:02' },
-    { k: 'op', t: '21:04:33', x: '你执行清理：<b class="num">释放 3.12 GB</b>（6 项 · 永久删除）' },
-    { k: 'op', t: '20:57:10', x: '你开启「网速采集」，常驻 typeperf 起于 PID <b class="num">19304</b>' }
+    { k: 'hit', t: DEMO_NOW - 4 * 60e3, x: '<b class="num">CPU 92.4%</b> 连续 3 次触发（java.exe build 占 61%）' },
+    { k: 'hit', t: DEMO_NOW - 31 * 60e3, x: '<b class="num">C 盘可用 71.9 GB / 33.5%</b> 低于 15% 水位？否 —— 上次触发为 09-21 08:02' },
+    { k: 'op', t: DEMO_NOW - 126 * 60e3, x: '你执行清理：<b class="num">释放 3.12 GB</b>（6 项 · 永久删除）' },
+    { k: 'op', t: DEMO_NOW - 1580 * 60e3, x: '你开启「网速采集」，常驻 typeperf 起于 PID <b class="num">19304</b>' },
+    { k: 'hit', t: DEMO_NOW - 11500 * 60e3, x: '<b class="num">内存占用率 91.1%</b> 超过 90%（冷却 15 分钟）' }
   ];
+  var tlRange = '';
+  var TL_RANGE_MS = { '24h': 864e5, '7d': 7 * 864e5 };
+  var TL_RANGE_T = { '24h': '最近 24 小时', '7d': '最近 7 天' };
+  function p2(x) { return String(x).padStart(2, '0'); }
+  function hitStamp(ts) { var d = new Date(ts); return p2(d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes()); }
+  function hitAgo(ts) {
+    var ms = Date.now() - ts;
+    if (ms < 60e3) return '刚刚';
+    if (ms < 3600e3) return Math.floor(ms / 60e3) + ' 分钟前';
+    if (ms < 864e5) return Math.floor(ms / 3600e3) + ' 小时前';
+    return Math.floor(ms / 864e5) + ' 天前';
+  }
   function ruleState(r) {
     var src = srcs[r.dep];
     var dim = !src || src.state !== 'on';
@@ -1004,11 +1337,22 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
     }).join('');
   }
   function renderTl() {
-    el('tl').innerHTML = hits.map(function (h) {
-      return '<div class="tl-item ' + h.k + '"><div class="tt num">' + esc(h.t) + '</div><div class="tx num">' + h.x + '</div></div>';
-    }).join('');
-    el('tlCount').textContent = hits.length + ' 条';
+    var span = TL_RANGE_MS[tlRange];
+    var shown = span ? hits.filter(function (h) { return h.t && Date.now() - h.t <= span; }) : hits;
+    el('tl').innerHTML = shown.length ? shown.map(function (h) {
+      return '<div class="tl-item ' + h.k + '"><div class="tt num">' + hitStamp(h.t) +
+        '<span class="ago">' + hitAgo(h.t) + '</span></div><div class="tx">' + h.x + '</div></div>';
+    }).join('')
+      : '<div class="empty">' + (TL_RANGE_T[tlRange] || '所选区间') + '内没有监控记录。全部 ' + hits.length +
+        ' 条还在本机记录里，切回「全部」就能看见。</div>';
+    el('tlCount').textContent = span ? shown.length + ' / ' + hits.length + ' 条' : hits.length + ' 条';
   }
+  el('tlRange').addEventListener('click', function (e) {
+    var b = e.target.closest('[data-range]'); if (!b) return;
+    tlRange = b.dataset.range;
+    Array.prototype.forEach.call(this.children, function (x) { x.classList.toggle('is-active', x === b); });
+    renderTl();
+  });
   function syncAlertDeps() {
     renderRules();
   }
@@ -1019,7 +1363,7 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
     if (s.dim) { b.setAttribute('aria-checked', 'false'); return; }
     r.userOff = !r.userOff;
     renderRules();
-    hits.unshift({ k: 'op', t: demoTs(), x: '你将规则「' + esc(r.n) + '」置为 <b>' + ruleState(r).st + '</b>' });
+    hits.unshift({ k: 'op', t: Date.now(), x: '你将规则「' + esc(r.n) + '」置为 <b>' + ruleState(r).st + '</b>' });
     renderTl();
   });
   renderRules(); renderTl();
@@ -1032,7 +1376,7 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
   el('btnRuleSave').addEventListener('click', function () {
     rules.unshift({ id: 'r' + Date.now(), n: '磁盘活动持续 > 90%', d: '阈值 85% · 连续 3 次 · 冷却 10 分钟', dep: 'l0' });
     renderRules();
-    hits.unshift({ k: 'op', t: demoTs(), x: '你新建规则 <b>磁盘活动持续 &gt; 90%</b> 并启用' });
+    hits.unshift({ k: 'op', t: Date.now(), x: '你新建规则 <b>磁盘活动持续 &gt; 90%</b> 并启用' });
     renderTl();
     el('ruleAddHint').textContent = '已插入列表首位。';
     el('ruleAddBox').hidden = true;
@@ -1040,10 +1384,9 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
   });
 
   /* ---------- 清理 ---------- */
-  var scopeRules = ['AI 助手临时目录 scoped_dir*', '微信 插件/缓存/日志', '钉钉 Electron 缓存', '腾讯会议 数据与日志', 'WPS 插件缓存', '旧版本 IDEA 缓存', 'WorkBuddy 日志', 'npm/pnpm 缓存', '浏览器 Code Cache'];
-  el('scopeChips').innerHTML = scopeRules.map(function (r) {
-    return '<span class="chip">' + svgIcon('<path d="M20 6L9 17l-5-5"/>', 12) + '<b>' + esc(r) + '</b></span>';
-  }).join('') + '<span class="chip" style="border-style:dashed;color:var(--t3)">＋ 加一条本机规则</span>';
+  /* 「扫了哪些目录」不再是一句写死的文案：逐条列在扫描范围卡里，数据源是下面那份 cleanRules
+     （真机上对应 GET /api/rules 的内置行 + 自建行）。渲染在 syncScope() 里做，
+     这里留着空位是因为 cleanRules 在本段之后才声明。 */
 
   var plan = [
     { id: 'p1', path: 'C:\\Users\\gongj\\AppData\\Local\\Temp\\scoped_dir* × 14', rule: 'AI 助手临时目录', size: 656 * 1024 * 1024, acc: '今天 08:12', risk: null, on: false },
@@ -1059,59 +1402,435 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
     { id: 'x2', path: 'C:\\$Recycle.Bin\\S-1-5-21-…', rule: '（自建规则误配）', size: 584 * 1024 * 1024, acc: '今天', risk: 'reject', on: false, rejected: true, why: '回收站一律不参与：2026-09-13 曾因按普通目录处理导致属主与 ACL 被改坏，回收站打不开。' }
   ];
 
+  /* S12-A：容量概览条 + 分类摘要条 + 默认勾选「可清理」。
+     数字只有一个来源：DISK 这一份读数（真机上对应监控快照的 latest.diskFreeGb/diskTotalGb
+     与冻结清单的 beforeFree），页面不自算第二个容量。 */
+  var DISK = { freeGb: 71.9, totalGb: 214.7, beforeScanGb: null };
+  var catFilter = null;          // 只显示某一组，绝不动勾选集合
+  var planVoid = false;          // 执行过一次：这份清单作废，概览条不再报「可腾出」
+  function gbText(v) { return (v === null || v === undefined) ? '—' : v.toFixed(1) + ' GB'; }
+  /* 0 在服务端就是"读失败"的形状（readFree 交 0），与"盘真空了"不可分 ⇒ 统一说「未读到」 */
+  function gbOrMissing(v) { return v && v > 0 ? gbText(v) : '未读到'; }
+  function bandCls(pct) { return pct >= 92 ? 'crit' : (pct >= 85 ? 'warn' : ''); }
+  function renderDiskBar() {
+    var usedPct = DISK.totalGb ? Math.round((1 - DISK.freeGb / DISK.totalGb) * 1000) / 10 : null;
+    el('diskFree').textContent = gbText(DISK.freeGb);
+    el('diskTotal').textContent = usedPct === null ? '总容量未知' : '/ 共 ' + gbText(DISK.totalGb);
+    var track = el('diskTrackWrap');
+    track.className = 'track' + (usedPct === null ? ' ' + bandCls(0) : ' ' + bandCls(usedPct));
+    el('diskTrack').style.width = (usedPct === null ? 0 : Math.max(0, Math.min(100, usedPct))) + '%';
+    el('diskUsed').textContent = usedPct === null ? '' : '已用 ' + usedPct + '%';
+    var shown = el('cleanPlan').hidden === false && !planVoid;
+    var bytes = plan.filter(function (p) { return !p.rejected; }).reduce(function (a, p) { return a + p.size; }, 0);
+    el('planFreed').textContent = shown ? '本清单可腾出 ' + fmtSize(Math.round(bytes)) : '';
+    el('diskBefore').textContent = shown ? '扫描那一刻可用 ' + gbOrMissing(DISK.beforeScanGb) : '';
+  }
+  /* 前后对比那一行的唯一写法（S12-A）：概览条、执行面板、留痕三处都走这两句，不许各除一次。
+     真机口径来自 client.js 的 capText/capOrMissing —— 1024 进制，beforeFree 的 0 说「未读到」。 */
+  function snapText(beforeGb, afterGb, bytes) {
+    return '系统盘可用容量 ' + gbOrMissing(beforeGb) + ' → ' + gbText(afterGb) + ' · 释放 ' + fmtSize(Math.round(bytes));
+  }
+  function settleDisk(freedBytes) {
+    var before = DISK.beforeScanGb === null ? DISK.freeGb : DISK.beforeScanGb;
+    DISK.freeGb = Math.round((before + freedBytes / 1073741824) * 10) / 10;
+    planVoid = true;
+    // 清单一旦作废，那轮 AI 建议也一并收起（与 client.js 的 doCleanApply 里 setCleanAiRun(null) 同口径）
+    aiState.phase = 'idle'; aiState.picked = {}; aiState.committed = 0; aiState.groups = [];
+    renderAi(); renderAiAsk();
+    return snapText(before, DISK.freeGb, freedBytes);
+  }
+  /** 分类分组：一条命中规则一组，按合计大小降序（与 client.js 的 categoryGroups 同口径）。 */
+  function planGroups() {
+    var map = {};
+    plan.forEach(function (p) {
+      var k = String(p.rule || '（未标注）');
+      var g = map[k] || (map[k] = { key: k, count: 0, bytes: 0, cleanable: 0, risky: 0, rejected: 0, ids: [], selectable: [], selected: 0 });
+      g.count += 1; g.bytes += p.size; g.ids.push(p.id);
+      if (p.rejected) { g.rejected += 1; } else { g.selectable.push(p.id); if (p.risk) { g.risky += 1; } else { g.cleanable += 1; } }
+      if (p.on && !p.rejected) g.selected += 1;
+    });
+    return Object.keys(map).map(function (k) {
+      var g = map[k];
+      g.bytesText = fmtSize(Math.round(g.bytes));
+      g.allSelected = g.selectable.length > 0 && g.selected === g.selectable.length;
+      return g;
+    }).sort(function (a, b) { return b.bytes - a.bytes || (a.key < b.key ? -1 : 1); });
+  }
+  /* 分类下拉（S19-①，真机批注「这些不要放在这里，放在全部分类那里使用下拉选择」）：
+     六颗 chip 收成一枚 select，读数一字不丢 —— option 文案与 client.js 的 catBar 逐段同形：
+     「类名 · N 项 · 大小 · 可清理 N · 有风险 N · 已拒绝 N」，「全选本组」跟着下拉当前那一格。
+     选「全部分类」时那颗按钮没有作用对象（整份清单的全选是表头那棵框），禁用并在 title 里说清为什么。 */
+  function catOptionText(g) {
+    return g.key + ' · ' + g.count + ' 项 · ' + g.bytesText + ' · 可清理 ' + g.cleanable +
+      (g.risky ? ' · 有风险 ' + g.risky : '') + (g.rejected ? ' · 已拒绝 ' + g.rejected : '');
+  }
+  function renderCats() {
+    var strip = el('catStrip');
+    if (el('cleanPlan').hidden !== false || !plan.length) { strip.hidden = true; strip.innerHTML = ''; return; }
+    var gs = planGroups();
+    var cur = gs.filter(function (g) { return g.key === catFilter; })[0] || null;
+    var pickTitle = !cur ? '先在左边选一个分类，「全选本组」才有作用对象；整份清单的全选用表头那颗框'
+      : (cur.selectable.length === 0 ? '本组 ' + cur.count + ' 项都被 guard 拒绝了，没有可勾选项'
+        : '把本组未拒的 ' + cur.selectable.length + ' 项加进勾选（已勾 ' + cur.selected + ' 项）');
+    var html = '<div class="catbar"><span class="cat-lb">分类</span>'
+      + '<select class="cat-select" id="catSel" aria-label="按分类筛选清单" title="选一个分类只看它，选「全部分类」看全部。筛选只减表里的行，勾选状态一字不动。">'
+      + '<option value="">全部分类（' + gs.length + ' 组 · ' + plan.length + ' 项）</option>'
+      + gs.map(function (g) {
+        return '<option value="' + esc(g.key) + '"' + (cur && cur.key === g.key ? ' selected' : '') + '>' + esc(catOptionText(g)) + '</option>';
+      }).join('')
+      + '</select>'
+      + '<button type="button" class="btn btn-sm" id="btnPickGroup" data-cur="' + esc(cur ? cur.key : '') + '" '
+      + (cur && cur.selectable.length ? '' : 'disabled ') + 'title="' + esc(pickTitle) + '">'
+      + (!cur ? '全选本组' : (cur.allSelected ? '本组已全选' : '全选本组 ' + cur.selectable.length)) + '</button>'
+      + (cur ? '<span class="hint">正在只看「' + esc(cur.key) + '」：表里 ' + cur.count + ' 行，其余 '
+        + (plan.length - cur.count) + ' 项仍在清单里、勾选状态没变（上方「已选 N 项」与执行按钮吃的都是整份清单的勾选）。</span>' : '')
+      + '</div>';
+    strip.hidden = false;
+    strip.innerHTML = html;
+  }
+  el('catStrip').addEventListener('change', function (e) {
+    if (!e.target || e.target.id !== 'catSel') return;
+    catFilter = e.target.value || null;
+    renderPlan();
+  });
+  el('catStrip').addEventListener('click', function (e) {
+    var pick = e.target.closest('#btnPickGroup');
+    if (!pick || pick.disabled) return;
+    var g = planGroups().filter(function (x) { return x.key === pick.dataset.cur; })[0];
+    if (!g) return;
+    // 并集，不是替换：表头全选/逐行勾的态不能被这一颗抹掉（client.js 的 doCleanSelectGroup 同口径）
+    g.selectable.forEach(function (id) {
+      var p = plan.filter(function (x) { return x.id === id; })[0];
+      if (p) p.on = true;
+    });
+    renderPlan();
+  });
+  /* 扫描完成时的默认勾选：勾「可清理」那批（safePlan 的口径，与「一键安全清理」同一集合）。
+     真机上按 planId 只勾一次，用户手改的勾选不许被后续推送抹掉。
+     S20（真机批注「这些不要了」）：原来这里还数一份 autoSelN 给操作条那句话，句子删了就不再数 ——
+     三档计数只有 renderPlan 那一份（卡头「共 N 项 · 可清理 · 有风险 · 已拒绝」），不在别处再数第二遍。 */
+  function adoptPlan() {
+    plan.forEach(function (p) { p.on = !p.rejected && !p.risk; });
+  }
+
+  /* 风险列三态（S10-④）：pill 只放短标签（可清理/有风险/已拒绝），解释句只出现一次 —— 
+     早先把 riskWhy 整句塞进 pill、底下再渲染同一句，真机清单里每行同一句出现两遍。 */
   function planRow(p) {
-    var riskHtml;
-    if (p.rejected) riskHtml = '<span class="pill pill-up">已拒绝</span>';
-    else if (p.risk) riskHtml = '<span class="pill pill-amber">' + esc(p.risk) + '</span>';
-    else riskHtml = '<span class="pill pill-gray">无</span>';
+    var riskPill, why = '';
+    if (p.rejected) { riskPill = '<span class="pill pill-up">已拒绝</span>'; why = p.why || ''; }
+    else if (p.risk) { riskPill = '<span class="pill pill-amber">有风险</span>'; why = p.risk; }
+    else riskPill = '<span class="pill pill-down">可清理</span>';
     return '<tr data-pid="' + p.id + '"' + (p.rejected ? ' class="is-rejected"' : '') + '>' +
       '<td class="c">' + cbx(p.on, p.rejected) + '</td>' +
-      '<td><div class="path">' + esc(p.path) + '</div>' +
-      (p.rejected ? '<div class="hint" style="margin-top:2px">' + esc(p.why) + '</div>' : '') + '</td>' +
+      '<td><div class="path">' + esc(p.path) + '</div></td>' +
       '<td class="r num">' + fmtSize(Math.round(p.size)) + '</td>' +
       '<td><span class="pill pill-gray">' + esc(p.rule) + '</span></td>' +
       '<td class="r num">' + esc(p.acc) + '</td>' +
-      '<td>' + riskHtml + '</td></tr>';
+      '<td>' + riskPill + (why ? '<div class="hint" style="margin-top:3px">' + esc(why) + '</div>' : '') + '</td></tr>';
+  }
+  /* 表头全选框（S10-③）：三态对「未拒项」数 —— 有风险项照样可执行，不参与跳过。 */
+  function renderCbxAll() {
+    var target = plan.filter(function (p) { return !p.rejected; });
+    var mid = target.filter(function (p) { return p.risk; }).length;
+    var on = target.filter(function (p) { return p.on; }).length;
+    var state = on === 0 ? 'false' : (on === target.length ? 'true' : 'mixed');
+    var box = el('cbxAll');
+    box.setAttribute('aria-checked', state);
+    box.textContent = state === 'true' ? '✓' : (state === 'mixed' ? '−' : '');
+    box.title = state === 'true' ? '取消全选'
+      : ('全选可执行的 ' + target.length + ' 项' + (mid ? '（含 ' + mid + ' 项有风险：被应用锁住的文件会被跳过）' : ''));
   }
   function renderPlan() {
-    el('planBody').innerHTML = plan.map(planRow).join('');
+    el('planBody').innerHTML = planView().map(planRow).join('');
+    var low = 0, mid = 0, rej = 0;
+    plan.forEach(function (p) { if (p.rejected) { rej += 1; } else if (p.risk) { mid += 1; } else { low += 1; } });
+    el('planCounts').textContent = '共 ' + plan.length + ' 项 · 可清理 ' + low + ' · 有风险 ' + mid + ' · 已拒绝 ' + rej;
+    renderSafeBtn();
+    renderCbxAll();
+    renderCats();
+    renderDiskBar();
     recompute();
+  }
+  /* 显示顺序与「一键安全清理」集合（S11-②）：
+     可清理 → 有风险 → 已拒绝，同档保持快照原序；plan 本体是执行对象，一字不改。
+     真机那份 517 项清单里 513 项标风险，能放心勾的 3 项沉在几百行下面，逐屏翻找不到。
+     S12-A 的分类筛选只作用在这份"显示视图"上（catFilter），勾选集合与执行入口吃的仍是 plan 本体。 */
+  function rankOf(p) { return p.rejected ? 2 : (p.risk ? 1 : 0); }
+  function planView() {
+    var v = plan.slice().sort(function (a, b) { return rankOf(a) - rankOf(b); });
+    return catFilter ? v.filter(function (p) { return String(p.rule || '（未标注）') === catFilter; }) : v;
+  }
+  function safePlan() { return plan.filter(function (p) { return !p.rejected && !p.risk; }); }
+  function renderSafeBtn() {
+    var s = safePlan();
+    var bytes = s.reduce(function (a, p) { return a + p.size; }, 0);
+    var btn = el('btnSafe');
+    btn.textContent = '一键安全清理 ' + s.length + ' 项';
+    btn.disabled = s.length === 0 || running;
+    btn.title = running ? '本次清理正在执行'
+      : (s.length === 0 ? '本次清单没有「可清理」档的条目，请勾选项后用上面的「清理选中」'
+        : '只清理标「可清理」的 ' + s.length + ' 项（' + fmtSize(Math.round(bytes)) + '），有风险与已拒绝的都不动');
+    // AI 那颗与它同进同退：执行中不亮，理由就地写在按钮旁边（S12-③）
+    renderAiAsk();
   }
   function recompute() {
     var sel = plan.filter(function (p) { return p.on && !p.rejected; });
     var total = sel.reduce(function (a, p) { return a + p.size; }, 0);
     el('selN').textContent = sel.length;
     el('selSize').textContent = fmtSize(Math.round(total));
-    el('btnDelete').disabled = sel.length === 0;
-    el('btnQuarantine').disabled = sel.length === 0;
-    el('totNote').textContent = sel.length === 0 ? '勾选至少一项' : '删除不可恢复，回收站不参与';
+    el('btnDelete').disabled = sel.length === 0 || running;
+    el('btnQuarantine').disabled = sel.length === 0 || running;
   }
   el('planBody').addEventListener('click', function (e) {
     var box = e.target.closest('.cbx'); if (!box) return;
     if (box.getAttribute('aria-disabled') === 'true') return;
     var tr = box.closest('tr'), p = plan.filter(function (x) { return x.id === tr.dataset.pid; })[0];
-    p.on = !p.on; box.setAttribute('aria-checked', p.on ? 'true' : 'false');
-    recompute();
+    p.on = !p.on;
+    renderPlan(); // 重渲染整表：表头三态的来源是 plan，逐行改完必须同步回表头
   });
-  el('btnSelAll').addEventListener('click', function () {
-    var skipped = 0;
+  /* 「全选可清理项 / 清空选择」两个按钮已按批注删除（S10-③）——只留表头这一个三态框。 */
+  el('cbxAll').addEventListener('click', function () {
+    var target = plan.filter(function (p) { return !p.rejected; });
+    if (!target.length) return;
+    var allOn = target.every(function (p) { return p.on; });
+    target.forEach(function (p) { p.on = !allOn; });
+    renderPlan();
+    var mid = target.filter(function (p) { return p.risk; }).length;
+    el('selHint').textContent = allOn ? '' : ('已全选 ' + target.length + ' 项' + (mid ? '（含 ' + mid + ' 项有风险：被应用锁住的文件会被跳过，不会被强删）' : ''));
+  });
+
+  /* 一键安全清理 + 逐条执行面板（S11-②「增加一键清理按钮，可安全清理，清理过程要有动画展」）。
+     面板数据口径与真机一致：宿主 lib/clean/executor.js 每处理完一条打一帧 clean:item，
+     这里用 200ms 的逐条节奏模拟那一串帧；呼吸点与进度条过渡就是那条动画（不是弹窗）。 */
+  var running = false;
+  el('btnSafe').addEventListener('click', function () {
+    if (running) return;
+    var s = safePlan();
+    if (!s.length) return;
+    el('safeAskText').textContent = '将永久删除 ' + s.length + ' 项「可清理」（预计 ' + fmtSize(Math.round(s.reduce(function (a, p) { return a + p.size; }, 0))) + '）：'
+      + '只动风险表判为低风险的那些，标「有风险」的与「已拒绝」的一概不动；回收站不参与，删掉不可恢复。';
+    el('safeAsk').hidden = false;
+  });
+  el('btnSafeNo').addEventListener('click', function () { el('safeAsk').hidden = true; });
+  el('btnSafeYes').addEventListener('click', function () {
+    var s = safePlan();
+    el('safeAsk').hidden = true;
+    running = true;
+    // 一动手就把上一轮 AI 建议收起（与 client 的 doCleanApply 同口径）：那份清单已经作废
+    aiState.phase = 'idle'; aiState.picked = {}; aiState.committed = 0;
+    renderAi();
+    renderPlan();
+    var i = 0, ok = 0, skip = 0, t0 = Date.now();
+    el('runPanel').hidden = false;
+    var timer = setInterval(function () {
+      if (i >= s.length) {
+        clearInterval(timer);
+        running = false;
+        el('runPanel').className = 'card-body run-panel is-done';
+        var freedAll = s.reduce(function (a, p) { return a + p.size; }, 0);
+        el('runPanel').innerHTML = runHead(s.length, s.length, ok, skip, t0, true)
+          + '<div class="track"><i style="width:100%"></i></div>'
+          + '<div class="hint num" style="margin-top:6px">' + settleDisk(freedAll) + '</div>';
+        el('planStamp').textContent = '清理已执行 · 清单已失效，请重新扫描（' + demoTs() + '）';
+        renderPlan();
+        return;
+      }
+      var p = s[i];
+      i += 1; ok += 1;
+      p.done = true;
+      el('runPanel').className = 'card-body run-panel is-running';
+      /* 逐条帧：最新一条排在最前，进度条按已处理/总数走 —— 与 client.js 的 execItem/execCells 同口径 */
+      el('runPanel').innerHTML = runHead(i, s.length, ok, skip, t0, false)
+        + '<div class="track"><i style="width:' + Math.min(99, Math.round(i / s.length * 100)) + '%"></i></div>'
+        + '<div class="hint path" style="margin-top:6px">' + esc(p.path) + '</div>'
+        + '<ul class="run-list">' + '<li><span class="pill pill-down">已删</span><span class="path">' + esc(p.path) + '</span></li>' + '</ul>';
+      renderSafeBtn();
+    }, 200);
+  });
+  function runHead(doneN, totalN, okN, skipN, t0, isDone) {
+    return '<div class="run-h"><span class="run-dot"></span><b>' + (isDone ? '本次清理已收尾' : '正在清理') + '</b>'
+      + '<span class="num">第 ' + doneN + ' / ' + totalN + ' 项 · 成功 ' + okN + ' · 跳过 ' + skipN + ' · 失败 0 · 拒绝 0</span>'
+      + '<span class="grow"></span><span class="hint num">已用 ' + Math.max(0, Math.round((Date.now() - t0) / 1000)) + ' 秒</span></div>';
+  }
+
+  /* ---------- AI 智能清理（S12-③）：只推荐 + 就地确认，采纳只并进勾选 ----------
+     原型这一段是真机口径的镜像，不是另一套逻辑：
+     · 送出去的是「按命中规则分类的汇总」（组名/条数/大小/可清理/有风险），不含绝对路径；
+     · 回来的建议按分类落地，页面无条件把这一类的 ids 视为服务端从冻结快照反查的那一批；
+     · 「采纳 N 项到勾选」只改 p.on，不发任何删除请求 —— 执行入口仍只有「一键安全清理」那一条。
+     原型没有宿主模型，所以判定用一张可解释的本地规则表代替（见 aiJudge），界面文案与真机一致。 */
+  var AI_MAX_GROUPS = 24;
+  /* 就绪度在真机上由 GET /api/clean/ai 现读（lib/clean/ai-advisor.js 的 describe()）；
+     原型没有宿主，这份常量就是"问到了、可用"那一种读数。available:false 时那颗按钮不亮，
+     旁边就地写 reason —— 「还没问到」「宿主没模型」「读失败」三句话不混用。 */
+  var AI_READY = { available: true, provider: '宿主默认', model: 'deepseek-chat', reason: '' };
+  var aiState = { phase: 'idle', groups: [], picked: {}, committed: 0, promptChars: 0, promptHash: '—' };
+  function aiGroupsOf() {
+    var by = {};
     plan.forEach(function (p) {
-      if (p.rejected) return;
-      if (p.risk) { skipped += 1; return; }
-      p.on = true;
+      var k = p.rule || '（未标注）';
+      if (!by[k]) by[k] = { group: k, ids: [], selIds: [], count: 0, bytes: 0, cleanable: 0, risky: 0, rejected: 0 };
+      var g = by[k];
+      g.ids.push(p.id); g.count += 1; g.bytes += p.size;
+      if (p.rejected) { g.rejected += 1; } else { g.selIds.push(p.id); if (p.risk) { g.risky += 1; } else { g.cleanable += 1; } }
     });
-    renderPlan();
-    el('selHint').textContent = skipped ? '全选已跳过 ' + skipped + ' 项标风险的（应用正在运行）' : '已全选可清理项';
+    return Object.keys(by).map(function (k) { return by[k]; })
+      .sort(function (a, b) { return b.bytes - a.bytes; });
+  }
+  /* 本地代替模型的那张判定表：三档口径与真机一致（全被 guard 拦下＝保留、这一类里有正被占着的东西＝先看一眼、其余＝清理），
+     理由写得出一份人话，不装神秘。分档只看这一类的构成，不看条数 —— 演示清单里每类只有 1 项，
+     拿条数当门槛会让整面板一个采纳框都点不动。 */
+  function aiJudge(g) {
+    if (g.rejected === g.count) return { action: 'keep', reason: '这一类整体已被 guard 判为不可清理（系统目录 / 回收站 / 属主 ACL 那几条红线），不放宽。' };
+    if (g.risky > 0) return { action: 'review', reason: '这一类有 ' + g.risky + ' 项正被运行中的程序占着或落在应用数据里，删掉可能影响正在用的东西，建议先看一眼再决定。' };
+    return { action: 'clean', reason: '这一类 ' + g.count + ' 项都落在可清理档（合计 ' + fmtSize(Math.round(g.bytes)) + '）：程序自己会重建的缓存与日志，重跑一次就会再生。' };
+  }
+  /* 那颗按钮的读数表：与 client.js 的 aiButton 同判同文案（三态一表，界面只渲染这里交出的话）。
+     禁用原因就地写在按钮旁边，不只放 tooltip —— 真机上「为什么这颗不亮」是最常问的一句。 */
+  function aiBtn() {
+    if (aiState.phase === 'running') return { disabled: true, why: '正在等宿主模型回话（本次判定已发出，不会自动执行任何删除）', label: 'AI 正在判定…' };
+    if (!plan.length) return { disabled: true, why: '先扫描生成清单，AI 才有可判断的分类', label: 'AI 智能清理' };
+    if (!AI_READY.available) return { disabled: true, why: AI_READY.reason || '宿主未提供模型调用能力', label: 'AI 智能清理' };
+    if (running) return { disabled: true, why: '本次清理正在执行', label: 'AI 智能清理' };
+    return {
+      disabled: false,
+      why: '请宿主模型按分类给一份建议：只发类别汇总与文件名（不发完整路径），只推荐；执行仍要你自己点「一键安全清理」'
+        + (aiState.phase === 'done' ? '（这次会替换面板里那份建议）' : ''),
+      label: aiState.phase === 'done' ? '重新征求 AI 建议' : 'AI 智能清理',
+    };
+  }
+  function renderAiAsk() {
+    var btn = el('btnAiAsk'), b = aiBtn();
+    btn.disabled = b.disabled;
+    btn.className = 'btn btn-sm' + (b.disabled ? '' : ' btn-primary');
+    btn.textContent = b.label;
+    el('aiWhy').textContent = b.disabled ? b.why : '';
+    btn.title = b.why;
+  }
+  function aiRowHtml(g) {
+    var cell = { clean: ['建议清理', 'pill-down'], review: ['建议先看一眼', 'pill-amber'], keep: ['建议保留', 'pill-gray'] }[g.action];
+    var on = Boolean(aiState.picked[g.group]);
+    /* 采纳框的闸门与 client.js 同一条：只看这一类有没有 ids 可并（guard 拒绝的那些并进来也不计数），
+       三档建议本身不决定能不能勾 —— 它是建议，不是裁决；真机里裁决只有 guard。 */
+    var canPick = g.selIds.length > 0;
+    return '<li class="ai-row" data-ag="' + esc(g.group) + '">' +
+      '<button class="cbx' + (canPick ? '' : ' is-disabled') + '" role="checkbox" aria-checked="' + (on ? 'true' : 'false') + '"' +
+      (canPick ? '' : ' aria-disabled="true"') + ' data-aipt="1"' +
+      ' title="' + (canPick ? '把这一类的 ' + g.selIds.length + ' 项并进勾选（只是勾选，不是删除）' : '这一类没有可勾选的条目（全被 guard 拒绝）') + '">' + CK + '</button>' +
+      '<span class="pill ' + cell[1] + '">' + cell[0] + '</span>' +
+      '<span class="ai-name">' + esc(g.group) + '</span>' +
+      '<span class="hint num">' + g.count + ' 项 · ' + fmtSize(Math.round(g.bytes)) + ' · 可清理 ' + g.cleanable + (g.risky ? ' · 有风险 ' + g.risky : '') + '</span>' +
+      '<div class="ai-reason">' + esc(g.reason) + '</div></li>';
+  }
+  function aiModelText() { return (AI_READY.provider || '宿主默认') + ' / ' + (AI_READY.model || '—'); }
+  /* 送出规模的口径与宿主 lib/clean/ai-advisor.js 一致：一串分类汇总行 + 一个 fnv1a 摘要。
+     这里自算自报（原型没有模型），但"送出去的就是这几行字"这件事和真机同形。 */
+  function fnv1a(s) {
+    var h = 0x811c9dc5;
+    for (var i = 0; i < s.length; i += 1) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+    return h.toString(16).padStart(8, '0');
+  }
+  function renderAi() {
+    var p = el('aiPanel');
+    if (aiState.phase === 'idle') { p.hidden = true; p.className = 'card-body run-panel'; p.innerHTML = ''; return; }
+    p.hidden = false;
+    if (aiState.phase === 'running') {
+      p.className = 'card-body run-panel is-running';
+      p.innerHTML = '<div class="run-h"><span class="run-dot"></span><b>正在请宿主模型判定</b>'
+        + '<span class="grow"></span><span class="hint num">' + esc(aiModelText()) + '</span></div>'
+        + '<div class="hint" style="margin-top:6px">本次交给模型的是分类汇总与文件名（不含完整路径、不含你的勾选）。它只给建议，删不删还是你点。</div>';
+      return;
+    }
+    p.className = 'card-body run-panel is-done';
+    var staged = 0;
+    aiState.groups.forEach(function (g) { if (aiState.picked[g.group]) staged += g.selIds.length; });
+    p.innerHTML = '<div class="run-h"><b>AI 建议</b><span class="num">判定 ' + aiState.groups.length + ' 类</span>'
+      + '<span class="grow"></span><span class="hint num">' + esc(aiModelText()) + '</span></div>'
+      + '<ul class="ai-list">' + aiState.groups.map(aiRowHtml).join('') + '</ul>'
+      + (aiState.truncated ? '<div class="notice notice-amber" style="margin-top:8px">本次判定如实交代：清单分类超过 ' + AI_MAX_GROUPS + ' 类，只把体积最大的 ' + aiState.groups.length + ' 类交给模型，其余仍在清单里可手动勾选。</div>' : '')
+      + '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px">'
+      + '<button class="btn btn-sm btn-primary" id="btnAiAdopt"' + (staged ? '' : ' disabled') + ' title="' + (staged ? '把已勾分类的 ' + staged + ' 项并进清单勾选（不删除任何东西）' : '先勾上想采纳的分类') + '">采纳 ' + staged + ' 项到勾选</button>'
+      + '<button class="btn btn-sm" id="btnAiClose">收起建议</button>'
+      + '<span class="grow"></span><span class="hint num">本次输入 ' + aiState.promptChars + ' 字 · 摘要 ' + esc(aiState.promptHash)
+      + (aiState.groupsSent && aiState.groupsTotal ? ' · 送出 ' + aiState.groupsSent + '/' + aiState.groupsTotal + ' 类' : '') + '</span></div>'
+      + (aiState.committed ? '<div class="hint" style="margin-top:4px">已把 ' + aiState.committed + ' 项并入勾选（建议本身不进留痕，留痕记的是执行）：复核后点上面「清理选中」才会动手。</div>' : '')
+      + '<div class="hint" style="margin-top:4px">模型只看到分类汇总与文件名，看不到完整路径；它不执行、也不放宽 guard 的任何一条红线。</div>';
+  }
+  /* 送出前如实算一遍"这次到底发了多少字"：行式与宿主 renderGroupLine 同形
+     （分类名 | 条数 | MB | 可清理/有风险 | 样例只取文件名，不取路径）。 */
+  function aiPromptLines(gs) {
+    return gs.map(function (g, idx) {
+      var names = [];
+      plan.forEach(function (p) {
+        if (names.length >= 3 || g.ids.indexOf(p.id) < 0) return;
+        var seg = String(p.path).split(/[\\/]/).filter(Boolean);
+        names.push(seg.length ? seg[seg.length - 1] : '(无名)');
+      });
+      return (idx + 1) + '. ' + g.group + ' | ' + g.count + ' 项 | ' + (g.bytes / 1048576).toFixed(1) + ' MB'
+        + ' | 可清理 ' + g.cleanable + ' / 有风险 ' + g.risky + ' | 样例: ' + names.join(', ');
+    }).join('\n');
+  }
+  el('btnAiAsk').addEventListener('click', function () {
+    if (aiBtn().disabled) return;
+    aiState.phase = 'running'; aiState.picked = {}; aiState.committed = 0; aiState.groups = [];
+    renderAi(); renderAiAsk();
+    var gs = aiGroupsOf();
+    var sent = gs.slice(0, AI_MAX_GROUPS);
+    var lines = aiPromptLines(sent);
+    aiState.promptChars = lines.length;
+    aiState.promptHash = 'fnv1a-' + fnv1a(lines);
+    aiState.groupsSent = sent.length;
+    aiState.groupsTotal = gs.length;
+    aiState.truncated = gs.length > AI_MAX_GROUPS;
+    setTimeout(function () {
+      aiState.groups = sent.map(function (g) {
+        var j = aiJudge(g); g.action = j.action; g.reason = j.reason; return g;
+      });
+      aiState.phase = 'done';
+      renderAi(); renderAiAsk();
+    }, 900);
   });
-  el('btnSelNone').addEventListener('click', function () {
-    plan.forEach(function (p) { p.on = false; });
-    renderPlan();
+  el('aiPanel').addEventListener('click', function (e) {
+    var b = e.target.closest('[data-aipt]');
+    if (b) {
+      var row = b.closest('.ai-row');
+      var g = row ? row.dataset.ag : '';
+      if (b.getAttribute('aria-disabled') === 'true') return;
+      if (aiState.picked[g]) { delete aiState.picked[g]; } else { aiState.picked[g] = true; }
+      // 改选就等于上一批"已并入"的交代不再成立：清空那行话，免得界面说一件没发生的事
+      aiState.committed = 0;
+      renderAi();
+      return;
+    }
+    if (e.target.closest('#btnAiAdopt')) {
+      var n = 0;
+      // 并进来的集合与 client.js 的 aiAdoptIds 同一条口径：这一类里**能勾的**那些（有风险项照样能勾，
+      // 用户点采纳就是同意把它并进勾选；真正动手前还要过表格里那一步确认，guard 也只认冻结快照）
+      aiState.groups.forEach(function (g) {
+        if (!aiState.picked[g.group]) return;
+        g.selIds.forEach(function (id) {
+          var p = plan.filter(function (x) { return x.id === id; })[0];
+          if (p) { p.on = true; n += 1; }
+        });
+      });
+      aiState.committed = n;
+      renderPlan(); renderAi();
+      el('selHint').textContent = 'AI 建议并进来的 ' + n + ' 项已勾上：还没删，确认后才走清理';
+      return;
+    }
+    if (e.target.closest('#btnAiClose')) { aiState.phase = 'idle'; renderAi(); renderAiAsk(); }
   });
 
   var scanning = false;
   function startScan() {
     if (scanning) return;
     scanning = true;
+    // 新一轮扫描作废上一轮的概览与筛选（与 client.js 的 doCleanScan 同口径）
+    catFilter = null; planVoid = false;
+    // AI 那一轮的建议也是跟着快照的：清单换了，旧建议一律收起（client 里是 setCleanAiRun(null)）
+    aiState.phase = 'idle'; aiState.picked = {}; aiState.committed = 0; aiState.groups = [];
+    renderAi(); renderAiAsk();
+    DISK.beforeScanGb = null;
     el('cleanIdle').hidden = true;
     el('cleanScan').hidden = false;
     el('cleanPlan').hidden = true;
@@ -1119,22 +1838,33 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
     el('btnScanMain').textContent = '扫描中…';
     var dirs = ['%TEMP%', 'C:\\Users\\gongj\\AppData\\Local\\Temp\\scoped_dir19044_882', '%AppData%\\Tencent\\xwechat\\radium', '%LocalAppData%\\DingTalk_133\\Default\\Cache', '%AppData%\\Tencent\\WeMeet\\Logs', '%AppData%\\kingsoft\\wps\\addons', '%APPDATA%\\JetBrains\\IdeaIC2024.3', '~\\.workbuddy\\logs', 'C:\\Users\\gongj\\.cache\\puppeteer', 'C:\\Windows\\Temp', 'C:\\$Recycle.Bin'];
     var step = 0;
+    var t0 = Date.now();
+    // 进度分母换成「类目录」（S12-A）：与 client.js 的 scanCells 同域（ruleIdx/rulesLen），
+    // 不再拿"第几条命中"当百分比 —— 真机上那会让条子在头几秒就冲到 96%。
+    var ruleTotal = cleanRules.filter(function (r) { return r.on && !r.blocked; }).length;
+    el('scanElapsed').textContent = '0 秒';
+    el('scanRule').textContent = '第 1 / 共 ' + ruleTotal + ' 类目录';
     var t = setInterval(function () {
       step += 1;
       el('scanCur').textContent = dirs[Math.min(step, dirs.length - 1)];
       el('scanWalked').textContent = (step * 11840).toLocaleString('en-US');
       el('scanFound').textContent = Math.min(step, plan.length);
       el('scanSize').textContent = fmtSize(Math.round(step / plan.length * 8.2 * 1024 * 1024 * 1024));
-      el('scanBar').style.width = Math.min(100, step / plan.length * 100) + '%';
+      el('scanElapsed').textContent = Math.round((Date.now() - t0) / 1000) + ' 秒';
+      el('scanRule').textContent = '第 ' + Math.min(step, ruleTotal) + ' / 共 ' + ruleTotal + ' 类目录';
+      el('scanBar').style.width = Math.min(96, step / ruleTotal * 100) + '%';
       if (step >= plan.length) {
         clearInterval(t); scanning = false;
         el('cleanScan').hidden = true;
         el('cleanPlan').hidden = false;
+        // 快照那一刻的可用容量冻结下来（真机上就是 plan.beforeFree），后面的前后对比都读这一份
+        DISK.beforeScanGb = DISK.freeGb;
+        adoptPlan();
         renderPlan();
         el('selHint').textContent = '';
         var scanTs = demoTs();
         el('planStamp').textContent = '快照生成于 ' + scanTs + ' · 数据在扫描那一刻冻结';
-        hits.unshift({ k: 'op', t: scanTs, x: '你执行扫描：遍历 <b class="num">' + el('scanWalked').textContent + '</b> 个条目，命中 <b class="num">' + plan.length + '</b> 项（其中 2 项被 guard 拒绝）' });
+        hits.unshift({ k: 'op', t: Date.now(), x: '你执行扫描：遍历 <b class="num">' + el('scanWalked').textContent + '</b> 个条目，命中 <b class="num">' + plan.length + '</b> 项（其中 2 项被 guard 拒绝）' });
         renderTl();
         el('btnScanMain').disabled = false;
         el('btnScanMain').textContent = '重新扫描';
@@ -1148,12 +1878,15 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
   }
 
   var logs = [
-    { id: 'CLN-2609-0003', t: '2026-09-26 21:04', freed: '3.12 GB', n: 6, mode: '永久删除', items: 'scoped_dir* ×9 · DingTalk Cache · WeMeet Logs · WorkBuddy logs · IdeaIC2024.1', by: '你（手动）' },
-    { id: 'CLN-2609-0002', t: '2026-09-21 09:18', freed: '892 MB', n: 5, mode: '隔离到暂存', items: 'xwechat\\xplugin · wps\\addons · Code Cache ×3', by: '你（手动）', restorable: true },
-    { id: 'CLN-2609-0001', t: '2026-09-16 22:51', freed: '1.47 GB', n: 4, mode: '永久删除', items: 'scoped_dir* ×612（当日回归脚本产物）· .workbuddy\\logs', by: '你（手动）' }
+    { id: 'CLN-2609-0003', t: '2026-09-26 21:04', freed: '3.12 GB', n: 6, mode: '永久删除', items: 'scoped_dir* ×9 · DingTalk Cache · WeMeet Logs · WorkBuddy logs · IdeaIC2024.1', snapshot: snapText(68.4, 71.5, 3.12 * 1073741824), by: '你（手动）' },
+    { id: 'CLN-2609-0002', t: '2026-09-21 09:18', freed: '892 MB', n: 5, mode: '隔离到暂存', items: 'xwechat\\xplugin · wps\\addons · Code Cache ×3', snapshot: snapText(66.1, 67.0, 892 * 1048576), by: '你（手动）', restorable: true },
+    { id: 'CLN-2609-0001', t: '2026-09-16 22:51', freed: '1.47 GB', n: 4, mode: '永久删除', items: 'scoped_dir* ×612（当日回归脚本产物）· .workbuddy\\logs', snapshot: snapText(64.6, 66.1, 1.47 * 1073741824), by: '你（手动）' }
   ];
   function renderLogs() {
     el('logCount').textContent = logs.length + ' 段记录';
+    // 页头那颗是留痕的唯一入口（S12-①）：段数写在按钮上，不点开也知道这次有没有记录。
+    var entry = el('btnLogMain');
+    if (entry) entry.textContent = logs.length ? '清理留痕 ' + logs.length : '清理留痕';
     el('runLog').innerHTML = logs.map(function (l, i) {
       return '<div class="rule tl-click" data-log="' + i + '">' +
         '<div class="ri"><div class="rn">' + esc(l.id) + '<span class="pill pill-' + (l.mode.indexOf('隔离') >= 0 ? 'blue' : 'gray') + '">' + esc(l.mode) + '</span>' +
@@ -1163,7 +1896,7 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
         '<span class="hint num">' + esc(l.t) + '</span></div>' +
         (i === 0 ? '<div class="detail-row" style="display:none" data-logd="' + i + '"><div class="detail-box"><div class="kv">' +
           '<div><div class="k">冻结快照</div><div class="v num">' + esc(l.freed) + ' · ' + l.n + ' 项 · 命中规则 4 条</div></div>' +
-          '<div><div class="k">执行前后 C 盘可用</div><div class="v num">70.4 GB → 73.5 GB</div></div>' +
+          '<div><div class="k">执行前后 C 盘可用</div><div class="v num">' + esc(l.snapshot) + '</div></div>' +
           '<div><div class="k">失败项</div><div class="v num">1 项（占用中，跳过并写明原因）</div></div>' +
           '</div><div class="arc-note">留痕冻结的是<b>清单快照 + 命中规则 + 执行方式 + 前后容量差</b>，不是「大概清了多少」。清理规则可编辑，事后单凭规则 ID 无法复现当时删了什么 —— 与股票插件必须存权重快照是同一个理由。</div></div></div>' : '');
     }).join('');
@@ -1173,7 +1906,18 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
     var d = el('runLog').querySelector('[data-logd="' + row.dataset.log + '"]');
     if (d) d.style.display = d.style.display === 'none' ? 'table-row' : 'none';
   });
+  // 留痕的展开态（S12-①）：入口只有页头那颗，面板自己带「收起」。收起 = 整块从页面里拿掉。
+  var logsOpen = false;
+  function setLogsOpen(v) {
+    logsOpen = v;
+    el('cleanLogs').hidden = !v;
+    var entry = el('btnLogMain');
+    if (entry) { entry.classList.toggle('is-open', v); entry.setAttribute('aria-expanded', v ? 'true' : 'false'); }
+  }
+  el('btnLogClose').addEventListener('click', function () { setLogsOpen(false); });
   renderLogs();
+  // 概览条的数字由 DISK 这一份读数画出来（开局就把 markup 里的静态占位覆盖掉，两处读数不会各说各的）
+  renderDiskBar();
 
   function apply(mode) {
     var sel = plan.filter(function (p) { return p.on && !p.rejected; });
@@ -1183,16 +1927,18 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
     btn.textContent = mode === 'del' ? '清理中…' : '隔离中…';
     setTimeout(function () {
       var freed = sel.reduce(function (a, p) { return a + p.size; }, 0);
+      var snap = settleDisk(freed);
       var stamp = demoTs();
       logs.unshift({
         id: 'CLN-2609-' + String(logs.length + 1).padStart(4, '0'),
         t: '2026-09-27 ' + stamp.slice(0, 5), freed: fmtSize(Math.round(freed)), n: sel.length,
         mode: mode === 'del' ? '永久删除' : '隔离到暂存',
         items: sel.slice(0, 3).map(function (p) { return p.rule; }).join(' · ') + (sel.length > 3 ? ' 等 ' + sel.length + ' 项' : ''),
+        snapshot: snap,
         by: '你（手动）', restorable: mode !== 'del'
       });
       renderLogs();
-      hits.unshift({ k: 'op', t: stamp, x: '你执行' + (mode === 'del' ? '清理' : '隔离') + '：<b class="num">释放 ' + fmtSize(Math.round(freed)) + '</b>（' + sel.length + ' 项）' });
+      hits.unshift({ k: 'op', t: Date.now(), x: '你执行' + (mode === 'del' ? '清理' : '隔离') + '：<b class="num">释放 ' + fmtSize(Math.round(freed)) + '</b>（' + sel.length + ' 项）' });
       renderTl();
       plan.forEach(function (p) { p.on = false; });
       renderPlan();
@@ -1215,7 +1961,7 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
     el('probeSteps').innerHTML =
       '<div class="step ' + cls(s1) + '"><div class="si">' + (s1 ? '✓' : '!') + '</div><div class="sc">' +
       '<div class="st">① 已安装 Everything<span class="pill pill-' + (s1 ? 'down' : 'up') + '">' + (s1 ? '已装' : '未探到') + '</span></div>' +
-      '<div class="sd">注册表卸载键 + 常见安装路径 + 服务/进程名三处取证；任一命中即算已装。</div></div></div>' +
+      '<div class="sd">常见安装路径（基址取 %ProgramFiles% 等环境变量，不写死盘符）＋ HTTP 端口在应答 ＋ PATH 或设置页指定的 es.exe，三处任一命中即算已装。</div></div></div>' +
       '<div class="step ' + cls(s2) + '"><div class="si">' + (s2 ? '✓' : '!') + '</div><div class="sc">' +
       '<div class="st">② 有查询通路<span class="pill pill-' + (s2 ? 'down' : 'up') + '">' + (probe.http ? 'HTTP 3417' : (probe.es ? 'es.exe' : '两条都没有')) + '</span></div>' +
       '<div class="sd">优先探 Everything 自带 HTTP 服务（需你在 工具→选项→HTTP 服务器 勾选）；其次探 PATH 或插件 bin 下的 es.exe。</div></div></div>' +
@@ -1223,18 +1969,18 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
       '<div class="st">③ 端到端可用<span class="pill pill-' + (s3 ? 'down' : 'gray') + '">' + (s3 ? '试查询 12ms' : '未执行') + '</span></div>' +
       '<div class="sd">拿一个必定不存在的文件名真跑一次，确认返回结构而不是超时或 403。</div></div></div>';
     el('guideCard').hidden = s1 && s2 && s3;
-    var eb = el('searchMode').querySelector('[data-mode="everything"]');
-    eb.classList.toggle('is-active', mode === 'everything');
-    el('searchMode').querySelector('[data-mode="walk"]').classList.toggle('is-active', mode === 'walk');
-    eb.title = probeOk() ? '' : '通路未就绪 —— 暂不可选';
+    renderInstall();
+    if (!el('guideCard').hidden) askReady();
+    syncControls();
     el('walkNotice').hidden = mode !== 'walk';
     el('walkDirs').hidden = mode !== 'walk';
   }
-  function currentMode() { return probeOk() ? 'everything' : 'walk'; }
+  // 偏好里的档位 + 通路就绪 = 界面effective档（与 client.js 的 modeOf 同规：没就绪就按限定目录渲染）
+  function currentMode() { return probeOk() && prefMode === 'everything' ? 'everything' : 'walk'; }
   function probeOk() { return probe.installed && (probe.http || probe.es) && probe.ping; }
 
   var idx = [
-    { n: '2026-09-27-dsh-plugin-sysops-design.md', p: 'F:\\dsh-plugins\\docs\\superpowers\\specs', s: 18 * 1024, t: '今天 22:31' },
+    { n: 'design-spec.md', p: 'F:\\dsh-plugins\\dsh-plugin-sysops\\docs', s: 18 * 1024, t: '今天 22:31' },
     { n: 'client.js', p: 'F:\\dsh-plugins\\dsh-plugin-stock-analysis', s: 214 * 1024, t: '今天 21:02' },
     { n: 'eastmoney-finance.js', p: 'F:\\dsh-plugins\\dsh-plugin-stock-analysis\\lib\\providers', s: 4.6 * 1024, t: '09-26 23:44' },
     { n: 'cleanup-workbuddy.ps1', p: 'C:\\Users\\gongj\\tools', s: 6.1 * 1024, t: '09-18 11:20' },
@@ -1275,34 +2021,201 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
   }
   el('btnSearch').addEventListener('click', function () { renderResult(el('q').value.trim()); });
   el('q').addEventListener('input', function () { renderResult(this.value.trim()); });
+
+  /* ---------- 搜索页偏好（S12-④，与 client.js 同口径） ----------
+     通路 / 返回上限 / 覆盖范围都是「选完就写进偏好」，不写库的话下次进本页又弹回默认档。
+     原型没有宿主偏好库：这里用 320ms 本地模拟那一次整行写，但锁定、清空时机、交代行文案与真实现一致。 */
+  var TXT = {
+    dirBlank: '目录输入是空的：先粘贴绝对路径（如 F:\\dsh-plugins），再点「＋ 添加目录」。',
+    dirAdded: '已写入覆盖范围：',
+    dirRemoved: '已移出覆盖范围：',
+    modeSaved: '通路已存进偏好：',
+    limitSaved: '返回上限已存进偏好：',
+    saving: '保存中…'
+  };
+  var prefMode = 'everything';
+  var dirs = ['C:\\Users\\gongj\\Documents', 'C:\\Users\\gongj\\Downloads', 'F:\\dsh-plugins', 'C:\\Users\\gongj\\tools', 'C:\\Users\\gongj\\AppData\\Local\\Programs'];
+  var saving = false;
+  function setNote(tone, text) {
+    var n = el('dirNote');
+    n.textContent = text || '';
+    n.className = 'savenote is-' + (tone === 'bad' ? 'bad' : 'ok');
+    n.hidden = !text;
+  }
+  // 一份真相：控件的 active / disabled / 标题只在这里落，renderProbe 与 saveSim 都走它。
+  function syncControls() {
+    var mode = currentMode();
+    var eb = el('searchMode').querySelector('[data-mode="everything"]');
+    var wb = el('searchMode').querySelector('[data-mode="walk"]');
+    eb.classList.toggle('is-active', mode === 'everything');
+    wb.classList.toggle('is-active', mode === 'walk');
+    eb.disabled = saving || !probeOk();
+    wb.disabled = saving;
+    eb.title = saving ? '有写入在飞：等这一笔落定再改档位' : (probeOk() ? '用 Everything 的全盘索引查询（选完会写进偏好 search.mode）' : '通路未就绪 —— 暂不可选');
+    wb.title = '只在已选目录里遍历（选完会写进偏好 search.mode）';
+    Array.prototype.forEach.call(el('limitSeg').children, function (x) {
+      x.disabled = saving;
+      x.classList.toggle('is-active', +x.dataset.limit === limit);
+    });
+    el('dirInput').disabled = saving;
+    var add = el('btnAddDir');
+    add.disabled = saving;
+    add.textContent = saving ? TXT.saving : '＋ 添加目录';
+  }
+  function saveSim(apply, okText) {
+    if (saving) return Promise.resolve({ ok: false });
+    saving = true; syncControls();
+    return new Promise(function (res) {
+      setTimeout(function () {
+        apply();
+        saving = false;
+        renderDirs(); syncControls(); renderProbe(); renderResult(el('q').value.trim());
+        setNote('ok', okText);
+        res({ ok: true });
+      }, 320);
+    });
+  }
   el('limitSeg').addEventListener('click', function (e) {
-    var b = e.target.closest('button'); if (!b) return;
-    limit = +b.dataset.limit;
-    Array.prototype.forEach.call(this.children, function (x) { x.classList.toggle('is-active', x === b); });
-    renderResult(el('q').value.trim());
+    var b = e.target.closest('button'); if (!b || b.disabled) return;
+    saveSim(function () { limit = +b.dataset.limit; }, TXT.limitSaved + b.dataset.limit + ' 条');
   });
   el('searchMode').addEventListener('click', function (e) {
-    var b = e.target.closest('button'); if (!b) return;
-    if (b.dataset.mode === 'everything' && !probeOk()) {
-      el('q').placeholder = '通路未就绪 —— 当前只能用限定目录';
+    var b = e.target.closest('button'); if (!b || b.disabled) return;
+    saveSim(function () { prefMode = b.dataset.mode; },
+      TXT.modeSaved + (b.dataset.mode === 'walk' ? '限定目录' : '全盘索引') + ' —— 下次进本页仍是这一档（通路未就绪时界面仍按限定目录渲染）。');
+  });
+  function renderDirs() {
+    el('dirChips').innerHTML = dirs.map(function (d, i) {
+      return '<span class="chip"><b>' + esc(d) + '</b><button data-deldir="' + i + '"' + (saving ? ' disabled' : '') +
+        ' title="把该目录移出覆盖范围">×</button></span>';
+    }).join('');
+  }
+  // 点按钮与按回车走同一个 submit（两条路必须同规）；输入框只在写入确认后清空 ——
+  // 没写进去时把那行字留着，用户看得见自己刚输了什么。
+  function submitDir() {
+    if (saving) return;
+    var input = el('dirInput');
+    var v = (input.value || '').trim();
+    if (!v) { setNote('bad', TXT.dirBlank); return; }
+    var at = dirs.indexOf(v);
+    if (at >= 0) {
+      setNote('ok', '第 ' + (at + 1) + ' 条已经是它了：覆盖范围没变，也不用重复添加。');
+      input.value = '';
       return;
     }
-    Array.prototype.forEach.call(this.children, function (x) { x.classList.toggle('is-active', x === b); });
-    el('walkNotice').hidden = b.dataset.mode !== 'walk';
-    el('walkDirs').hidden = b.dataset.mode !== 'walk';
-    renderResult(el('q').value.trim());
-  });
-  var dirs = ['C:\\Users\\gongj\\Documents', 'C:\\Users\\gongj\\Downloads', 'F:\\dsh-plugins', 'C:\\Users\\gongj\\tools', 'C:\\Users\\gongj\\AppData\\Local\\Programs'];
-  function renderDirs() {
-    el('walkDirs').innerHTML = dirs.map(function (d, i) {
-      return '<span class="chip"><b>' + esc(d) + '</b><button data-deldir="' + i + '">×</button></span>';
-    }).join('') + '<span class="chip" style="border-style:dashed;color:var(--t3)">＋ 添加目录</span>';
+    saveSim(function () { dirs.push(v); input.value = ''; },
+      TXT.dirAdded + v + '（现共 ' + (dirs.length + 1) + ' 个目录，遍历范围到此为止，不是全盘索引）');
   }
+  el('btnAddDir').addEventListener('click', submitDir);
+  el('dirInput').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); submitDir(); } });
   el('walkDirs').addEventListener('click', function (e) {
-    var b = e.target.closest('[data-deldir]'); if (!b) return;
-    dirs.splice(+b.dataset.deldir, 1); renderDirs(); renderResult(el('q').value.trim());
+    var b = e.target.closest('[data-deldir]'); if (!b || b.disabled) return;
+    var d = dirs[+b.dataset.deldir];
+    if (d === undefined) return;
+    saveSim(function () { dirs = dirs.filter(function (x) { return x !== d; }); },
+      TXT.dirRemoved + d + '（现共 ' + (dirs.length - 1) + ' 个目录）');
   });
   renderDirs();
+
+  /* ---------- S12-⑤ 一键安装 Everything（与 client.js 的 installButton / installOutcomeText 同规） ----------
+     真实现里「能不能装」只吃宿主 GET /api/search/install/ready，命令原文只在 lib/search/installer.js 的常量里；
+     原型没有 winget 可探，这里用一次延时模拟那一个读数，为的是把三态演全：
+     还没问到 ≠ 这台机器没有 winget ≠ 已经有一装在跑。点「确认安装」才 POST，点「取消」什么都没发生。 */
+  var WINGET_CMD = 'winget install --id voidtools.Everything --exact --source winget --accept-package-agreements --accept-source-agreements';
+  var install = { ready: null, ask: false, job: null, note: null };
+  Object.assign(TXT, {
+    installBtn: '一键安装 Everything（winget）',
+    installConfirm: '确认安装',
+    installCancel: '取消',
+    installNotAsked: '还没问到本机有没有 winget（进本页时现读一次），所以这颗按钮先不亮。',
+    installBusy: '本次安装正在进行',
+    installRunning: '安装中…',
+    installRetry: '重试一键安装',
+    installAgain: '再次运行一键安装',
+    installStarted: '已经交给 winget 了：窗口里可能要你点 UAC 同意（插件不代点）。装完这一侧会自动重新检测。',
+    installDone: 'winget 报告安装完成。已按结果重新检测：',
+    installNeedHttp: '① 已安装已翻绿；② 查询通路还要你在 Everything 里勾选 HTTP 服务器才会绿（本插件不替你打开它）。',
+  });
+  function installButton() {
+    if (probe.installed === true) return { show: false };
+    var label = TXT.installBtn;
+    if (install.job && install.job.phase === 'running') {
+      var secs = install.job.startedAt ? Math.max(0, Math.round((Date.now() - install.job.startedAt) / 1000)) : null;
+      return { show: true, disabled: true, why: TXT.installBusy + (secs === null ? '' : '（已经跑了 ' + secs + ' 秒，UAC 窗口可能要你点同意）'), label: TXT.installRunning };
+    }
+    if (!install.ready) return { show: true, disabled: true, why: TXT.installNotAsked, label: label };
+    if (install.ready.can !== true) return { show: true, disabled: true, why: String(install.ready.detail || '本机没探到 winget'), label: label };
+    if (saving) return { show: true, disabled: true, why: '本页正有一次写入在途', label: label };
+    if (install.job && install.job.phase === 'failed') return { show: true, disabled: false, why: '上次没装成：' + (install.job.message || 'winget 以非 0 退出'), label: TXT.installRetry };
+    if (install.job && install.job.phase === 'done') return { show: true, disabled: false, why: '上一装报告已完成：再点一次只是让 winget 再确认一遍这个包', label: TXT.installAgain };
+    return { show: true, disabled: false, why: (install.ready.command ? '会执行：' + install.ready.command + '。' : '') + '弹出的 UAC 与安装窗口要你自己同意（本插件不代点）', label: label };
+  }
+  function installOutcome(job, p) {
+    var j = job || {};
+    var tail = j.outTail ? '｜winget 最后几行：' + String(j.outTail).replace(/\r?\n/g, ' / ') : '';
+    if (j.phase === 'failed') return { tone: 'bad', text: '安装没有完成：' + (j.message || 'winget 以非 0 退出') + tail };
+    if (j.phase !== 'done') return null;
+    if (p.installed !== true) return { tone: 'bad', text: TXT.installDone + '① 已安装这一档还没翻绿：装到哪块盘、或者还要再点一次「重新检测」，都以上面三行为准。' };
+    if (p.http !== true && p.es !== true) return { tone: 'ok', text: TXT.installDone + TXT.installNeedHttp };
+    if (!probeOk()) return { tone: 'ok', text: TXT.installDone + '①② 已绿，③ 端到端还没过：以自检那三行为准。' };
+    return { tone: 'ok', text: TXT.installDone + '三级自检全绿，「全盘索引」这一档现在可以选了。' };
+  }
+  function renderInstall() {
+    var b = installButton();
+    el('installRow').hidden = !b.show;
+    var btn = el('btnInstall');
+    if (b.show) {
+      btn.disabled = b.disabled;
+      btn.title = b.why;
+      btn.textContent = b.label;
+      btn.className = 'btn btn-sm' + (b.disabled ? '' : ' btn-primary');
+      el('installWhy').textContent = b.disabled ? b.why : '';
+    }
+    var ask = el('installAsk');
+    if (install.ask && b.show && !b.disabled) {
+      ask.hidden = false;
+      ask.innerHTML = '将执行：<span class="path">' + esc(String((install.ready || {}).command || '')) + '</span>。这是本插件唯一会改动本机状态的动作之一：只从 winget 官方源装这一个包，' +
+        'UAC 与安装窗口要你自己同意（插件不代点），不写注册表，装完也不替你打开 Everything 的 HTTP 服务器。点「取消」则什么都没发生。' +
+        '<div style="display:flex;gap:8px;margin-top:6px"><button class="btn btn-sm btn-primary" id="btnInstallYes" type="button"' + (saving ? ' disabled' : '') + '>' + TXT.installConfirm +
+        '</button><button class="btn btn-sm" id="btnInstallNo" type="button">' + TXT.installCancel + '</button></div>';
+    } else {
+      ask.hidden = true;
+      ask.innerHTML = '';
+    }
+    var n = el('installNote');
+    n.hidden = !install.note;
+    n.textContent = install.note ? install.note.text : '';
+    n.className = 'savenote is-' + (install.note && install.note.tone === 'bad' ? 'bad' : 'ok');
+  }
+  // 「进本页现读一次」的模拟：引导卡第一次露面时把 ready 读数补上（真实现里这一次是 GET）。
+  function askReady() {
+    if (install.ready || el('guideCard').hidden) return;
+    setTimeout(function () {
+      install.ready = { can: true, detail: 'winget v1.8 在位（winget）', version: 'v1.8', command: WINGET_CMD };
+      renderInstall();
+    }, 260);
+  }
+  el('btnInstall').addEventListener('click', function () {
+    if (this.disabled) return;
+    install.ask = true;
+    renderInstall();
+  });
+  el('installAsk').addEventListener('click', function (e) {
+    var b = e.target.closest('button'); if (!b) return;
+    if (b.id === 'btnInstallNo') { install.ask = false; renderInstall(); return; }
+    if (b.id !== 'btnInstallYes') return;
+    install.ask = false;
+    install.job = { phase: 'running', startedAt: Date.now(), message: '', outTail: '' };
+    install.note = { tone: 'ok', text: TXT.installStarted };
+    renderInstall();
+    // 原型这一侧没有 winget：2.4s 后按演示脚本落终态（真实现里终态来自 search:install 帧）
+    setTimeout(function () {
+      install.job = { phase: 'done', startedAt: install.job.startedAt, finishedAt: Date.now(), exitCode: 0, message: 'winget 正常退出（退出码 0）', outTail: '已找到 Everything\n已成功安装' };
+      probe.installed = true;
+      install.note = installOutcome(install.job, probe);
+      renderProbe(); renderResult(el('q').value.trim()); renderInstall();
+    }, 2400);
+  });
 
   el('btnReprobe').addEventListener('click', function () {
     var b = this; b.disabled = true; b.textContent = '检测中…';
@@ -1366,11 +2279,43 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
     { n: '开发残留 tmp/', g: 'F:\\dsh-plugins\\*\\tmp', k: '残留', a: '30 天', builtin: false, on: true }
   ];
   function syncScope() {
-    var on = cleanRules.filter(function (r) { return r.on; }).length;
-    var blocked = cleanRules.filter(function (r) { return r.blocked; }).length;
-    el('scopeSub').textContent = '已启用 ' + on + ' 条 · 共 ' + cleanRules.length + ' 条 · guard 已拒绝 ' + blocked + ' 条';
-    el('ruleCount').textContent = '已启用 ' + on + ' / 共 ' + cleanRules.length;
+    // 口径与 client.js 的 scanScope() 一致：待遍历 = 启用且未被 guard 拒的那批
+    var usable = cleanRules.filter(function (r) { return r.on && !r.blocked; });
+    var blocked = cleanRules.filter(function (r) { return r.blocked; });
+    var off = cleanRules.filter(function (r) { return !r.on && !r.blocked; });
+    var bi = usable.filter(function (r) { return r.builtin; });
+    var user = usable.filter(function (r) { return !r.builtin; });
+    // S13：这一行就是收起态唯一可见的范围读数，句式跟 client.js 的 scopeSummary() 对齐；
+    //      原型这里多一档「guard 已拒」（演示数据把红线画在规则上，真机上那条判定在条目上）。
+    var builtinAll = cleanRules.filter(function (r) { return r.builtin; });
+    el('scopeSub').textContent = '内置启用 ' + bi.length + ' 条（共 ' + builtinAll.length + ' 条）· 自建 '
+      + user.length + ' 条 · 本次待遍历 ' + usable.length + ' 类目录'
+      + (off.length ? ' · 另有 ' + off.length + ' 条已停用' : '')
+      + (blocked.length ? ' · ' + blocked.length + ' 条已被 guard 拒掉' : '');
+    el('ruleCount').textContent = '已启用 ' + usable.length + ' / 共 ' + cleanRules.length;
+    el('scopeList').innerHTML = cleanRules.map(function (r) {
+      return '<div class="scope-row' + (r.on && !r.blocked ? '' : ' is-off') + '">' +
+        '<b>' + esc(r.n) + '</b><span class="path" title="' + esc(r.g) + '">' + esc(r.g) + '</span>' +
+        '<span class="when">' + esc(r.k) + ' · ' + esc(r.a) + (r.blocked ? ' · guard 已拒' : (r.on ? '' : ' · 已停用')) + '</span></div>';
+    }).join('');
+    el('scopeOffNote').textContent = (off.length || blocked.length)
+      ? ('不参与本次扫描的 ' + (off.length + blocked.length) + ' 条：'
+        + off.map(function (r) { return r.n; }).join('、')
+        + (blocked.length ? (off.length ? '；' : '') + '被 guard 拒掉的（红线不可移除）：' + blocked.map(function (r) { return r.n; }).join('、') : ''))
+      : '';
   }
+  /* S13（真机批注「你这些东西放在这里干什么，占地方又没用」）：明细默认收起，卡头那一行摘要就是常态。
+     就地展开这一块，收起时整块从画面里拿掉 —— 与 client.js 的 scopeOpen 同规（页面内展开，零浮层）。
+     走 hidden 而不是删节点：原型是静态演示页；真机上 client.js 是直接从渲染树里拿掉的。 */
+  function setScopeOpen(v) {
+    el('scopeBody').hidden = !v;
+    var b = el('btnScopeToggle');
+    b.textContent = v ? '收起明细' : '展开明细';
+    b.setAttribute('aria-expanded', v ? 'true' : 'false');
+    b.title = v ? '收起明细，只留上面那一行摘要' : '展开明细：逐条列出被扫的目录';
+  }
+  el('btnScopeToggle').addEventListener('click', function () { setScopeOpen(el('scopeBody').hidden); });
+  setScopeOpen(false);
   function renderCleanRules() {
     el('cleanRules').innerHTML = cleanRules.map(function (r, i) {
       return '<div class="rule' + (r.blocked ? ' is-dim' : '') + '">' +
@@ -1407,39 +2352,54 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
   renderCleanRules();
   syncScope();
 
+  /* 能力表六行逐字对齐宿主 lib/caps.js 的 CAP_ROWS（一份真相）：宿主那边加一行能力，
+     这里跟着长一行；slots 不在能力位里（侧边栏入口由 webServer 那一行决定），所以不再单列。 */
   var caps = [
-    ['storageDomain（持久化）', '提供', 'down'],
-    ['timer（ctx.interval）', '提供', 'down'],
-    ['webserver（路由 + index-inject）', '提供', 'down'],
-    ['slots（侧边栏 / 主区）', '提供', 'down'],
-    ['系统通知（托盘）', '宿主不提供', ''],
+    ['宿主存储 storageDomain', '提供', 'down'],
+    ['宿主定时器 ctx.interval', '提供', 'down'],
+    ['宿主 Web 服务', '提供', 'down'],
+    ['宿主模型 ctx.llm（AI 清理建议）', '提供', 'down'],
+    ['系统通知', '宿主不提供', ''],
     ['开机自启常驻', '宿主不提供', '']
   ];
   el('capsKv').innerHTML = caps.map(function (c) {
     return '<div><div class="k">' + esc(c[0]) + '</div><div class="v"><span class="pill pill-' + (c[2] || 'gray') + '">' + esc(c[1]) + '</span></div></div>';
-  }).join('') + '<div style="grid-column:1/-1"><div class="k">降级表现</div><div class="v" style="color:var(--t2)">通知类告警一律落在插件内时间线（宿主不给系统通知就标这一行），绝不留一个看着能开却永远不响的开关。</div></div>';
+  }).join('') + '<div style="grid-column:1/-1"><div class="k">降级表现</div><div class="v" style="color:var(--t2)">通知类告警一律落在插件内时间线（宿主不给系统通知就标这一行），绝不留一个看着能开却永远不响的开关。宿主模型那一行只报事实、不给开关：缺了它，AI 智能清理按钮不亮，清理照旧走人工勾选的两段式确认，功能没有打折。</div></div>';
 
   /* ---------- 页签路由 ---------- */
+  /* 页签清单只写一处，而且**从按钮本身取**：S15-② 加「触发记录」时补了面板与按钮，
+     却漏了 hashchange 里手写的那份四页白名单（没有 alerts）—— 点页签被弹回监控页，
+     无头实测 #panel-alerts 矩形 0×0、截图拍出来是一张监控页。按钮就是真相，不再抄第二份。 */
+  var TABS = Array.prototype.map.call(el('tabs').children, function (b) { return b.dataset.tab; });
+  function goTab(hash) { var t = (hash || '#monitor').replace('#', ''); return TABS.indexOf(t) >= 0 ? t : 'monitor'; }
   var mainActions = {
     monitor: '<span class="hint-live" id="liveHint">自动刷新</span><span class="seg" id="cadSeg"><button class="is-active">1s</button><button>5s</button><button>暂停</button></span>',
-    clean: '<button class="btn btn-primary btn-sm" id="btnScanMain">开始扫描</button>',
+    alerts: '',
+    clean: '<button class="btn btn-sm" id="btnLogMain">清理留痕</button><button class="btn btn-primary btn-sm" id="btnScanMain">开始扫描</button>',
     search: '<span class="hint" id="probeHint">当前通路：未就绪 → 已降级为限定目录</span><button class="btn btn-sm" id="btnProbeJump">查看自检</button>',
     settings: '<button class="btn btn-primary btn-sm" id="btnSaveAll">保存设置</button>'
   };
   var subs = {
     monitor: '本机实时监控 · 两步式 C 盘清理 · 全盘文件搜索',
+    alerts: '阈值命中的只读时间线 · 规则在设置页配置，本机保留最近 200 条',
     clean: '扫描只读 → 勾选 → 清理选中，删除项不经过回收站',
     search: 'Everything 主源，探不到则降级为限定目录遍历',
     settings: '采集开关、清理规则、搜索通路与告警阈值'
   };
   function activate(tab) {
     Array.prototype.forEach.call(el('tabs').children, function (b) { b.classList.toggle('is-active', b.dataset.tab === tab); });
-    ['monitor', 'clean', 'search', 'settings'].forEach(function (k) {
+    TABS.forEach(function (k) {
       el('panel-' + k).hidden = k !== tab;
     });
     el('pageActions').innerHTML = mainActions[tab];
     document.querySelector('.page-sub').textContent = subs[tab];
-    if (tab === 'clean') el('btnScanMain').addEventListener('click', startScan);
+    if (tab === 'clean') {
+      el('btnScanMain').addEventListener('click', startScan);
+      el('btnLogMain').addEventListener('click', function () { setLogsOpen(!logsOpen); });
+      // 页头按钮是每切页签重建成 innerHTML 的，展开态要点回来 —— 否则切走再切回就丢了状态
+      setLogsOpen(logsOpen);
+      renderLogs();
+    }
     if (tab === 'monitor') {
       el('cadSeg').addEventListener('click', function (e) {
         var b = e.target.closest('button'); if (!b) return;
@@ -1471,13 +2431,12 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
     location.hash = '#' + g.dataset.goto;
   });
   window.addEventListener('hashchange', function () {
-    var t = (location.hash || '#monitor').replace('#', '');
-    activate(['monitor', 'clean', 'search', 'settings'].indexOf(t) >= 0 ? t : 'monitor');
+    activate(goTab(location.hash));
   });
   probe.installed = false; probe.http = false; probe.ping = false;
   renderProbe();
   renderResult('');
-  activate((location.hash || '#monitor').replace('#', '') || 'monitor');
+  activate(goTab(location.hash));
 })();
 </script>
 </body>

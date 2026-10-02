@@ -26,14 +26,17 @@ async function checkAsync(name, fn) {
 
 const SC = await import('../lib/clean/scanner.js');
 
-/** 假 FS：tree 是 { 绝对路径: {size?, children?: {名: {size, atimeMs, mtimeMs}}} }，扁平化更好写。 */
+/** 假 path：与 fakeFs 的 `/` 键同口径。**拼路径只走 `pathMod.join`** —— 宿主喂的 fsMod 是 node:fs。 */
+const fakePath = { join: (...a) => a.join('/').replace(/\/+/g, '/') };
+
+/** 假 FS：tree 是 { 绝对路径: {size?, children?: {名: {size, atimeMs, mtimeMs}}} }，扁平化更好写。
+ *  **不给 `join`**：宿主喂进来的是 `node:fs`，假 FS 比它多一个键就等于替宿主圆谎并让真机错误全绿 ——
+ *  2026-09-28 的 S9-①（真机「扫描失败：fsMod.join is not a function」）正是这么漏过去的。 */
 function fakeFs(entries, opts = {}) {
   // entries: [{ path, size, atimeMs, mtimeMs, dir? }]
   const map = new Map(entries.map((e) => [e.path.replace(/[\\/]+$/, ''), e]));
-  const join = (...a) => a.join('/').replace(/\/+/g, '/');
   const denied = new Set(opts.denied ?? []);
   return {
-    join,
     readdirSync(dir, { withFileTypes } = {}) {
       const key = dir.replace(/[\\/]+$/, '');
       if (denied.has(key)) throw Object.assign(new Error('拒绝访问'), { code: 'EPERM' });
@@ -89,6 +92,7 @@ function world(entries, opts = {}) {
   const log = [];
   const sc = SC.createScanner({
     fsMod: fakeFs(entries, opts),
+    pathMod: fakePath,
     now: opts.now ?? (() => NOW),
     logger: { warn: (m) => log.push(m) },
     onProgress: (p) => progress.push(p),
@@ -322,7 +326,11 @@ await checkAsync('cln-8 onProgress 按时间片节流（1s 推 60 帧会把 SSE 
   // 不节流 = 3000 帧（红），只推一次 = 1 帧（红）。
   await w.sc.scan([rule()], { every: () => { t += 1; } });
   assert.ok(w.progress.length >= 2 && w.progress.length < 60, `进度帧数=${w.progress.length}，应远小于条目数且不止一帧`);
-  assert.deepEqual(Object.keys(w.progress[0]).sort(), ['bytes', 'dir', 'hit', 'walked']);
+  // S12-A 进度分母：帧里多 ruleIdx/rulesLen（扫到第几类 / 共几类）。客户端的进度条以前拿
+  // 命中数除规则数，真机 516 项清单头几秒就 96% —— 那是假进度，分子分母必须同域。
+  assert.deepEqual(Object.keys(w.progress[0]).sort(), ['bytes', 'dir', 'hit', 'ruleIdx', 'rulesLen', 'walked']);
+  assert.equal(w.progress[0].rulesLen, 1, 'rulesLen 是本次要扫的规则类数（分母）');
+  assert.equal(w.progress[0].ruleIdx, 1, 'ruleIdx 从 1 起（第一类目录）');
 });
 
 await checkAsync('cln-9 maxEntries 触顶时 truncated=true 并写日志（把上限当成完整结果是不诚实）', async () => {
@@ -382,13 +390,15 @@ await checkAsync('cln-10 riskOf：浏览器/IM 缓存标 mid 并说明会被锁�
   assert.ok(SC.riskOf({ id: 'edge-cache', kind: '缓存' }).why.length > 0);
 });
 
-await checkAsync('cln-真机-1 真遍历 %TEMP%：Task 11 的规则原样送进扫描器，walked>0', async () => {
+await checkAsync('cln-真机-1 真遍历 %TEMP%：Task 11 的规则原样送进扫描器，walked>0（装配口径与 index.js:347/349 同形）', async () => {
   const fs = await import('node:fs');
   const path = await import('node:path');
   const { BUILTIN_RULES } = await import('../lib/clean/rules.js');
+  // 口径钉死：宿主交的就是 `fsMod: node:fs`（上面**没有** join）+ `pathMod: node:path`，这里逐字同形。
+  // S9-① 的教训：旧版这条桩写的是 `{ readdirSync, statSync, join: path.join }` —— 比宿多多带一个 join，
+  // 于是「scanner 里写 fsMod.join」在真机炸、在这条「真机例」里全绿，等于替宿主圆谎。
   const sc = SC.createScanner({
-    fsMod: { readdirSync: fs.readdirSync, statSync: fs.statSync, join: path.join },
-    now: () => Date.now(), logger: { warn() {} }, onProgress() {},
+    fsMod: fs, pathMod: path, now: () => Date.now(), logger: { warn() {} }, onProgress() {},
   });
   const temp = BUILTIN_RULES.find((r) => r.id === 'temp-user');
   assert.ok(temp, '内置库里没有 temp-user —— 这条真机例钉的就是 Task 11 → Task 12 的交接面');
@@ -399,14 +409,129 @@ await checkAsync('cln-真机-1 真遍历 %TEMP%：Task 11 的规则原样送进�
   assert.equal(r.skipped.some((s) => /GUARD/.test(s.code)), false, 'Task 11 过了红线的规则，不该被扫描器的第二道闸拦住（两道闸的口径必须一致）');
 });
 
+await checkAsync('cln-12 源码锁：lib/ 与 index.js 里不许再有 fsMod.join( 调用（宿主喂的 fsMod 是 node:fs，join 只能在 pathMod 上）', async () => {
+  const fs = await import('node:fs');
+  const root = new URL('../', import.meta.url);
+  const files = [];
+  const walk = (dirUrl) => {
+    for (const ent of fs.readdirSync(dirUrl, { withFileTypes: true })) {
+      if (ent.isDirectory()) walk(new URL(`${ent.name}/`, dirUrl));
+      else if (ent.name.endsWith('.js')) files.push(new URL(ent.name, dirUrl));
+    }
+  };
+  walk(new URL('lib/', root));
+  files.push(new URL('index.js', root));
+  // 只咬**调用形状** `fsMod.join(` —— 契约注释里出现的裸 `fsMod.join` 是说明文字，不该被这条锁误伤。
+  const bad = files.filter((u) => /fsMod\s*\.\s*join\s*\(/.test(fs.readFileSync(u, 'utf8')));
+  assert.deepEqual(bad.map((u) => u.pathname.split('/').pop()), [], '这些文件里还有 fsMod.join( 调用');
+  // 立论复核：真 fs 上确实没有 join —— 这条锁不是洁癖，是 S9-① 的复现条件（`node tmp/probe-cleanjoin.mjs`）。
+  assert.equal(typeof fs.join, 'undefined', 'node:fs 上不该有 join；真有了的话这条锁的立论就得重写');
+});
+
+await checkAsync('cln-14 源码锁：全仓只许 lib/disk.js 折 statfs 字节，别处不许再读 statfsSync 结果的 .available/.total（S12-A）', async () => {
+  const fs = await import('node:fs');
+  const root = new URL('../', import.meta.url);
+  const files = [];
+  const walk = (dirUrl) => {
+    for (const ent of fs.readdirSync(dirUrl, { withFileTypes: true })) {
+      if (ent.isDirectory()) walk(new URL(`${ent.name}/`, dirUrl));
+      else if (ent.name.endsWith('.js')) files.push(new URL(ent.name, dirUrl));
+    }
+  };
+  walk(new URL('lib/', root));
+  files.push(new URL('index.js', root));
+  const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
+  const bad = [];
+  const readers = [];
+  for (const u of files) {
+    const code = strip(fs.readFileSync(u, 'utf8'));
+    // 读 statfs 返回的 available/total 这两个**不存在的键**：就是 S12-A 那条真机 0 值的病灶形状
+    if (/statfsSync\([^)]*\)\s*\??\.(available|total)/.test(code)) bad.push(u.pathname.split('/').pop());
+    if (/statfsSync\s*\(/.test(code)) readers.push(u.pathname.split('/').pop());
+  }
+  assert.deepEqual(bad, [], '这些地方还在把 statfsSync 的返回值当 {available}/{total} 读（真机上恒 undefined）');
+  // 折字节只有一个口径：`statfsBytes` 的定义在 lib/disk.js，别处再乘一次 bsize 就是第二套真相
+  for (const u of files) {
+    const name = u.pathname.split('/').pop();
+    if (name === 'disk.js') continue;
+    const code = strip(fs.readFileSync(u, 'utf8'));
+    assert.ok(!/\.bavail\s*\*/.test(code) && !/\*\s*.*\.bsize/.test(code), `${name} 里又自己乘了一遍 bsize —— 换算只在 lib/disk.js`);
+  }
+  // 立论复核：真 fs 的 statfs 返回里确实没有 available / total（tmp/probe-s12-disk.mjs → tmp/s12-disk.txt 现采）
+  const real = fs.statfsSync('C:\\');
+  assert.equal(real.available, undefined, 'node:fs 的 statfs 返回不该有 available；真有了的话这条锁的立论就得重写');
+  assert.equal(real.total, undefined, '同上，total 也不存在');
+  for (const k of ['bsize', 'blocks', 'bavail']) assert.ok(Number.isFinite(real[k]), `真 statfs 返回缺 ${k}，换算口径要看真实字段`);
+  assert.ok(readers.length >= 2, '至少 collect(L0) 与 clean(service/executor) 在读盘容量，这条锁才有对象');
+});
+
+/**
+ * cln-13（S11-①）：遍历必须周期性**让出事件循环**。
+ *
+ * 修前真机读数（tmp/s11-live.txt，直连宿主 3080 的 SSE）：`POST /clean/scan` 之后
+ * 从 +358ms 到 +24400ms **一帧都没发出**、连 `GET /clean/state` 都卡住不回，
+ * 扫描结束时 100 多帧 `clean:progress` 在同一个毫秒全部涌出。
+ * 根因不在 service（S10 已把 phase 装进帧里），而在 scanner：`async scan()` 里**一个 await 都没有**，
+ * 全同步 `readdirSync`/`statSync` 把宿主单线程堵死，帧只是在内存里排队，socket 写不出去。
+ *
+ * 断言口径用「金丝雀 macrotask」：扫描进行中排一个 `setImmediate`，它必须在扫描落定**之前**跑掉。
+ * 同步遍历下 `scan()` 会在第一次 await 前一口气跑完，金丝雀只能等到结果之后 —— 拦得住这一类回归。
+ */
+await checkAsync('cln-13 遍历按条目数让出事件循环（同步遍历堵死 SSE，进度帧积压到扫描结束才涌出 —— S11-①）', async () => {
+  const T = 'C:/Users/gongj/AppData/Local/Temp';
+  const big = [{ path: T, dir: true }];
+  for (let i = 0; i < 600; i += 1) big.push({ path: `${T}/f${i}.log`, size: 10, atimeMs: ago(10), mtimeMs: ago(10) });
+
+  // ① 生产口径（不注入 tick，走默认 yieldEvery）：真能让出去
+  const w = world(big);
+  let canary = false;
+  const p = w.sc.scan([rule()]); // 故意不 await：让出过的证据就是「控制权交出去过」
+  setImmediate(() => { canary = true; });
+  const res = await p;
+  assert.equal(res.items.length, 600, '让出不改变结果');
+  assert.equal(canary, true, '扫描期间排队的 macrotask 必须在扫描落定前跑掉，否则进度帧发不出去');
+  assert.ok(SC.DEFAULT_YIELD_EVERY >= 50 && SC.DEFAULT_YIELD_EVERY <= 2000,
+    `默认让出间隔该在「不吃 IO 效率」与「不吃 socket」之间，现值 ${SC.DEFAULT_YIELD_EVERY}`);
+
+  // ② 注入的 tick 与 yieldEvery 真的被用：600 条目 / 每 100 条让出 ⇒ 至少 6 次
+  let yields = 0;
+  const w2 = world(big, { scanner: { yieldEvery: 100, tick: () => new Promise((r) => { yields += 1; setImmediate(r); }) } });
+  await w2.sc.scan([rule()]);
+  assert.ok(yields >= 6, `600 条目 / yieldEvery=100 至少让出 6 次，实际 ${yields}`);
+
+  // ③ 让出在收手/触顶之后不再发生（done() 分支先 break，不能白等一个 tick）
+  const w3 = world(big, { scanner: { maxEntries: 50, yieldEvery: 10, tick: () => new Promise((r) => { yields += 1; setImmediate(r); }) } });
+  const before = yields;
+  const r3 = await w3.sc.scan([rule()]);
+  assert.equal(r3.truncated, true);
+  assert.ok(yields - before <= 5, `触顶后应当立刻收手，不该继续让出（多跑了 ${yields - before} 次）`);
+});
+
 /* ②段：清单快照与执行留痕 */
 const { recordsDomain, PLAN_KEEP, LOG_KEEP } = await import('../lib/records/spec.js');
 const { createPlanStore } = await import('../lib/clean/plan-store.js');
 const { createLogStore, RECORDS_ERROR } = await import('../lib/clean/log-store.js');
-const { createMemoryFacility } = await import('./_helpers.mjs');
+const { createMemoryFacility, statfsFixture } = await import('./_helpers.mjs');
 
 // ①段只有 checkAsync；简报的 rec-1/rec-2 是同步断言，这里做一层薄包装复用同一套计数与失败打印。
-const check = (name, fn) => checkAsync(name, async () => fn());
+// **必须同步跑完并当场计数**：上一版写成 `checkAsync(name, async () => fn())` 却没人 await，
+// 于是 `passed += 1` 落在微任务里、文件末尾的 process.exit 先把它掐了 —— 用例照跑、结果照丢，
+// 失败也打印不出来，读数却仍然显示全绿。同步断言就该同步记账。
+const check = (name, fn) => {
+  if (skip && /真机/.test(name)) {
+    console.log(`  SKIP  ${name}`);
+    return;
+  }
+  try {
+    fn();
+    passed += 1;
+    console.log(`  PASS  ${name}`);
+  } catch (error) {
+    failed += 1;
+    console.log(`  FAIL  ${name}`);
+    console.log(`        ${error.message.split('\n')[0]}`);
+  }
+};
 
 // cln-11 断的是 ①段 scanner.js 的纯函数，但同步断言得借 ②段才定义的 check 包装，
 // 故落在这里（用例名自带 cln- 前缀，读起来仍归 ①段）。
@@ -800,7 +925,8 @@ const PLAN_ITEM = (over = {}) => ({
   atime: 1, mtime: 1, riskLevel: 'mid', ...over,
 });
 
-/** 假 FS：条目按快照里的 items 建，偏差/新增/占用都通过 over 注入。 */
+/** 假 FS：条目按快照里的 items 建，偏差/新增/占用都通过 over 注入。
+ *  同 fakeFs：**不给 `join`**（宿主喂的是 node:fs），拼路径走注入的 pathMod。 */
 function exFs(items, over = {}) {
   const files = new Map();
   const dirs = new Set();
@@ -823,8 +949,7 @@ function exFs(items, over = {}) {
     rmSync: (p) => { if (over.rmErrno) boom(over.rmErrno); files.delete(p); dirs.delete(p); },
     readdirSync: () => over.dirChildren ?? [],
     realpathSync: (p) => p,
-    join: (a, b) => `${a}\\${b}`,
-    statfsSync: () => ({ available: over.afterFree ?? 71 * 2 ** 30 }),
+    statfsSync: () => statfsFixture({ free: over.afterFree ?? 71 * 2 ** 30 }),
   };
 }
 
@@ -842,7 +967,7 @@ function exWorld(items, over = {}) {
     stats: async () => ({ dirs: 0, files: 0, bytes: 0, oldest: null }),
   };
   const exec = EX.createExecutor({
-    fsMod, planStore, logStore, quarantine,
+    fsMod, pathMod: { join: (a, b) => `${a}\\${b}` }, planStore, logStore, quarantine,
     logger: { warn: (m) => events.push({ type: 'log', m }) },
     now: () => 9000,
     onEvent: (e) => events.push(e),
@@ -908,6 +1033,9 @@ await checkAsync('ex-6 re-stat：快照之后有新增/修改的条目 → rejec
   const sum = await w.exec.apply({ planId: 'p-1', itemIds: ['temp-user-aG9tZQ'], mode: 'delete-dir' });
   assert.equal(sum.results[0].state, 'rejected-snapshot');
   assert.match(sum.results[0].errnoText, /新增|修改/);
+  // 指名道姓断到「是哪个子项脏」：外层的 fail-closed 分支（子项列不出来）也会给出同一种判词，
+  // 只断「新增/修改」的话，join 一炸（M2 那类）会从这个口子混过去 —— 两条分支必须分得开。
+  assert.match(sum.results[0].errnoText, /new\.bin/, '要说出是哪个子项，不能落到「(子项列不出来)」那条 fail-closed 分支');
 });
 
 await checkAsync('ex-7 目录已消失 → rejected-snapshot（不是 failed，用户没做错事）', async () => {
@@ -979,6 +1107,37 @@ await checkAsync('ex-12b 同一个配错的暂存目录，delete-file 模式不�
   assert.equal(sum.ok, 1);
 });
 
+/**
+ * ex-13（S11-②）：逐条删除之间必须让出事件循环，删除过程才谈得上「逐条进度 / 动画」。
+ *
+ * 与 cln-13 同一个根因，另一个现场：`rmSync(recursive)` / `unlinkSync` 都是同步的，
+ * 条目循环里一个 await 都没有 ⇒ `clean:item` 帧全积压到整批删完才涌出，
+ * 界面表现为「点了一键清理，页面僵住，然后一次性出结果」。
+ * 断言不能只看「apply 落定后金丝雀为 true」（`logStore.start` 已经让出过一次，会撞对），
+ * 所以把金丝雀读到与否记在**第一条 unlink 的那一刻**。
+ */
+await checkAsync('ex-13 每条动手之前让出事件循环（同步删除堵死 SSE，clean:item 帧积压到整批删完 —— S11-②）', async () => {
+  const items = [
+    PLAN_ITEM(),
+    PLAN_ITEM({ id: 'i2', path: 'C:\\Users\\gongj\\AppData\\Local\\Temp\\old2.log' }),
+    PLAN_ITEM({ id: 'i3', path: 'C:\\Users\\gongj\\AppData\\Local\\Temp\\old3.log' }),
+  ];
+  let canary = false;
+  let canaryAtFirstUnlink = null;
+  const base = exFs(items);
+  const fsMod = {
+    ...base,
+    unlinkSync: (p) => { if (canaryAtFirstUnlink === null) canaryAtFirstUnlink = canary; base.unlinkSync(p); },
+  };
+  const w = await seeded(items, { fsMod });
+  const p = w.exec.apply({ planId: 'p-1', itemIds: ['temp-user-aG9tZQ', 'i2', 'i3'], mode: 'delete-file' });
+  setImmediate(() => { canary = true; });
+  const sum = await p;
+  assert.equal(sum.ok, 3, '让出不改变结果');
+  assert.equal(canaryAtFirstUnlink, true,
+    '第一条删除动手之前控制权就交出去过 —— 否则 clean:item 帧要等整批删完才涌出，界面看不到逐条进度');
+});
+
 /* ⑤段：清理服务（一次只允许一个扫描；进度与完成事件汇给 api.js） */
 const CS = await import('../lib/clean/service.js');
 const { createPrefStore } = await import('../lib/prefs/store.js');
@@ -995,19 +1154,25 @@ function csWorld(over = {}) {
   const planStore = createPlanStore({ getFacility: () => facility, logger: { warn() {} }, now: () => 5000, newId: () => over.planId ?? 'p-1' });
   const logStore = createLogStore({ getFacility: () => facility, logger: { warn() {} }, now: () => 8000 });
   const scannerCalls = [];
+  const scannerArgs = [];       // S9-①：工厂实参的可观测点 —— pathMod 有没被 service 转交
+  const executorArgs = [];
   let scanResolve = null;
   const svc = CS.createCleanService({
     ruleStore,
-    makeScanner: ({ onProgress }) => ({
-      scan: async (rules) => {
-        scannerCalls.push({ n: rules.length });
-        over.progress?.forEach(() => onProgress({ dir: 'x', walked: 1, hit: 0, bytes: 0 }));
-        await new Promise((r) => { scanResolve = r; setTimeout(r, 0); });
-        if (over.scanThrows) throw new Error('遍历炸了');
-        return over.scanResult ?? { items: [PLAN_ITEM()], totals: { n: 1, bytes: 1000 }, walked: 10, hit: 1, skipped: [], stopped: false, truncated: false, at: 5000 };
-      },
-      stop: () => { stoppedCalls.push(1); if (scanResolve) scanResolve(); },
-    }),
+    makeScanner: (a) => {
+      scannerArgs.push(a);
+      const { onProgress } = a;
+      return {
+        scan: async (rules) => {
+          scannerCalls.push({ n: rules.length });
+          over.progress?.forEach(() => onProgress({ dir: 'x', walked: 1, hit: 0, bytes: 0 }));
+          await new Promise((r) => { scanResolve = r; setTimeout(r, 0); });
+          if (over.scanThrows) throw new Error('遍历炸了');
+          return over.scanResult ?? { items: [PLAN_ITEM()], totals: { n: 1, bytes: 1000 }, walked: 10, hit: 1, skipped: [], stopped: false, truncated: false, at: 5000 };
+        },
+        stop: () => { stoppedCalls.push(1); if (scanResolve) scanResolve(); },
+      };
+    },
     // T15-A：service 必须自己造 quarantine 并把 rootDir / forbiddenPrefixes 喂进去。
     // 桩只记实参、返回一个够用的假对象，断言全部打在 quarArgs 上。
     makeQuarantine: (a) => {
@@ -1018,23 +1183,27 @@ function csWorld(over = {}) {
         stats: async () => ({ dirs: 2, files: 3, bytes: 38, oldest: '2026-09-26' }),
       };
     },
-    makeExecutor: ({ onEvent }) => ({
-      apply: async (args) => {
-        execArgs.push(args);
-        onEvent({ type: 'clean:item', id: args.itemIds[0], state: 'ok', errnoText: '', path: 'x' });
-        return over.summary ?? { planId: args.planId, logId: 'l-1', ok: 1, skipped: 0, failed: 0, rejected: 0, bytesFreed: 1000, beforeFree: 1, afterFree: 2, results: [] };
-      },
-    }),
+    makeExecutor: (a) => {
+      executorArgs.push(a);
+      const { onEvent } = a;
+      return {
+        apply: async (args) => {
+          execArgs.push(args);
+          onEvent({ type: 'clean:item', id: args.itemIds[0], state: 'ok', errnoText: '', path: 'x' });
+          return over.summary ?? { planId: args.planId, logId: 'l-1', ok: 1, skipped: 0, failed: 0, rejected: 0, bytesFreed: 1000, beforeFree: 1, afterFree: 2, results: [] };
+        },
+      };
+    },
     planStore, logStore,
     getPrefs: () => ({ clean: { after: over.after ?? 'log', keepDays: 7, ...(over.quarantineDir ? { quarantineDir: over.quarantineDir } : {}) } }),
-    fsMod: { statfsSync: () => ({ available: 60 * 2 ** 30 }) },
+    fsMod: over.fsMod ?? { statfsSync: () => statfsFixture({ free: 60 * 2 ** 30 }) },
     osMod: { homedir: () => 'C:\\Users\\gongj' },
-    pathMod: { join: (...a) => a.join('\\') },
+    pathMod: over.pathMod ?? { join: (...a) => a.join('\\') },
     logger: { warn: (m) => events.push({ type: 'log', m }) },
     now: () => 5000,
   });
   svc.onEvent((e) => events.push(e));
-  return { svc, events, execArgs, scannerCalls, stoppedCalls, quarArgs, facility, planStore, logStore, ruleStore };
+  return { svc, events, execArgs, scannerCalls, scannerArgs, executorArgs, stoppedCalls, quarArgs, facility, planStore, logStore, ruleStore };
 }
 
 await checkAsync('cs-1 startScan → 事件流有 progress 与 done，state 落 ready 且带 planId', async () => {
@@ -1134,6 +1303,320 @@ await checkAsync('cs-10 plan(planId) 薄转发：把 id 原样交给 planStore.g
   assert.equal(got.planId, 'p-1');
   assert.ok(Array.isArray(got.items) && got.items.length === 1, '实体就是 planStore 落库那一行，不加工');
   assert.equal(await w.svc.plan('nope'), null, '查无交 null，由路由层翻 404');
+});
+
+await checkAsync('cs-11 转交链：fsMod 与 pathMod 一并进 scanner/executor（宿主交的是 node:fs，缺 pathMod 时一拼路径就炸 —— S9-①）', async () => {
+  const realFs = await import('node:fs');
+  const realPath = await import('node:path');
+  const w = csWorld({ fsMod: realFs, pathMod: realPath });
+  await w.svc.startScan();
+  await w.svc.apply({ planId: 'p-1', itemIds: ['temp-user-aG9tZQ'], mode: 'delete-file' });
+  // 前提复核：宿主交的 fsMod 就是 node:fs —— 它上面没有 join，这正是 S9-① 的立论。
+  assert.equal(typeof realFs.join, 'undefined');
+  assert.equal(w.scannerArgs.length, 1);
+  assert.equal(w.scannerArgs[0].fsMod, realFs, 'fsMod 原样转交');
+  assert.equal(w.scannerArgs[0].pathMod, realPath, 'pathMod 必须一并转交：scanner 的拼路径只走 pathMod.join');
+  assert.equal(w.executorArgs.length, 1);
+  assert.equal(w.executorArgs[0].fsMod, realFs);
+  assert.equal(w.executorArgs[0].pathMod, realPath, 'executor 的目录条目复核（快照后新增子项）同样只走 pathMod.join');
+  assert.equal(typeof w.scannerArgs[0].pathMod.join, 'function', 'node:path 上才有 join');
+});
+
+/**
+ * cs-12（S10-①）：扫描帧必须带相位，且开扫就先发一帧。
+ *
+ * 修前读数（tmp/s10-before.txt，真装配 + 真 SSE 流）：三族 clean:* 帧的键分别是
+ *   clean:progress [type,dir,walked,hit,bytes] · clean:done [type,plan] · clean:error [type,where,error]
+ * —— 没有一帧带 phase。客户端 mergeFrame 是「把 clean:* 帧浅并进上一份快照的 clean」，
+ * 于是扫描期间 clean.phase 一直停在 'idle'：清单卡不出现、页头按钮不翻转，
+ * 用户看到的就是「点了没反应，半天才出来结果」（POST /clean/scan 全程十几秒不返回）。
+ * 修法：三族帧带 phase/stopped（progress 另带 startedAt），且 runScan 在等第一条规则之前先发一帧。
+ */
+await checkAsync('cs-12 扫描帧带 phase/startedAt：开扫即发首帧（walked=0），progress/done/error 三族都不缺相位', async () => {
+  const w = csWorld({ progress: [null] }); // 桩扫描器回调一次 onProgress(walked=1)
+  await w.svc.startScan();
+  const prog = w.events.filter((e) => e.type === 'clean:progress');
+  assert.equal(prog.length, 2, '开扫首帧 + 一次 onProgress 帧，实际 ' + JSON.stringify(prog));
+  assert.equal(prog[0].walked, 0, '首帧必须在任何扫描回调之前发出（walked=0）——否则「点下去」到第一帧仍有可见空窗');
+  for (const e of prog) {
+    assert.equal(e.phase, 'scanning', 'progress 帧必须带 phase（客户端就靠它翻成扫描卡）：' + JSON.stringify(e));
+    assert.equal(e.stopped, false);
+    assert.equal(e.startedAt, 5000, 'startedAt 取自 service 的 now()，客户端据此读「已用时 N 秒」');
+  }
+  const done = w.events.find((e) => e.type === 'clean:done');
+  assert.equal(done.phase, 'ready', 'done 帧带终态相位（客户端把 ready 认作「扫描完成」）');
+  assert.equal(done.stopped, false);
+  assert.ok(done.plan && Array.isArray(done.plan.items), 'done 帧照旧带冻结清单（这条没动）');
+
+  const we = csWorld({ scanThrows: true });
+  await we.svc.startScan();
+  const err = we.events.find((e) => e.type === 'clean:error');
+  assert.equal(err.phase, 'idle', 'error 帧带相位（客户端据此收掉扫描卡并渲染失败原因）');
+});
+
+/**
+ * cs-13（S12-A）：扫描那一刻的系统盘可用容量必须是真的字节数。
+ *
+ * 修前真机恒 0：`readFree()` 读的是 `statfsSync('C:')?.available`，而这个键在 node:fs 上不存在
+ * （现采 tmp/s12-disk.txt：只有 type/bsize/blocks/bfree/bavail/files/ffree）。
+ * 于是每条留痕的「系统盘可用容量 — → —」和「释放 0 B」全是假的 —— 界面没错，数据源就没给数。
+ * 桩这次用 `statfsFixture`（真机键集合），不再用 `{available}` 那种"比宿主能多"的形状。
+ */
+await checkAsync('cs-13 beforeFree 是 bavail×bsize 的真字节数；statfs 读不到才落 0 并留 warn（S12-A 前后对比的数据源）', async () => {
+  const w = csWorld({ fsMod: { statfsSync: () => statfsFixture({ total: 120 * 2 ** 30, free: 71 * 2 ** 30 }) } });
+  await w.svc.startScan();
+  const saved = await w.planStore.get('p-1');
+  assert.equal(saved.beforeFree, 71 * 2 ** 30, '扫描那一刻的可用容量要进快照（留痕与概览条都吃它）');
+
+  const bad = csWorld({ fsMod: { statfsSync: () => { throw Object.assign(new Error('no such drive'), { code: 'ENOENT' }); } } });
+  await bad.svc.startScan();
+  const row = await bad.planStore.get('p-1');
+  assert.equal(row.beforeFree, 0, '读不到交 0 进快照（既有口径，不冒充容量）');
+  assert.ok(bad.events.some((e) => e.type === 'log' && /可用容量读取失败/.test(e.m)), '读失败必须留一行 warn，不静默');
+});
+
+/* S12-A：lib/disk.js 的换算口径（L0 与清理侧共用的一份真相） */
+const { statfsBytes } = await import('../lib/disk.js');
+
+await checkAsync('dk-1 statfsBytes 按 bsize×blocks / bsize×bavail 折字节，字段缺或非法交 null（不凑 0）', () => {
+  assert.deepEqual(statfsBytes(statfsFixture({ total: 120 * 2 ** 30, free: 60 * 2 ** 30 })),
+    { total: 120 * 2 ** 30, free: 60 * 2 ** 30 });
+  // 真机上会出现的形状：files/ffree 全 0（NTFS 经 Node 只报扇区数）—— 0 是合法读数，不是缺字段
+  assert.deepEqual(statfsBytes({ type: 0, bsize: 4096, blocks: 0, bfree: 0, bavail: 0, files: 0, ffree: 0 }),
+    { total: 0, free: 0 });
+  for (const junk of [null, undefined, {}, { available: 60 * 2 ** 30 }, { bsize: 0, blocks: 1, bavail: 1 }, { bsize: 'x', blocks: 1, bavail: 1 }]) {
+    assert.deepEqual(statfsBytes(junk), { total: null, free: null }, `${JSON.stringify(junk)} 必须交 null，凑 0 会被读成「盘满了」`);
+  }
+  assert.deepEqual(statfsBytes({ bsize: 4096, blocks: 10 }), { total: 40960, free: null }, '只缺 bavail 时 total 照给');
+  // 桩不许比宿主能多：真机 statfs 的返回里**没有** available/total 这两个键（tmp/s12-disk.txt 现采）。
+  // 假桩一旦带上它们，「改回去读 .available」这种病灶回归就测不出来（S9 同型事故）。
+  const realShape = { type: 0, bsize: 4096, blocks: 31457280, bfree: 15728640, bavail: 14680064, files: 0, ffree: 0 };
+  assert.ok(!('available' in realShape) && !('total' in realShape), '真机形状桩不许带宿主没有的键');
+  assert.deepEqual(statfsBytes(realShape), { total: 31457280 * 4096, free: 14680064 * 4096 },
+    '可用只认 bavail×bsize：换成宿主根本没有的 .available 就是真机上的 0 值老病灶');
+});
+
+/* ------------------------------------------------------------------ *
+ * ⑥段：AI 清理建议（S12-C）—— 宿主 ctx.llm 用假桩，零真模型调用
+ * ------------------------------------------------------------------ */
+
+const { createAiAdvisor, AI_MAX_GROUPS } = await import('../lib/clean/ai-advisor.js');
+
+/** 假 llm：形状照宿主契约（listProviders / listModels / stream），seen 收下每次 stream 的入参。
+ *  **桩不许比宿主能多**：不实现 maxTokens 处理、不实现 tools —— 传进来什么样就什么样。 */
+function fakeLlm(chunks, over = {}) {
+  const calls = [];
+  return {
+    calls,
+    listProviders: () => (over.providers ?? [{ id: 'fake-official', name: 'Fake 官方' }]),
+    listModels: async (p) => (over.noModelList ? [] : [{ provider: p, id: 'm-1', name: 'M 一号' }]),
+    stream: (options) => {
+      calls.push(options);   // 每次下发的参数都留证：maxTokens / model 这类口径要能被验尸
+      return over.stream
+        ? over.stream(options)
+        : (async function* gen() { for (const c of chunks ?? []) yield c; })();
+    },
+  };
+}
+
+/** 正文分片：模型按契约只走 text-delta。 */
+const textJson = (obj) => [{ type: 'text-delta', text: JSON.stringify(obj) }, { type: 'finish', reason: { kind: 'stop' } }];
+
+/** 假快照仓储：只认 get(id)，交什么行就是什么行。 */
+const aiPlans = (rows) => ({ get: async (id) => rows[String(id)] ?? null });
+
+/** 造一份冻结清单行：items 里每条都带完整路径（模型侧必须看不到它）。 */
+function aiPlan(items, over = {}) {
+  return { planId: 'p-ai', at: 2000000000000, beforeFree: 70.4e9, modeDefault: 'delete-file', items, totals: { n: items.length, bytes: items.reduce((a, i) => a + i.size, 0) }, ...over };
+}
+const aiItem = (over = {}) => ({
+  id: 'i-1', ruleId: 'r-edge', ruleName: 'Edge 缓存', kind: 'dir',
+  path: 'C:\\Users\\gongj\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Cache',
+  size: 1048576, count: 12, atime: 2000000000000 - 40 * 86400000, mtime: 2000000000000 - 50 * 86400000,
+  riskLevel: 'low', riskWhy: '只影响事后分析或需重新下载', ...over,
+});
+
+await checkAsync('ai-1 describe：没有 llm 句柄就说不可用并给出下一步，有句柄报出发现到的 provider/model', async () => {
+  const none = createAiAdvisor({ getLlm: () => undefined, planStore: aiPlans({}) });
+  const d0 = await none.describe();
+  assert.equal(d0.available, false);
+  assert.match(d0.reason, /ctx\.llm/, '不可用的原因要指名道姓，界面直接显示这句话');
+  assert.match(d0.reason, /两段式/, '要说清"没有它清理照样能用"，否则用户以为清理坏了');
+
+  const llm = fakeLlm([]);
+  const svc = createAiAdvisor({ getLlm: () => llm, planStore: aiPlans({}) });
+  const d1 = await svc.describe();
+  assert.equal(d1.available, true);
+  assert.equal(d1.provider, 'fake-official');
+  assert.equal(d1.model, 'm-1', '模型走运行时发现，不是写死的型号');
+});
+
+await checkAsync('ai-2 suggest 入参只有 planId：缺 id / 快照不存在都按既有 code 抛，不碰模型', async () => {
+  const llm = fakeLlm([]);
+  const svc = createAiAdvisor({ getLlm: () => llm, planStore: aiPlans({}) });
+  await assert.rejects(svc.suggest(''), (e) => e.code === 'INVALID_PARAM');
+  await assert.rejects(svc.suggest('p-none'), (e) => e.code === 'SYSOPS_RECORDS_NOT_FOUND');
+  assert.equal(llm.calls.length, 0, '快照都没拿到，不该花钱去问模型');
+});
+
+await checkAsync('ai-3 交回的 ids 只从那份冻结快照反查；prompt 里不含完整路径与盘符（隐私口径）', async () => {
+  const rows = {
+    'p-ai': aiPlan([
+      aiItem({ id: 'i-a', path: 'C:\\Users\\gongj\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Cache' }),
+      aiItem({ id: 'i-b', path: 'C:\\Users\\gongj\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Code Cache\\js' }),
+      aiItem({ id: 'i-c', ruleId: 'r-pip', ruleName: 'pip 缓存', path: 'C:\\Users\\gongj\\AppData\\Local\\pip\\Cache\\http-v2' }),
+    ]),
+  };
+  const llm = fakeLlm(textJson({ recommendations: [{ group: 0, action: 'clean', reason: '整类都是缓存，最老的已 40 天未访问' }] }));
+  const svc = createAiAdvisor({ getLlm: () => llm, planStore: aiPlans(rows) });
+  const out = await svc.suggest('p-ai');
+  assert.equal(out.recommendations.length, 1);
+  assert.deepEqual(out.recommendations[0].ids, ['i-a', 'i-b'], '行号 0 = 体积最大的那一类（两个 Edge 条目），ids 来自快照');
+  assert.equal(out.recommendations[0].ruleId, 'r-edge');
+  assert.equal(out.recommendations[0].count, 2);
+
+  const sent = llm.calls[0].messages[0].content[0].text;
+  assert.ok(!sent.includes('\\'), `prompt 里出现了反斜杠路径：${sent}`);
+  assert.ok(!/[A-Za-z]:[\\/]/.test(sent), 'prompt 里不许出现盘符开头的路径');
+  assert.ok(!/gongj/.test(sent), 'prompt 里不许出现本机用户名');
+  assert.ok(sent.includes('Cache'), '样例文件名要给模型，否则它只能凭类别名猜');
+});
+
+await checkAsync('ai-4 越界判定按条丢弃并如实计数：行号越界 / 动作不认识 / 同一行重复', async () => {
+  const rows = { 'p-ai': aiPlan([aiItem({ id: 'i-a' }), aiItem({ id: 'i-c', ruleId: 'r-pip', ruleName: 'pip 缓存' })]) };
+  const llm = fakeLlm(textJson({ recommendations: [
+    { group: 0, action: 'clean', reason: '可清' },
+    { group: 99, action: 'clean', reason: '越界行号' },
+    { group: 1, action: 'delete-now', reason: '动作不在封闭集合里' },
+    { group: 0, action: 'keep', reason: '同一行第二次' },
+    { group: 1, action: 'review', reason: '看一眼' },
+  ] }));
+  const out = await createAiAdvisor({ getLlm: () => llm, planStore: aiPlans(rows) }).suggest('p-ai');
+  assert.deepEqual(out.recommendations.map((r) => [r.group, r.action]), [[0, 'clean'], [1, 'review']], '只认合法且首次出现的那两条');
+  assert.equal(out.dropped.count, 3);
+  assert.match(out.note, /丢弃/, '降级要在 note 里说人话，不许静默吞掉');
+});
+
+await checkAsync('ai-5 空清单不调模型：如实回「没有可判断的分类」', async () => {
+  const llm = fakeLlm(textJson({ recommendations: [] }));
+  const out = await createAiAdvisor({ getLlm: () => llm, planStore: aiPlans({ 'p-ai': aiPlan([]) }) }).suggest('p-ai');
+  assert.equal(out.recommendations.length, 0);
+  assert.match(out.note, /空的/);
+  assert.equal(llm.calls.length, 0, '没有分类可判时花钱问模型是浪费');
+});
+
+await checkAsync('ai-6 只有思考没有正文 = 失败（AI_NO_OUTPUT），detail 带思考字数', async () => {
+  const rows = { 'p-ai': aiPlan([aiItem()]) };
+  const llm = fakeLlm([
+    { type: 'reasoning-delta', text: '让我想想这堆缓存…' },
+    { type: 'reasoning-delta', text: '还是想想上下文…' },
+    { type: 'finish', reason: { kind: 'max-tokens' } },
+  ]);
+  await assert.rejects(
+    createAiAdvisor({ getLlm: () => llm, planStore: aiPlans(rows) }).suggest('p-ai'),
+    (e) => {
+      assert.equal(e.code, 'AI_NO_OUTPUT');
+      assert.ok(e.reasoningChars >= 15, `思考字数要记下来（抓手），实得 ${e.reasoningChars}`);
+      assert.match(e.message, /换模型|换一个模型/);
+      return true;
+    },
+  );
+});
+
+await checkAsync('ai-7 正文不是约定的 JSON → AI_BAD_OUTPUT，本次判定全部丢弃', async () => {
+  const rows = { 'p-ai': aiPlan([aiItem()]) };
+  const llm = fakeLlm([{ type: 'text-delta', text: '依我看这些缓存都可以删掉。' }, { type: 'finish', reason: { kind: 'stop' } }]);
+  await assert.rejects(
+    createAiAdvisor({ getLlm: () => llm, planStore: aiPlans(rows) }).suggest('p-ai'),
+    (e) => e.code === 'AI_BAD_OUTPUT',
+  );
+});
+
+await checkAsync('ai-8 上游失败按 code 分支：RATE_LIMIT 翻成中文指引，原 code 留在 upstreamCode', async () => {
+  const rows = { 'p-ai': aiPlan([aiItem()]) };
+  const llm = fakeLlm([{ type: 'finish', reason: { kind: 'error', failure: { code: 'RATE_LIMIT', message: 'too many requests' } } }]);
+  await assert.rejects(
+    createAiAdvisor({ getLlm: () => llm, planStore: aiPlans(rows) }).suggest('p-ai'),
+    (e) => {
+      assert.equal(e.code, 'AI_UPSTREAM');
+      assert.equal(e.upstreamCode, 'RATE_LIMIT');
+      assert.match(e.message, /限流/, '界面显示的是中文指引，不是英文原文');
+      return true;
+    },
+  );
+});
+
+await checkAsync('ai-9 整体超时走 signal 取消并按 AI_TIMEOUT 报（不写死等）', async () => {
+  const rows = { 'p-ai': aiPlan([aiItem()]) };
+  let aborted = false;
+  const llm = fakeLlm(null, {
+    stream: (options) => (async function* gen() {
+      await new Promise((r) => {
+        const s = options.signal;
+        if (s.aborted) { aborted = true; return r(); }
+        s.addEventListener('abort', () => { aborted = true; r(); }, { once: true });
+      });
+    })(),
+  });
+  const svc = createAiAdvisor({ getLlm: () => llm, planStore: aiPlans(rows), deadlineMs: 20 });
+  await assert.rejects(svc.suggest('p-ai'), (e) => e.code === 'AI_TIMEOUT');
+  assert.equal(aborted, true, '超时要把 signal 交给宿主，让模型那侧真的收手，不只是本地放弃等待');
+});
+
+await checkAsync('ai-10 分类超过上限只送体积最大的那些，并如实说明还剩几类没问', async () => {
+  const items = [];
+  for (let i = 0; i < AI_MAX_GROUPS + 3; i += 1) {
+    items.push(aiItem({ id: `i-${i}`, ruleId: `r-${i}`, ruleName: `类别${i}`, size: (i + 1) * 1048576 }));
+  }
+  const rows = { 'p-ai': aiPlan(items) };
+  const llm = fakeLlm(textJson({ recommendations: [] }));
+  const out = await createAiAdvisor({ getLlm: () => llm, planStore: aiPlans(rows) }).suggest('p-ai');
+  assert.equal(out.groupsSent, AI_MAX_GROUPS);
+  assert.equal(out.groupsTotal, AI_MAX_GROUPS + 3);
+  assert.match(out.note, /体积最大/, '截断口径要说出来，否则用户以为全问过了');
+  const sent = llm.calls[0].messages[0].content[0].text;
+  assert.ok(sent.includes('类别26'), '最大的那类必须在（倒序第一名）');
+  assert.ok(!sent.includes('类别0'), '最小的那类不该占输入预算');
+  assert.equal(out.missing, AI_MAX_GROUPS, '模型一条都没判 ⇒ missing 如实报满');
+});
+
+await checkAsync('ai-11 请求参数：不写死 provider/model、不设 maxTokens、system 里有 JSON 契约', async () => {
+  const rows = { 'p-ai': aiPlan([aiItem()]) };
+  const good = fakeLlm(textJson({ recommendations: [] }));
+  const out = await createAiAdvisor({ getLlm: () => good, planStore: aiPlans(rows) }).suggest('p-ai');
+  const opts = good.calls[0];
+  assert.equal(opts.provider, 'fake-official');
+  assert.equal(opts.model, 'm-1');
+  assert.equal('maxTokens' in opts, false, '不传 = 不设上限（宿主契约），写死了就是插件在截模型的笔');
+  assert.equal(opts.temperature, 0.2);
+  assert.ok(typeof opts.system === 'string' && opts.system.includes('JSON'), '输出契约写在 system 里');
+  assert.match(out.promptHash, /^fnv1a-[0-9a-f]{8}$/, 'prompt 有摘要可对账（可重建性抓手）');
+});
+
+await checkAsync('ai-12 JSON 只藏在 reasoning-delta 里 ⇒ 按「无正文」失败，不冒充成功（思考不是正文）', async () => {
+  const rows = { 'p-ai': aiPlan([aiItem()]) };
+  // 真把它累进正文，这里就会"解析成功"并交回一份模型其实没写的建议 —— ai-6 的镜像证。
+  const llm = fakeLlm([
+    { type: 'reasoning-delta', text: JSON.stringify({ recommendations: [{ group: 0, action: 'clean', reason: '假装的' }] }) },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]);
+  await assert.rejects(
+    createAiAdvisor({ getLlm: () => llm, planStore: aiPlans(rows) }).suggest('p-ai'),
+    (e) => e.code === 'AI_NO_OUTPUT',
+  );
+});
+
+await checkAsync('ai-13 provider 不给模型清单时回落该 provider 的默认模型：请求里不带 model，界面 model 报「(宿主默认)」', async () => {
+  const rows = { 'p-ai': aiPlan([aiItem()]) };
+  const llm = fakeLlm(textJson({ recommendations: [] }), { noModelList: true });
+  const svc = createAiAdvisor({ getLlm: () => llm, planStore: aiPlans(rows) });
+  const d = await svc.describe();
+  assert.equal(d.available, true);
+  assert.equal(d.model, null, '没有清单就不冒充型号');
+  assert.equal(d.source, 'provider-default');
+  const out = await svc.suggest('p-ai');
+  assert.equal('model' in llm.calls[0], false, '发现不到型号就不下发 model，让宿主按默认解析');
+  assert.equal(out.model, '(宿主默认)', '回执里如实写明用的是宿主默认，不留空让用户以为没模型');
 });
 
 console.log(`\n  ${passed}/${passed + failed} 通过`);

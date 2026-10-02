@@ -72,4 +72,4 @@ const walk = (dir) => {
 walk(path.join(process.env.LOCALAPPDATA, 'Temp'));
 row('遍历 %LOCALAPPDATA%\\Temp 条目', entries, `${Date.now() - walkStart}ms`);
 fs.rmSync(root, { recursive: true, force: true });
-console.log('\n探针结束。偏差 >20% 时更新 docs/superpowers/specs/2026-09-27-dsh-plugin-sysops-design.md §1.2。\n');
+console.log('\n探针结束。偏差 >20% 时更新 docs/design-spec.md §1.2。\n');

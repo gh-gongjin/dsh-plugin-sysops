@@ -755,7 +755,13 @@ await checkAsync('svc-4 L1b 默认关；只有「开 + 页面可见」才启动�
 });
 
 await checkAsync('svc-5 supervisor 终态原样透传进 sources，且 L1a 不随页面可见性停采', async () => {
-  const w = fakeWorld({ supState: 'exited-max' });
+  // l1b 的开关这里必须是**真的开着**：上一版用默认关的 l1b 断「setVisible(false) 里 L1b 被停」，
+  // 而老实现那条 else 是无条件调 disable() 的 —— 于是一条从没跑过的源也能把断言考绿。
+  // S18 起 setVisible(false) 只在真的在跑时才停（不再白推一帧空榜），用例改成先让它跑起来。
+  const w = fakeWorld({
+    supState: 'exited-max',
+    prefs: { collect: { cadence: '1s', keepMinutes: 30 }, sources: { l0: true, l1a: true, l1b: true } },
+  });
   w.svc.start();
   await w.svc.setVisible(true);
   const row = w.svc.snapshot().sources.find((r) => r.key === 'l1a');
@@ -763,6 +769,7 @@ await checkAsync('svc-5 supervisor 终态原样透传进 sources，且 L1a 不�
   // 用例标题原本写"网络计数器名缺失时 state 为 unavailable"，但体内断的是 exited-max，
   // 而 `unavailable` 这个态在本文件里从来没有实现会置它（Task 6 的 l1a 只经 supervisor 置态）——
   // 标题改成断言的真实口径。计数器名缺失的真机文案归 Task 21（台账：typeperf 以 exit=4026531842 退出且错误走 stdout）。
+  assert.ok(w.started.includes('l1b'), '开 + 可见 ⇒ L1b 这一路真的起了（否则下面那条「必须被停」是空断言）');
   await w.svc.setVisible(false);
   assert.ok(!w.stopped.includes('l1a'), 'L1a 成本实测 <1%，不随可见性起停（只有 L1b 受闸门）');
   assert.ok(w.stopped.includes('l1b'), '同一动作里 L1b 必须被停');
@@ -869,6 +876,105 @@ check('svc-10 diskFreePct 序列 = 可用/总容量，单位与 diskFreeGb 分�
   assert.equal(Math.round(s.latest.diskFreeGb * 10) / 10, 70);
   assert.equal(Math.round(s.latest.diskTotalGb * 10) / 10, 200);
   assert.equal(Math.round(s.series.diskFreePct.at(-1).v * 10) / 10, 35);
+});
+
+/* ---------------- S18 四源开关的三条不变量（真机批注 ①②④） ---------------- */
+
+await checkAsync('svc-11 重复的「页面可见」不许再动 L1b 的孩子（S18-④ 进程采集不停重启）', async () => {
+  const w = fakeWorld({ prefs: { collect: { cadence: '1s', keepMinutes: 30 }, sources: { l0: true, l1a: true, l1b: true } } });
+  w.svc.start();
+  await w.svc.setVisible(true);
+  assert.deepEqual(w.started, ['l1a', 'l1b'], `首帧只各起一次（实起 ${JSON.stringify(w.started)}）`);
+  // 真机那一路：SSE 重连 / 切页签 / visibilitychange 都会再敲一次 setVisible(true)。
+  // 老实现每次都 l1b.enable() ⇒ 监督者 start() 先 teardown 正在跑的孩子再冷启（实测 4.3s 空窗）。
+  for (let i = 0; i < 5; i++) await w.svc.setVisible(true);
+  assert.equal(w.started.filter((k) => k === 'l1b').length, 1,
+    `5 次重复可见只许起 1 次（实起 ${w.started.filter((k) => k === 'l1b').length} 次）`);
+  assert.equal(w.stopped.length, 0, '没停过：重复可见也不该走 disable 那条路');
+  // 隐藏再回来 ⇒ 这才是真的该重起一次（上一轮的孩子已经被停掉了）
+  await w.svc.setVisible(false);
+  await w.svc.setVisible(true);
+  assert.equal(w.started.filter((k) => k === 'l1b').length, 2, '停过之后再可见要能重新起');
+});
+
+await checkAsync('svc-12 同值重放 setSource 不许起/停任何子进程（S18-② 开网速采集顺手起进程采集）', async () => {
+  // 承重：index.js 的 syncRuntime() 在**任何一次 prefs 写入**后把四个源全量重放一遍。
+  // 库里 sources.l1b 存着 true 而这一路当前没跑（页面隐藏）时，老实现会在用户点开网速采集
+  // 那一刻把 PowerShell 起来 —— 用户看到的就是「网络采集一开，进程采集也跟着开了」。
+  const w = fakeWorld({ prefs: { collect: { cadence: '1s', keepMinutes: 30 }, sources: { l0: true, l1a: false, l1b: true } } });
+  w.svc.start();                                    // 不可见 ⇒ l1b 开着但没起
+  assert.ok(!w.started.includes('l1b'), '不可见时不该起 L1b');
+  await w.svc.setSource('l1a', true);               // 用户点开网速采集
+  assert.deepEqual(w.started, ['l1a'], `只该起被点的那一路（实起 ${JSON.stringify(w.started)}）`);
+  for (const k of ['l0', 'l1a', 'l1b', 'l2']) await w.svc.setSource(k, w.svc.sourceRows().find((r) => r.key === k)?.enabled === true);
+  assert.deepEqual(w.started, ['l1a'], `全量重放同值⇒ 一次都没多（实为 ${JSON.stringify(w.started)}）`);
+  assert.equal(w.stopped.length, 0, `同值重放也不许停任何一路（实停 ${JSON.stringify(w.stopped)}）`);
+  await w.svc.setSource('l1a', false);
+  assert.deepEqual(w.stopped, ['l1a'], '真的关掉时才停那一路');
+});
+
+await checkAsync('svc-13 源行的 enabled 是开关意图，state 是这一路现在在不在跑（两者可以不等）', async () => {
+  const w = fakeWorld({ prefs: { collect: { cadence: '1s', keepMinutes: 30 }, sources: { l0: true, l1a: true, l1b: true } } });
+  w.svc.start();
+  const off = w.svc.snapshot().sources;
+  assert.equal(off.find((r) => r.key === 'l0').enabled, true,
+    'l0 那一格同样报的是开关意图：index.js 的 syncRuntime 会拿它重放 setSource("l0", …)，报 false 等于把正在采的曲线关掉');
+  assert.equal(off.find((r) => r.key === 'l1b').enabled, true, '库里开着 ⇒ enabled:true');
+  assert.equal(off.find((r) => r.key === 'l1b').state, 'on', '假监督者报 on（真机这里是没起 ⇒ off）');
+  await w.svc.setSource('l1b', false);
+  const row = w.svc.snapshot().sources.find((r) => r.key === 'l1b');
+  assert.equal(row.enabled, false, '关掉开关后 enabled 跟着变，界面那颗开关读的必须是这个而不是 state');
+  // l1a 默认开、库里从没写过时，浏览器读不到 sources.l1a ⇒ 只能靠宿主这一格说真话（S18-①）
+  const w2 = fakeWorld({ prefs: { collect: { cadence: '1s', keepMinutes: 30 }, sources: { l0: true } } });
+  w2.svc.start();
+  assert.equal(w2.svc.snapshot().sources.find((r) => r.key === 'l1a').enabled, true,
+    '宿主默认的 L1a 要在源行里报 enabled:true，别让设置页把在采的源画成没开');
+});
+
+await checkAsync('svc-14 restartSource 是「收干净再按当前条件重起」，且这个方法真的在服务出口上', async () => {
+  const w = fakeWorld({ prefs: { collect: { cadence: '1s', keepMinutes: 30 }, sources: { l0: true, l1a: true, l1b: true } } });
+  // lib/api.js:396 的 POST /api/collect/restart 直接调它；S18 核对时发现出口里**根本没有这个方法**，
+  // 源条那颗「重试」点下去必然 TypeError ⇒ 500。这条先钉"函数存在"，再钉行为。
+  assert.equal(typeof w.svc.restartSource, 'function', '服务出口必须带 restartSource（路由在调它）');
+  w.svc.start();
+  await w.svc.setVisible(true);
+  assert.deepEqual(w.started, ['l1a', 'l1b']);
+  const row = await w.svc.restartSource('l1b');
+  assert.deepEqual(w.stopped, ['l1b'], '重启要先停掉当前孩子（同键 start 会 teardown，这里显式走一遍）');
+  assert.equal(w.started.filter((k) => k === 'l1b').length, 2, '开 + 可见 ⇒ 重起一次');
+  assert.equal(row && row.key, 'l1b', '返回重启后的那一源行');
+  await w.svc.setVisible(false);
+  const before = w.started.length;
+  await w.svc.restartSource('l1b');
+  assert.equal(w.started.length, before, '不可见时重启只该把它停掉，不该再起');
+  // 非常驻的两路不碰子进程
+  const l0Row = await w.svc.restartSource('l0');
+  assert.equal(l0Row && l0Row.key, 'l0', 'l0 走重挂定时器，返回自己的源行');
+  assert.equal(await w.svc.restartSource('l2'), null, 'l2 没有常驻进程，也没有源行 ⇒ null');
+  await assert.rejects(() => w.svc.restartSource('l9'), /未知源开关/);
+});
+
+/* S18-① 的真机那一半：上一轮只把「界面读的那一格」（源行的 enabled）修对了，采集本身在启动期
+   仍然没人去起。判据必须按真装配口径来 —— `index.js:432` 故意不调 `collect.start()`（无宿主子进程
+   生命周期管理时会留下孤儿 typeperf/powershell），第一个 SSE 连接由 `lib/api.js:684` 打成
+   `setVisible(true)`。GET-only 复核读数（`tmp/s18-get2.txt`）：`enabled:true` 而 `state:off`、
+   `pid:null`、`series.netDown n=0` ⇒ 用户看到的正是截图里那句「网络吞吐 未开启」。
+   注意别拿 `sup.state()` 当证据：假监督者恒报 'on'，断 `state==='on'` 是空断言。 */
+await checkAsync('svc-15 首连（setVisible(true)）必须把默认开的 L1a 拉起来，隐藏不停它、重复首连不再起（S18-①）', async () => {
+  const w = fakeWorld({ prefs: { collect: { cadence: '1s', keepMinutes: 30 }, sources: { l0: true, l1a: true } } });
+  await w.svc.setVisible(true);
+  assert.deepEqual(w.started, ['l1a'], `首连只该起默认开的那一路（实起 ${JSON.stringify(w.started)}）`);
+  assert.equal(w.svc.snapshot().sources.find((r) => r.key === 'l1a').enabled, true, '开关意图仍是 true');
+  await w.svc.setVisible(false);
+  assert.deepEqual(w.stopped, [], '隐藏页面只停 l1b：l1a 跟着起停会白丢一窗暖身（spec §3.1）');
+  for (let i = 0; i < 4; i++) await w.svc.setVisible(true);
+  assert.equal(w.started.filter((k) => k === 'l1a').length, 1,
+    `SSE 重连 / 切回页面各敲一次也只起 1 次（实起 ${w.started.filter((k) => k === 'l1a').length} 次）`);
+  // 反向：库里说关 ⇒ 首连也不许自作主张起它（幂等门不等于「默认起」）
+  const w2 = fakeWorld({ prefs: { collect: { cadence: '1s', keepMinutes: 30 }, sources: { l0: true, l1a: false } } });
+  await w2.svc.setVisible(true);
+  assert.deepEqual(w2.started, [], '开关意图是关 ⇒ 首连一起都不起');
+  assert.equal(w2.svc.snapshot().sources.find((r) => r.key === 'l1a').enabled, false, '这一格的 enabled 也得跟着库');
 });
 
 console.log(`\n  ${passed}/${passed + failed} 通过`);

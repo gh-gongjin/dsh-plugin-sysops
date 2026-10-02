@@ -62,6 +62,13 @@ export function walk(node, out = newOut(), depth = 0) {
       text: (node.children || []).filter((c) => typeof c === 'string').join(''),
       onClick: typeof props.onClick === 'function',
       disabled: props.disabled === true,
+      // 无障碍态是行为的一部分（表头全选框的三态就只长在 aria-checked 上），
+      // 桩 React 不校验属性名 ⇒ 这里按 React 口径读回，S10 的 pg2-28 靠它钉三态。
+      role: props.role,
+      ariaChecked: props['aria-checked'],
+      // S13 的就地展开同理：卡头那颗按钮的状态只写在 aria-expanded 上，画面之外也要能核对
+      ariaExpanded: props['aria-expanded'],
+      title: typeof props.title === 'string' ? props.title : '',
     });
   }
   if (typeof node.type === 'function') walk(node.type(props), out, depth + 1);
@@ -80,6 +87,17 @@ export function render(Comp, props = {}) {
 }
 
 /**
+ * 能力位与能力表逐字吃 lib/caps.js（一份真相）：宿主那边加一行能力，这里的载荷跟着长一行，
+ * 测试不会再拿着一份手抄的旧文案渲染出「界面少一行」的假象。ok 全给 true（NEVER_PROVIDED 除外），
+ * 需要演示降级行时由用例自己覆盖某行的 ok/detail（见 pg4-17）。
+ */
+const HOST_CAPS = await import('../lib/caps.js');
+const CAP_ROWS_FIX = HOST_CAPS.CAP_ROWS.map((r) => (HOST_CAPS.NEVER_PROVIDED.includes(r.key)
+  ? { ...r, ok: false, detail: '' }
+  : { ...r, ok: true, detail: '' }));
+const CAPS_FIX = Object.fromEntries(HOST_CAPS.CAP_KEYS.map((k) => [k, !HOST_CAPS.NEVER_PROVIDED.includes(k)]));
+
+/**
  * ④~⑦段共用的宿主注入载荷，字段与 Task 19 `index-inject` 推进去的 `value` 逐键一致。
  * 每段渲染前要 `globalThis.__SYSOPS__ = clientPayload()` 写回：client.js 的 `cfg()` 是
  * 现取的（Task 20 的约定，只有 `PANEL_ID` 在模块求值时定死），上一段用例改过的载荷会串下来。
@@ -89,14 +107,8 @@ export function render(Comp, props = {}) {
 export function clientPayload(over = {}) {
   return {
     panelId: 'sysops', label: '系统运维', panelOrder: 12, routePrefix: '/sysops', api: '/sysops/api',
-    capabilities: { storageDomain: true, timer: true, webServer: true, notifications: false, autostart: false },
-    capabilityRows: [
-      { key: 'storageDomain', label: 'storageDomain（持久化）', ok: true, detail: '', fallback: '' },
-      { key: 'timer', label: 'timer（ctx.interval）', ok: true, detail: '', fallback: '' },
-      { key: 'webServer', label: 'webServer（路由 + index-inject）', ok: true, detail: '', fallback: '' },
-      { key: 'notifications', label: '系统通知（托盘）', ok: false, detail: '', fallback: '宿主不提供' },
-      { key: 'autostart', label: '开机自启常驻', ok: false, detail: '', fallback: '宿主不提供' },
-    ],
+    capabilities: { ...CAPS_FIX },
+    capabilityRows: CAP_ROWS_FIX.map((r) => ({ ...r })),
     cadences: ['1s', '5s', 'paused'],
     sourceKeys: ['l0', 'l1a', 'l1b', 'l2'],
     defaults: { procIntervalSec: 3, procMaxRows: 400, keepMinutes: 30, searchPort: 3417, quarantineDir: 'C:\\Users\\gongj\\AppData\\Local\\dsh-plugin-sysops\\quarantine' },

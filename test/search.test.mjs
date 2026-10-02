@@ -44,12 +44,15 @@ function probeWorld(over = {}) {
   const calls = [];
   const probe = PB.createProbe({
     fsMod: { existsSync: (p) => (over.installedPaths ?? []).some((x) => p.toLowerCase() === x.toLowerCase()) },
+    // env 由用例注入（默认 C 盘的 Program Files）：安装位置候选全靠它，读真机的 process.env 会让这条用例跟着机器变。
+    env: over.env ?? { ProgramFiles: 'C:\\Program Files' },
     requestFn: async (url, opts = {}) => {
       calls.push({ url, method: opts.method ?? 'GET' });
       if (over.httpThrows) throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
       if (over.httpStatus === 403) return { status: 403, body: '' };
+      if (over.httpStatus === 404) return { status: 404, body: '<html>404 Not Found</html>' };
       if (over.httpStatus === 500) return { status: 500, body: 'boom' };
-      return { status: 200, body: over.httpBody ?? '{"results":[],"total":0}' };
+      return { status: 200, body: over.httpBody ?? '{"results":[],"totalResults":0}' };
     },
     execFileMod: async (cmd, args) => {
       calls.push({ cmd, args });
@@ -147,26 +150,115 @@ await checkAsync('pb-9 端口取自 prefs.search.port，未配置时用 3417', a
   assert.ok(w.calls.some((c) => c.url && String(c.url).includes(':4321')), JSON.stringify(w.calls));
 });
 
-/* ②段：Everything HTTP */
-const EH = await import('../lib/search/everything-http.js');
-
-const everythingBody = (n = 2) => JSON.stringify({
-  results: Array.from({ length: n }, (_, i) => ({ name: `report ${i}.pdf`, path: `C:\\docs\\report ${i}.pdf`, size: 1024 * (i + 1), date_modified: 1760000000 })),
-  total: 1000,
+await checkAsync('pb-10 装在非常见位置但查询服务在应答 ⇒ ①②③ 全绿（S11-③ 那条：D 盘装机 + 根路径 JSON，全假世界）', async () => {
+  // 这一条钉的就是用户截图上的「已安装为什么还是检测不到」：修前 ① 只看 C:\Program Files 的硬编码路径、
+  // ② 打的 /fq/ 在本机回 404，两条同时否 ⇒ 自检三级全红、搜索降级成遍历。
+  const w = probeWorld({ installedPaths: ['D:\\Program Files\\Everything\\Everything.exe'], env: { ProgramFiles: 'C:\\Program Files' }, esThrows: true });
+  const r = await w.probe.probe(true);
+  assert.equal(r.installed, true, 'HTTP 服务在应答 = Everything 正在运行，装在哪个盘不改变结论');
+  assert.equal(r.http, true, '根路径 + json=1 必须 200（不再打 /fq/）');
+  assert.equal(r.via, 'http');
+  assert.equal(r.ready, true);
+  assert.match(r.checks.find((c) => c.key === 'installed').detail, /正在运行|便携版/);
 });
 
-check('sh-1 buildUrl：/fq/ 端点、count 带上限、query 走 URL 编码', () => {
+await checkAsync('pb-11 安装路径候选来自 env：ProgramFiles 指哪块盘就查哪块盘（不把盘符焊进源码）', () => {
+  const c = PB.everythingExeCandidates({ ProgramFiles: 'D:\\Program Files', 'ProgramFiles(x86)': 'D:\\Program Files (x86)' });
+  assert.ok(c.includes('D:\\Program Files\\Everything\\Everything.exe'), JSON.stringify(c));
+  assert.ok(c.includes('D:\\Program Files (x86)\\Everything\\Everything.exe'));
+  assert.equal(c.some((p) => /^C:/.test(p)), false, 'env 给了 D 盘就不该再优先 C 盘');
+  const d = PB.everythingExeCandidates({ ProgramFiles: 'D:\\Program Files\\' });
+  assert.deepEqual(d, ['D:\\Program Files\\Everything\\Everything.exe'], '尾部斜杠不重复、去重后只留一条');
+});
+
+await checkAsync('pb-11b HTTP 404 单独成文案：说清「端口上有应答但不是 Everything 的接口」', async () => {
+  const w = probeWorld({ installedPaths: [], httpStatus: 404, esThrows: true });
+  const r = await w.probe.probe(true);
+  assert.equal(r.http, false);
+  assert.equal(r.installed, false, '404 不算「在应答」，不能拿它当已安装的证据');
+  assert.match(r.checks.find((c) => c.key === 'http').detail, /404.*端口|端口.*不是 Everything/);
+});
+
+await checkAsync('pb-12 源码锁：lib/search 的**代码**里不许再出现 /fq/（本机实测 404，见 tmp/s11-everything.txt；注释里作为教训提及是允许的）', async () => {
+  const fs = await import('node:fs');
+  const dir = new URL('../lib/search/', import.meta.url);
+  const bad = fs.readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isFile() && e.name.endsWith('.js'))
+    .map((e) => e.name)
+    .filter((name) => {
+      const code = fs.readFileSync(new URL(name, dir), 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/^\s*\/\/.*$/gm, '');
+      return /\/fq\//.test(code);
+    });
+  assert.deepEqual(bad, [], '这些文件里还有 /fq/ 端点');
+});
+
+await checkAsync('pb-13 e2e 验的是「真吃得下」：results 不是数组就不算通', async () => {
+  const w = probeWorld({ installedPaths: ['C:\\Program Files\\Everything\\Everything.exe'], httpBody: '{"results":"不是数组"}', esThrows: true });
+  const r = await w.probe.probe(true);
+  assert.equal(r.http, true, '通道级只看 200');
+  assert.equal(r.e2e, false, '端到端要能把 results 当数组用，否则搜索页拿到的就是空表');
+  assert.equal(r.ready, false);
+  assert.match(r.advice[0], /无法解析|重启 Everything/);
+});
+
+/* ②段：Everything HTTP
+ * 夹具形状按 2026-09-29 真机读回（tmp/s11-everything.txt）：
+ *   `GET /?search=win.ini&count=3&json=1&path_column=1&size_column=1&date_modified_column=1`
+ *   → 200 `{"totalResults":2,"results":[{"type":"file","name":"win.ini","path":"C:\\Windows","size":"92","date_modified":"132963745525044623"}]}`
+ * —— size 是字符串、date_modified 是 FILETIME、path 是**父目录**。原先按 spec/原型写的夹具是
+ * 「path=全路径 + size/日期是数字」，正好把这三处不符藏住了（S11-③）。 */
+const EH = await import('../lib/search/everything-http.js');
+
+/** 132963745525044623 = 2022-09-28 前后的 FILETIME；这里只要求解出来是 2000~2100 年之间的毫秒 */
+const FT_SAMPLE = '132963745525044623';
+
+const everythingBody = (n = 2) => JSON.stringify({
+  results: Array.from({ length: n }, (_, i) => ({
+    type: 'file', name: `report ${i}.pdf`, path: 'C:\\docs', size: String(1024 * (i + 1)), date_modified: FT_SAMPLE,
+  })),
+  totalResults: 1000,
+});
+
+check('sh-1 buildUrl：根路径 + json=1 + 三个列开关、count 带上限、query 走 URL 编码（/fq/ 在本机 404 —— S11-③）', () => {
   const u = EH.buildUrl({ q: 'report .pdf', limit: 200, port: 3417 });
-  assert.match(u, /^http:\/\/127\.0\.0\.1:3417\/fq\/\?/);
+  assert.match(u, /^http:\/\/127\.0\.0\.1:3417\/\?/);
+  assert.doesNotMatch(u, /\/fq\/|\/json\/|\/ex\//, '这些端点本机全 404，不许再回到 URL 里');
+  assert.match(u, /json=1/);
+  assert.match(u, /path_column=1&size_column=1&date_modified_column=1/);
   assert.match(u, /search=report%20\.pdf|search=report\+%2E%20pdf|%20/);
   assert.match(u, /count=200/);
+  assert.match(EH.buildUrl({ q: 'a', limit: 10, port: 3417, offset: 30 }), /offset=30/);
 });
 
 check('sh-2 parseEverythingJson：缺字段的行为 null 而不是 0（不许把未知当"没有"）', () => {
-  const rows = EH.parseEverythingJson(JSON.stringify({ results: [{ name: 'a', path: 'C:\\a' }, { name: 'b', path: 'C:\\b', size: 5, date_modified: 1 }] }));
+  const rows = EH.parseEverythingJson(JSON.stringify({ results: [{ name: 'a.txt', path: 'C:\\' }, { name: 'b.txt', path: 'C:\\x', size: '5', date_modified: FT_SAMPLE }] }));
   assert.equal(rows.length, 2);
   assert.equal(rows[0].size, null);
-  assert.equal(rows[1].size, 5);
+  assert.equal(rows[1].size, 5, '真机 size 是十进制字符串，要解成数字');
+});
+
+check('sh-2b 宿主回话的形状（自包含夹具，不碰本机 Everything）：path 是父目录 ⇒ 拼回全路径；FILETIME ⇒ unix 毫秒；totalResults ⇒ total', () => {
+  const rows = EH.parseEverythingJson(JSON.stringify({ totalResults: 14181, results: [{ type: 'file', name: 'win.ini', path: 'C:\\Windows', size: '92', date_modified: FT_SAMPLE }] }));
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].name, 'win.ini');
+  assert.equal(rows[0].path, 'C:\\Windows\\win.ini', '父目录 + 文件名拼成全路径（父目录已带尾分隔符时不重复拼）');
+  assert.equal(rows[0].size, 92);
+  const y = new Date(rows[0].mtime).getUTCFullYear();
+  assert.ok(y >= 2000 && y <= 2100, `FILETIME 解出来该是 2000~2100 年，实际 ${y}（${rows[0].mtime}）`);
+  assert.equal(rows[0].total, 14181);
+
+  // 文件夹行：真机不给 size/日期，或给空串 ⇒ 都是 null，不是 0 B、不是 1970
+  const dirRows = EH.parseEverythingJson(JSON.stringify({ totalResults: 1, results: [{ type: 'folder', name: 'Logs', path: 'C:\\x' }, { type: 'folder', name: 'Tmp', path: 'C:\\y', size: '', date_modified: '0' }] }));
+  assert.deepEqual(dirRows.map((r) => r.size), [null, null]);
+  assert.deepEqual(dirRows.map((r) => r.mtime), [null, null]);
+
+  // unix 秒口径（早期 /fq/ 的返回）也得解对，别把 17 亿解成 1970
+  const sec = EH.toMtimeMs(1760000000);
+  assert.equal(new Date(sec).getUTCFullYear(), 2025);
+  assert.equal(EH.toMtimeMs(0), null);
+  assert.equal(EH.toMtimeMs('abc'), null);
 });
 
 check('sh-3 畸形 JSON / results 不是数组 → 返回空数组并交调用方记错误', () => {
@@ -194,6 +286,56 @@ await checkAsync('sh-6 正常返回：行数、路径、来源都归一化好', 
   const r = await EH.searchEverything({ q: 'report', limit: 10, port: 3417, requestFn: async () => ({ status: 200, body: everythingBody(3) }) });
   assert.equal(r.rows.length, 3);
   assert.equal(r.rows[0].name, 'report 0.pdf');
+});
+
+/**
+ * sh-真机-1（S11-③）：本机 Everything 真查一次，把「契约按 spec 写、没在本机验证」这笔账结清。
+ * 装配口径与 index.js 同形：requestFn = `httpRequest`（index.js:192，返回 `{status, body:文本}`），
+ * 直接给原生 fetch 的 Response 会让 `res.body` 是流 —— 探测评的是假失败，单测也拦不住。
+ */
+await checkAsync('sh-真机-1 本机 Everything（:3417）真查询：三级全绿、行里有大小与修改时间', async () => {
+  const fs = await import('node:fs');
+  const { createProbe } = await import('../lib/search/probe.js');
+  const httpRequest = async (url, { timeoutMs } = {}) => {
+    const ctrl = new AbortController();
+    const timer = timeoutMs ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
+    try {
+      const r = await fetch(url, { method: 'GET', signal: ctrl.signal });
+      return { status: r.status, body: await r.text() };
+    } finally { if (timer) clearTimeout(timer); }
+  };
+  const port = 3417;
+  const probe = createProbe({
+    fsMod: fs, requestFn: httpRequest,
+    // es.exe 门面同形 index.js:206（execFile 非 shell，返回 {stdout}）
+    execFileMod: (bin, args, o = {}) => new Promise((resolve, reject) => {
+      import('node:child_process').then(({ execFile }) => {
+        execFile(bin, args, o, (err, stdout, stderr) => (err ? reject(err) : resolve({ stdout, stderr })));
+      });
+    }),
+    getPrefs: () => ({ search: { port } }),
+    now: () => Date.now(),
+  });
+  const r = await probe.probe(true);
+  if (!r.http) {
+    // Everything 没在跑：这一条只验「不许谎称就绪」，不在没装机的环境里硬失败（与 hc-9 同口径）
+    console.log('        本机 :3417 无应答（Everything 未运行）—— 只验降级面');
+    assert.equal(r.ready, false);
+    return;
+  }
+  assert.equal(r.installed, true, '查询服务在应答就算已安装（装在哪块盘由系统说话，不靠硬编码路径）');
+  assert.equal(r.via, 'http');
+  assert.equal(r.e2e, true, 'e2e 不过就是返回结构没吃到，正是修前那一版');
+  assert.equal(r.ready, true, JSON.stringify(r.checks));
+
+  const res = await EH.searchEverything({ q: 'win.ini', limit: 5, port, requestFn: httpRequest });
+  assert.equal(res.error, undefined, `真查询不该报错：${res.error}`);
+  assert.ok(res.rows.length > 0, 'win.ini 在系统盘上必定存在，搜不到就是通路不通');
+  const first = res.rows[0];
+  assert.match(String(first.path), /\\win\.ini$/i, `path 该是拼好的全路径：${first.path}`);
+  assert.equal(typeof first.size, 'number', `size 该是数字（真机给的是字符串）：${first.size}`);
+  assert.ok(first.mtime > 946_684_800_000 && first.mtime < 4_102_444_800_000,
+    `mtime 该是 2000~2100 之间的 unix 毫秒（真机给的是 FILETIME）：${first.mtime}`);
 });
 
 /* ③段：es.exe */
@@ -370,6 +512,180 @@ await checkAsync('sv-7 空 query 拒（不发请求也不遍历）', async () =>
   const r = await w.svc.search({ q: '   ' });
   assert.equal(r.error, 'EMPTY_QUERY');
   assert.equal(w.calls.length, 0);
+});
+
+/* ⑥段：Everything 一键安装（S12-⑤）
+   「装什么」全部来自 installer.js 的常量，界面上那颗按钮只是这儿的读数。
+   桩只给到宿主真会给的形状（winget --version 的 stdout / 一条 promise），不加宿主没有的宽容。 */
+const IN = await import('../lib/search/installer.js');
+const PinnedCommand = 'winget install --id voidtools.Everything --exact --source winget --accept-package-agreements --accept-source-agreements';
+const tick = () => new Promise((r) => setImmediate(r));
+const grab = async (fn) => { try { await fn(); return null; } catch (e) { return e; } };
+
+function inWorld(opts = {}) {
+  const clock = { t: 1000 };
+  const execCalls = [];
+  const warns = [];
+  const infos = [];
+  let invalidated = 0;
+  let install = null;   // 安装那一步的 promise（测试自己决定何时/怎么收口）
+  const inst = IN.createInstaller({
+    bin: opts.bin,
+    execFileMod: (b, args, o) => {
+      execCalls.push({ b, args, o });
+      if (args[0] === '--version') {
+        if (opts.versionThrow) return Promise.reject(opts.versionThrow);
+        return Promise.resolve({ stdout: opts.versionStdout ?? 'v1.8.1912.0' });
+      }
+      if (opts.installThrowSync) throw opts.installThrowSync;
+      let resolve, reject;
+      const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+      install = { resolve, reject };
+      return promise;
+    },
+    probe: { invalidate() { invalidated += 1; } },
+    logger: { warn: (m) => warns.push(m), info: (m) => infos.push(m) },
+    now: () => clock.t,
+    detectTtlMs: opts.detectTtlMs,
+  });
+  return {
+    inst, execCalls, clock, warns, infos,
+    versionCalls: () => execCalls.filter((c) => c.args[0] === '--version').length,
+    installCalls: () => execCalls.filter((c) => c.args[0] === 'install').length,
+    lastInstall: () => execCalls.filter((c) => c.args[0] === 'install').slice(-1)[0],
+    okInstall: async (out = { stdout: '已安装成功' }) => { install.resolve(out); await tick(); },
+    badInstall: async (error) => { install.reject(error); await tick(); },
+    settleCalls: () => invalidated,
+    advance: (ms) => { clock.t += ms; },
+  };
+}
+
+await checkAsync('in-1 探不到 winget（ENOENT）：ready 把原因说清，start 直接拒，并且一次安装都没跑', async () => {
+  const w = inWorld({ versionThrow: Object.assign(new Error('spawn winget ENOENT'), { code: 'ENOENT' }) });
+  const r = await w.inst.ready();
+  assert.equal(r.can, false);
+  assert.match(r.detail, /PATH 里没有 winget/, '按钮不亮的原话要能回答「这台机器缺什么」');
+  const err = await grab(() => w.inst.start());
+  assert.equal(err && err.code, IN.INSTALL_ERROR.UNAVAILABLE);
+  assert.match(err.message, /所以这次没有启动安装/, '拒的时候必须明说「什么都没跑」');
+  assert.equal(w.installCalls(), 0, '探不到就不许碰安装那一步');
+});
+
+await checkAsync('in-2 winget 在位：ready 交回版本号与命令原文（命令只在宿主这一处拼，界面只回显）', async () => {
+  const w = inWorld();
+  const r = await w.inst.ready();
+  assert.equal(r.can, true);
+  assert.match(r.version, /^v1\.8/, '版本号从 --version 的原文里挑');
+  assert.match(r.detail, /winget v1\.8.*在位/);
+  assert.equal(r.packageId, IN.EVERYTHING_PKG_ID);
+  assert.equal(r.command, PinnedCommand);
+  assert.equal(r.running, false);
+  // 命令表逐字钉住：改这里就等于改「用户点确认时看到的到底是哪一条」
+  assert.deepEqual([...IN.WINGET_ARGS], ['install', '--id', 'voidtools.Everything', '--exact', '--source', 'winget', '--accept-package-agreements', '--accept-source-agreements']);
+});
+
+await checkAsync('in-3 start 跑的就是 ready 回显的那一条：逐字参数表 + 非 shell + start 一个形参都没有', async () => {
+  const w = inWorld();
+  const snap = await w.inst.start();
+  assert.equal(snap.phase, 'running');
+  assert.equal(snap.job.command, PinnedCommand, '帧里的命令与 ready 回显的必须同一条');
+  const c = w.lastInstall();
+  assert.equal(c.b, 'winget');
+  assert.deepEqual(c.args, ['install', '--id', 'voidtools.Everything', '--exact', '--source', 'winget', '--accept-package-agreements', '--accept-source-agreements']);
+  assert.equal(c.o.timeout, IN.WINGET_INSTALL_TIMEOUT_MS);
+  assert.equal(c.o.windowsHide, true);
+  assert.equal(c.o.shell, undefined, '非 shell：绝不把命令拼成字符串交给 cmd（参数表里有空格也不经 shell）');
+  assert.equal(w.inst.start.length, 0, '形参个数 = 0：路由层转不进来任何东西（rt-42 证的是实参侧，这里证形参侧）');
+  assert.equal(w.inst.state().job.packageId, IN.EVERYTHING_PKG_ID);
+});
+
+await checkAsync('in-4 一次只跑一装：在途期间的第二颗点击拒成 BUSY，且真的只起了一条 winget', async () => {
+  const w = inWorld();
+  await w.inst.start();
+  w.advance(45_000);
+  const err = await grab(() => w.inst.start());
+  assert.equal(err && err.code, IN.INSTALL_ERROR.BUSY);
+  assert.match(err.message, /已经有一装在进行中/);
+  assert.match(err.message, /已跑 45 秒/, '要给出「跑了多久」，用户才知道不是在等死机');
+  assert.equal(w.installCalls(), 1);
+  assert.equal(w.inst.state().phase, 'running', '被拒的第二次不许把在途那装的状态改掉');
+});
+
+await checkAsync('in-5 装成功：running 与 done 各一帧、探针缓存作废、留痕进 logger.info', async () => {
+  const w = inWorld();
+  const frames = [];
+  w.inst.onEvent((f) => frames.push(f));
+  await w.inst.start();
+  await w.okInstall({ stdout: '已找到 Everything\n已成功安装' });
+  const s = w.inst.state();
+  assert.equal(s.phase, 'done');
+  assert.equal(s.job.exitCode, 0);
+  assert.match(s.job.message, /正常退出（退出码 0）/);
+  assert.ok(s.job.finishedAt >= s.job.startedAt);
+  assert.deepEqual(frames.map((f) => f.phase), ['running', 'done'], '进度不靠界面轮询：两头各推一帧');
+  assert.ok(frames.every((f) => f.type === 'search:install'));
+  assert.equal(w.settleCalls(), 1, '装完要重探通路（probe.invalidate），否则按钮还挂着「未就绪」');
+  assert.equal(w.infos.length, 2, '启动与完成各留一行 info');
+});
+
+await checkAsync('in-6 装失败：非 0 退出带出退出码与输出尾巴，缓存作废让下一次重探', async () => {
+  const w = inWorld();
+  const frames = [];
+  w.inst.onEvent((f) => frames.push(f));
+  await w.inst.start();
+  await w.badInstall(Object.assign(new Error('winget 退出码 5'), { code: 5, stderr: 'Failed opening the requested file: 0x80070005 拒绝访问' }));
+  const s = w.inst.state();
+  assert.equal(s.phase, 'failed');
+  assert.equal(s.job.exitCode, 5);
+  assert.match(s.job.message, /winget 以非 0 退出（5）/);
+  assert.match(s.job.outTail, /0x80070005/, '把看得懂的那一行留给界面，别让用户对着「失败」两个字猜');
+  assert.deepEqual(frames.map((f) => f.phase), ['running', 'failed']);
+  assert.equal(w.settleCalls(), 1);
+  assert.ok(w.warns.length >= 1, '失败要 warn');
+  const before = w.versionCalls();
+  await w.inst.ready();
+  assert.equal(w.versionCalls(), before + 1, '失败即作废探测结论：PATH 可能刚被用户改好');
+});
+
+await checkAsync('in-7 tailOutput：winget 的 \\r 进度条折成行、只留最后 12 行、总长封顶 2000', async () => {
+  const many = Array.from({ length: 20 }, (_, i) => `L${i}`).join('\n');
+  assert.equal(IN.tailOutput(many), Array.from({ length: 12 }, (_, i) => `L${i + 8}`).join('\n'));
+  assert.doesNotMatch(IN.tailOutput('one\r\ntwo\rthree'), /\r/, '帧里不留 \r（原样进 SSE 会把界面进度条撑成一整行）');
+  assert.equal(IN.tailOutput('  \n\n\t\n'), '', '全空输出就是空串，不是「undefined」');
+  assert.equal(IN.tailOutput('x'.repeat(5000)).length, 2000);
+  assert.equal(IN.tailOutput(null), '');
+});
+
+await checkAsync('in-8 探测结论带 TTL：期内不重探（每帧 spawn 一次 winget 是白烧），过期后必须重探', async () => {
+  const w = inWorld();
+  await w.inst.ready();
+  await w.inst.ready();
+  assert.equal(w.versionCalls(), 1);
+  w.advance(IN.WINGET_DETECT_TTL_MS + 1);
+  await w.inst.ready();
+  assert.equal(w.versionCalls(), 2, 'App Installer 可能在这一段时间里被装上，缓存不能当永久结论');
+});
+
+await checkAsync('in-9 构造即拒（缺执行门面）与 idle 形状：装配漏接线不许悄悄变成「能装」', async () => {
+  assert.throws(() => IN.createInstaller({ probe: null }), /需要 execFileMod/);
+  assert.throws(() => IN.createInstaller(), /需要 execFileMod/);
+  const w = inWorld();
+  assert.deepEqual(w.inst.state(), { phase: 'idle', job: null }, '没起过安装就是 idle，界面据此不显示进度');
+  assert.equal(w.execCalls.length, 0, '构造本身不许 spawn 任何进程');
+  assert.deepEqual([...w.inst.PHASES], ['idle', 'running', 'done', 'failed'], '相位表就这四个，界面只按这四个出话');
+});
+
+await checkAsync('in-10 帧订阅：一个订阅者抛错不许吞掉别人的帧，退订要真的摘牌', async () => {
+  const w = inWorld();
+  const got = [];
+  const off = w.inst.onEvent(() => { throw new Error('订阅者炸了'); });
+  w.inst.onEvent((f) => got.push(f));
+  await w.inst.start();
+  assert.equal(got.length, 1, 'hub 里那一位抛错，这一位照收');
+  assert.equal(w.warns.filter((m) => /订阅者抛错/.test(m)).length, 1);
+  off();
+  assert.equal(w.inst.__peek().listeners, 1);
+  assert.equal(typeof w.inst.onEvent(null), 'function', '传错东西也别抛，退订函数照给');
 });
 
 console.log(`\n  ${passed}/${passed + failed} 通过`);

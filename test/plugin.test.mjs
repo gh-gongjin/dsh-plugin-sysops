@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
+import { statfsFixture } from './_helpers.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -113,7 +114,20 @@ function apiWorld(over = {}) {
   // 不传时保持原桩：add 恒抛 GUARD_DENY（rt-10 钉的就是它）。
   const ruleStore = over.ruleStore ?? { add: async (r) => { calls.push(['ruleAdd', r]); throw Object.assign(new Error('回收站不碰'), { code: 'SYSOPS_RULE_GUARD_DENY', why: '回收站不碰' }); }, remove: async () => ({}), toggle: async () => ({}), list: async () => over.ruleRows ?? ({ items: [], off: [] }), error: null };
   // probe 作为独立 dep（属搜索域，不混进 clean 的桩里）
-  const handler = API.createApiHandler({ collect, alerts, clean, probe, search, prefStore: prefsMod, ruleStore, caps: over.caps ?? { read: () => ({ storageDomain: prefsMod.available, timer: false, webServer: true, notifications: false, autostart: false }) }, logger: { warn: (m) => events.push(m) }, now: () => 1000, sseTimers: over.sseTimers });
+  // install（S12-⑤ 一键安装）：路由层只把"起不起"这一个动作转过去 —— start 的**实参个数**就是证人，
+  // 哪天有人把请求体转进去（前端能改装什么），rt-42 立刻红。
+  const install = {
+    ready: async () => { calls.push(['installReady']); return over.installReady ?? { can: true, detail: 'winget v1.8 在位', version: '1.8', bin: 'winget', packageId: 'voidtools.Everything', command: 'CMD-FIX', at: 1000, running: false }; },
+    state: () => { calls.push(['installState']); return over.installState ?? { phase: 'idle', job: null }; },
+    start: async function () { calls.push(['installStart', arguments.length]); if (over.installThrows) throw over.installThrows; return over.installStart ?? { phase: 'running', job: { phase: 'running', startedAt: 1000 } }; },
+    onEvent: (cb) => { install._cb = cb; return () => { install._cb = null; }; },
+  };
+  // ai（S12-C）：路由层只转发 planId，判定与快照反查都在 lib/clean/ai-advisor.js（那里的用例见 clean.test.mjs）
+  const ai = {
+    describe: async () => over.aiDescribe ?? ({ available: true, provider: 'fake', model: 'm-1', reason: '' }),
+    suggest: async (id) => { calls.push(['aiSuggest', id]); if (over.aiThrows) throw over.aiThrows; return over.aiResult ?? { planId: id, recommendations: [], dropped: { count: 0 } }; },
+  };
+  const handler = API.createApiHandler({ collect, alerts, clean, ai, probe, search, install, prefStore: prefsMod, ruleStore, caps: over.caps ?? { read: () => ({ storageDomain: prefsMod.available, timer: false, webServer: true, ai: true, notifications: false, autostart: false }) }, logger: { warn: (m) => events.push(m) }, now: () => 1000, sseTimers: over.sseTimers });
   const remote = over.remoteAddress ?? '127.0.0.1';
   const run = async (method, path, { body, query } = {}) => {
     const res = makeRes();
@@ -127,7 +141,7 @@ function apiWorld(over = {}) {
     await handler({ method: 'GET', url: new URL(`http://127.0.0.1${path}`), headers: {}, socket: { remoteAddress: remote } }, res);
     return res;
   };
-  return { run, stream, calls, events, collect, alerts, clean, search, handler };
+  return { run, stream, calls, events, collect, alerts, clean, search, install, handler };
 }
 
 await checkAsync('rt-1 GET /api/snapshot 返回采集快照全字段', async () => {
@@ -243,8 +257,10 @@ await checkAsync('rt-14 ROUTES 覆盖 spec §3 的每个端点，且写端点全
   for (const need of ['GET /api/snapshot', 'GET /api/stream', 'GET /api/prefs', 'POST /api/prefs', 'POST /api/collect/cadence',
     'POST /api/collect/source', 'POST /api/collect/visibility', 'POST /api/collect/restart', 'GET /api/alerts', 'POST /api/alerts/read',
     'POST /api/clean/scan', 'POST /api/clean/scan/stop', 'GET /api/clean/state', 'GET /api/clean/plan', 'POST /api/clean/apply', 'GET /api/clean/logs',
-    'GET /api/clean/unfinished', 'GET /api/rules', 'POST /api/rules/add', 'POST /api/rules/remove', 'POST /api/rules/toggle',
-    'GET /api/search', 'GET /api/search/probe', 'POST /api/search/reprobe', 'GET /api/caps', 'GET /api/quarantine']) {
+    'GET /api/clean/unfinished', 'GET /api/clean/ai', 'POST /api/clean/ai-suggest', 'GET /api/rules', 'POST /api/rules/add', 'POST /api/rules/remove', 'POST /api/rules/toggle',
+    'GET /api/search', 'GET /api/search/probe', 'POST /api/search/reprobe',
+    'GET /api/search/install/ready', 'GET /api/search/install/state', 'POST /api/search/install',
+    'GET /api/caps', 'GET /api/quarantine']) {
     assert.ok(keys.includes(need), `缺路由 ${need}`);
   }
   for (const k of keys) {
@@ -469,7 +485,7 @@ await checkAsync('rt-34 clean service 的 plan 出口只薄转发 planId 给 pla
     makeExecutor: () => ({ apply: async () => ({}) }),
     makeQuarantine: () => ({ stats: async () => ({ dirs: 0, files: 0, bytes: 0, oldest: null }) }),
     getPrefs: () => ({}),
-    fsMod: { statfsSync: () => ({ available: 0 }) },
+    fsMod: { statfsSync: () => statfsFixture() },
     osMod: { homedir: () => 'C:\\Users\\me' },
     pathMod: { join: (...p) => p.join('\\') },
     logger: { warn: () => {} },
@@ -490,7 +506,7 @@ await checkAsync('rt-35 GET /api/clean/plan 走真实 clean service 的 plan 转
     makeExecutor: () => ({ apply: async () => ({}) }),
     makeQuarantine: () => ({ stats: async () => ({ dirs: 0, files: 0, bytes: 0, oldest: null }) }),
     getPrefs: () => ({}),
-    fsMod: { statfsSync: () => ({ available: 0 }) },
+    fsMod: { statfsSync: () => statfsFixture() },
     osMod: { homedir: () => 'C:\\Users\\me' },
     pathMod: { join: (...p) => p.join('\\') },
     logger: { warn: () => {} },
@@ -569,6 +585,90 @@ await checkAsync('rt-37 POST /api/rules/add 不带 id → 宿主补 id 落库（
   assert.match(added.id, /^u-/, '宿主补的 id 要有可辨识前缀');
   const list = await w.run('GET', '/api/rules');
   assert.ok(list.json.data.items.some((x) => x.id === added.id), '补出的 id 要能在列表里查到');
+});
+
+/* ------------------------------------------------------------------ *
+ * AI 清理建议的路由级用例（S12-C，rt-38 起）
+ * ------------------------------------------------------------------ */
+
+await checkAsync('rt-38 GET /api/clean/ai 永远 200：不可用是事实不是错误，带 reason 原文回给界面', async () => {
+  const w = apiWorld({ aiDescribe: { available: false, provider: null, model: null, reason: '宿主没有提供模型调用能力（ctx.llm）' } });
+  const r = await w.run('GET', '/api/clean/ai');
+  assert.equal(r.status, 200);
+  assert.equal(r.json.data.available, false);
+  assert.match(r.json.data.reason, /ctx\.llm/, '界面显示的就是这句原话，不自己编一份');
+});
+
+await checkAsync('rt-39 POST /api/clean/ai-suggest 只转 planId：前端带来的 itemIds / paths 一概不进 advisor；缺 planId → 400', async () => {
+  const w = apiWorld();
+  const r = await w.run('POST', '/api/clean/ai-suggest', { body: { planId: 'p-7', itemIds: ['i-1'], path: 'C:\\Windows\\System32' } });
+  assert.equal(r.status, 200);
+  const call = w.calls.find((c) => c[0] === 'aiSuggest');
+  assert.deepEqual(call, ['aiSuggest', 'p-7'], '征求建议的入参只能是那一个 id（路径永不采信前端）');
+  const bad = await w.run('POST', '/api/clean/ai-suggest', { body: { planId: '  ' } });
+  assert.equal(bad.status, 400);
+  assert.equal(bad.json.error.code, 'INVALID_PARAM');
+  assert.equal(w.calls.filter((c) => c[0] === 'aiSuggest').length, 1, '缺 planId 时不该再去问模型');
+});
+
+await checkAsync('rt-40 AI 那族错误的 HTTP 语义：501 没能力 / 502 上游与坏产出 / 504 超时（都不得落回 200）', async () => {
+  for (const [code, status] of [['AI_UNAVAILABLE', 501], ['AI_UPSTREAM', 502], ['AI_NO_OUTPUT', 502], ['AI_BAD_OUTPUT', 502], ['AI_TIMEOUT', 504]]) {
+    const w = apiWorld({ aiThrows: Object.assign(new Error('模型侧的说明'), { code }) });
+    const r = await w.run('POST', '/api/clean/ai-suggest', { body: { planId: 'p-1' } });
+    assert.equal(r.status, status, `${code} 该翻成 ${status}，实得 ${r.status}`);
+    assert.equal(r.json.error.code, code);
+    assert.ok(w.events.some((m) => /接口异常/.test(m)), `${code} 必须留一行 warn（禁止静默 catch）`);
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * Everything 一键安装的路由级用例（S12-⑤，rt-41 起）
+ * ------------------------------------------------------------------ */
+
+await checkAsync('rt-41 安装的两个读端点永远 200 且原样带宿主的判断：can:false 是事实不是错误（按钮不亮的原因要给到界面）', async () => {
+  const w = apiWorld({ installReady: { can: false, detail: 'PATH 里没有 winget：这台机器没有 App Installer', version: '', command: '' } });
+  const r = await w.run('GET', '/api/search/install/ready');
+  assert.equal(r.status, 200, '探不到 winget 不许翻成 4xx/5xx：界面要的就是这句原话');
+  assert.equal(r.json.data.can, false);
+  assert.match(r.json.data.detail, /App Installer/);
+  const s = await w.run('GET', '/api/search/install/state');
+  assert.equal(s.status, 200);
+  assert.equal(s.json.data.phase, 'idle', '没装过就是 idle，不许编一个 running');
+  // 写端点只认 POST：GET 同一格 405 并点名 POST
+  const g = await w.run('GET', '/api/search/install');
+  assert.equal(g.status, 405);
+  assert.match(g.json.error.message, /POST/);
+});
+
+await checkAsync('rt-42 POST /api/search/install 转给 installer 的是零个实参：请求体里的任何字段都不进命令行', async () => {
+  const w = apiWorld();
+  const r = await w.run('POST', '/api/search/install', { body: { id: 'something-else', source: 'evil', path: 'C:\\Windows' } });
+  assert.equal(r.status, 200);
+  assert.deepEqual(w.calls.find((c) => c[0] === 'installStart'), ['installStart', 0], '装什么由宿主常量单点决定，前端一概转不进去');
+  assert.equal(r.json.data.job.phase, 'running');
+});
+
+await checkAsync('rt-43 安装的两种拒法有稳定 HTTP 语义：没 winget → 503、已经有一装在跑 → 409（都不得落回 200）', async () => {
+  for (const [code, status] of [['SEARCH_INSTALL_UNAVAILABLE', 503], ['SEARCH_INSTALL_BUSY', 409]]) {
+    const w = apiWorld({ installThrows: Object.assign(new Error('这一侧的中文说明'), { code }) });
+    const r = await w.run('POST', '/api/search/install', { body: {} });
+    assert.equal(r.status, status, `${code} 该翻成 ${status}，实得 ${r.status}`);
+    assert.equal(r.json.error.code, code);
+    assert.ok(w.events.some((m) => /接口异常/.test(m)), `${code} 必须留一行 warn（禁止静默 catch）`);
+  }
+});
+
+await checkAsync('rt-44 installer 的事件也挂进 SSE hub：search:install 帧一帧都不漏（界面不必轮询安装状态）', async () => {
+  const w = apiWorld();
+  const res = makeRes();
+  await w.stream(res);
+  assert.match(res.chunks.join(''), /^event: snapshot\ndata: /m);
+  w.install._cb({ type: 'search:install', phase: 'running', job: { phase: 'running', startedAt: 1000 } });
+  w.install._cb({ type: 'search:install', phase: 'done', job: { phase: 'done', exitCode: 0 } });
+  const text = res.chunks.join('');
+  assert.equal((text.match(/event: search:install/g) || []).length, 2, '两帧都要推出去：' + text.slice(-260));
+  assert.match(text, /"phase":"done"/);
+  res.emit('close');
 });
 
 console.log(`\n  ${passed}/${passed + failed} 通过`);

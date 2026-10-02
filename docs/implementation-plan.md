@@ -1,14 +1,12 @@
 # dsh-plugin-sysops 实现计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** 实现 dsh 插件 `dsh-plugin-sysops`：本机实时监控 + 两段式 C 盘清理 + 全盘文件搜索，安装后出现在左侧栏，代码组织与视觉规范对齐 `dsh-plugin-stock-analysis`。
 
 **Architecture:** 两半插件。宿主半边 `index.js` 探测能力（`storageDomain` / `timer` / `webServer`）、装配四个服务（采集 / 告警 / 清理 / 搜索）、注册 `/sysops` 前缀路由并以 SSE 推流；浏览器半边 `client.js` 零构建，经 `window.__ModuleLoader__` 加载，用 `require('react')` 渲染四页签并手工解 SSE 帧。"能不能删"单点收口在 `lib/clean/guard.js`；"删哪些"只认宿主侧快照里的 `planId + itemId`。
 
 **Tech Stack:** Node 24 ESM（零第三方依赖，只用 `node:os` / `node:fs` / `node:path` / `node:child_process` / `node:http`）、Windows 采集工具链（`typeperf` / `powershell` / `taskkill` / `reg query`）、React（由宿主提供，经 ModuleLoader 的 `require`）、原生 SVG 画曲线、`node:assert/strict` 自研测试 harness。
 
-**Spec:** `docs/superpowers/specs/2026-09-27-dsh-plugin-sysops-design.md`（已批准）。执行每个任务前读它对应章节；本计划与 spec 冲突时以 spec 为准，但第「计划期实测修正」一节的四条以本节为准并需回写 spec。
+**Spec:** `docs/design-spec.md`（已批准）。执行每个任务前读它对应章节；本计划与 spec 冲突时以 spec 为准，但第「计划期实测修正」一节的四条以本节为准并需回写 spec。
 
 ---
 
@@ -136,7 +134,7 @@ async function checkAsync(name, fn) {
 
 **异步用例必须写成 `await checkAsync('…', async () => { … })`，不能写 `check('…', async () => …)`。** 取证：`check()` 是同步 `try/catch`，收到 async 函数时它拿到的是一个**正在挂起的 Promise** —— `fn()` 在第一个 `await` 处就返回了，`try` 块里一条断言都没执行完，于是立刻计一次 PASS；之后的断言失败变成**没人 catch 的 rejection**，进程退出时才报（且 `passed` 已经虚高）。Task 8 预检实测：`svc-4`/`svc-8` 用 `check()` 挂 async 时，把实现里 `setVisible` 的 `clearProc()` 和 `dispose` 的 `buildRings()` **整行删掉照样 48/48**；换成 `await checkAsync` 后同样两处变异分别红在 svc-4、svc-8。这一条对已写好的 ①~⑤段没有影响（它们全是同步用例），但**任何后续任务的异步用例都按此写**。
 
-**关于 commit 步骤：** 本插件目录**已经是 git 仓库**（2026-09-27 用户授权后在 `F:\dsh-plugins\dsh-plugin-sysops` 单独 `git init`，工作分支 `feat/sysops-impl`，首提交 `60ea399`）。因此每个任务的收尾一律是：**测试全绿 → `git add` 本任务列出的文件 → 用该任务写好的提交信息 commit**。各任务正文里若还残留「无 git：本任务不提交」字样，按本段为准（那是授权前写的），执行时替换为提交。提交只含本任务 Files 里的路径，不许 `git add -A`；`tmp/`、`.superpowers/` 已在 `.gitignore` 里。
+**关于 commit 步骤：** 本插件目录**已经是 git 仓库**（2026-09-27 用户授权后在 `F:\dsh-plugins\dsh-plugin-sysops` 单独 `git init`，工作分支 `feat/sysops-impl`，首提交 `60ea399`）。因此每个任务的收尾一律是：**测试全绿 → `git add` 本任务列出的文件 → 用该任务写好的提交信息 commit**。各任务正文里若还残留「无 git：本任务不提交」字样，按本段为准（那是授权前写的），执行时替换为提交。提交只含本任务 Files 里的路径，不许 `git add -A`；`tmp/` 已在 `.gitignore` 里。
 
 **关于 ④~⑦段（Task 21~24）的 Step 3：** 这四段是界面任务，Step 3 给的是**行为契约、文案来源与逐块对应关系**，不贴完整 JSX —— 权威视觉源是已确认的 `prototype/index.html`（spec §6），实现时按对应 `panel-*` 逐块搬、类名前缀改 `so-`、颜色换成 token 的 `var()` 引用。判断这一类步骤是否到位的唯一标准是**该段用例全绿**：用例里写死的每一句文案、每一个类名与 `disabled`，就是 Step 3 没贴出来的那段 JSX 必须产出的东西。
 
@@ -2066,7 +2064,7 @@ const walk = (dir) => {
 walk(path.join(process.env.LOCALAPPDATA, 'Temp'));
 row('遍历 %LOCALAPPDATA%\\Temp 条目', entries, `${Date.now() - walkStart}ms`);
 fs.rmSync(root, { recursive: true, force: true });
-console.log('\n探针结束。偏差 >20% 时更新 docs/superpowers/specs/2026-09-27-dsh-plugin-sysops-design.md §1.2。\n');
+console.log('\n探针结束。偏差 >20% 时更新 docs/design-spec.md §1.2。\n');
 ```
 
 Run: `node scripts/probe-collect.mjs`
@@ -7769,7 +7767,7 @@ Expected: 同样 `90/90`。
 
 **Files:**
 - Read（只核对不改动）: `test/*.test.mjs` 全部 8 个、`lib/clean/guard.js` 的 `BRANCH_IDS`
-- Modify: `docs/superpowers/specs/2026-09-27-dsh-plugin-sysops-design.md`（§1.2 实测值、§3.2 写接口方法、§3.4 搜索端点、§8 未决项收口）
+- Modify: `docs/design-spec.md`（§1.2 实测值、§3.2 写接口方法、§3.4 搜索端点、§8 未决项收口）
 - Create: `tmp/preview.html`（离线预览页，只为门禁 ③④ 取证；`tmp/` 是兄弟插件的既有惯例，不进 `package.json` 也不被 `exports` 暴露）
 - Create: `tmp/react.js`、`tmp/react-dom.js`（从 `../dsh-plugin-stock-analysis/tmp/` 复制，MIT 许可，仅离线预览用）
 
@@ -7860,7 +7858,7 @@ Expected：输出六行 `{ name, value, unit, specValue, driftPct }`，脚本内
 1. **§1.2 实测代价表**：`typeperf -sc 3（常驻流式）` 一行改为定窗续采实况 ——「`-sc 0` 单样本即退出，改为每窗 `-sc 30 -si 1` 续采；暖身 218.9ms，窗口衔接处有约 1 个采样周期空隙」；新增一行「`Get-Counter -ComputerName .` 输出为 GBK 码页 → 解码代价已计入适配器，中文计数器名不再乱码」；`Get-CimInstance` 行的结论从「5s 刷新」改为「常驻单轮 ≈2.5s，故 `procIntervalSec` 默认 3s」。
 2. **§3.2 配置读写**：`PATCH /sysops/api/prefs`、`PATCH /sysops/api/rules` 两处方法名改为 `POST /sysops/api/prefs`、`POST /sysops/api/rules/add|toggle|remove`，并补一句理由：「宿主 webServer 只在 POST 下稳定给出 body，写接口统一 POST，GET 只读」（这是计划期实测修正，不是设计变更）。
 3. **§3.4 搜索**：`GET /sysops/api/search?q&mode&limit` 保留，补 `POST /sysops/api/search/reprobe`（缓存 30s，改配置后需显式失效）；并加一行状态说明：「本机未装 Everything（`C:\Program Files\Everything` 不存在、`where es.exe` 无命中、`curl 127.0.0.1:3417` 拒连），故两个 Everything 适配器标『未在本机验证』，`walk` 是当前唯一实跑通路」。
-4. **§8 未决项表**：三行全部收口 —— 内置清理规则「已定：只收本机实测存在的路径，共 12 条（2026-09-27 复核把 `WER` 剔了，见 Task 11 Step 3 的现采块）」；暂存目录「已定：默认落点 `%LOCALAPPDATA%\dsh-plugin-sysops\quarantine`（由宿主展开成绝对路径后放进 Task 19 载荷 `defaults`；prefs 只存展开后的绝对路径，`prefq-1` 拒未展开形），界面渲染 prefs 实配值、无实配时回落 `defaults`，原型里的 `C:\Users\gongj\.dsh-quarantine\2026-09-27\` 是演示串」；曲线保留窗口「已定：30min，ring 内存实测 4 源 × 1800 点 < 1MB」；末行 spec 位置「保留在 `docs/superpowers/specs/`，不与兄弟插件的 `docs/design-spec.md` 统一」。
+4. **§8 未决项表**：三行全部收口 —— 内置清理规则「已定：只收本机实测存在的路径，共 12 条（2026-09-27 复核把 `WER` 剔了，见 Task 11 Step 3 的现采块）」；暂存目录「已定：默认落点 `%LOCALAPPDATA%\dsh-plugin-sysops\quarantine`（由宿主展开成绝对路径后放进 Task 19 载荷 `defaults`；prefs 只存展开后的绝对路径，`prefq-1` 拒未展开形），界面渲染 prefs 实配值、无实配时回落 `defaults`，原型里的 `C:\Users\gongj\.dsh-quarantine\2026-09-27\` 是演示串」；曲线保留窗口「已定：30min，ring 内存实测 4 源 × 1800 点 < 1MB」；末行 spec 位置「已定：`docs/design-spec.md`，与兄弟插件统一（2026-09-30 起弃用 superpowers 目录约定）」。
 
 - [ ] **Step 8: 收尾（本工作区不是 git 仓库）**
 

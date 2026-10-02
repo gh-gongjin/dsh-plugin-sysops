@@ -150,7 +150,7 @@ const hitRow = (t, ruleId = 'r1') => ({
   metric: 'cpu',
   t,
   value: 90,
-  note: '冷却 10 分钟 · 落点：监控页时间线',
+  note: '冷却 10 分钟 · 落点：触发记录页',
 });
 
 await checkAsync('hit-1 append 后 list 倒序返回，且落库行带 hitId', async () => {
